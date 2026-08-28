@@ -1,44 +1,35 @@
-# Binance Momentum Scanner V2
+# Binance Futures Momentum Scanner V4
 
-Telegram'a **yükseliş başlarken** erken momentum alarmı gönderen Binance USDⓈ-M Futures tarayıcısı.
+V4 iki ayrı radar çalıştırır:
 
-## V2'de ne değişti?
+1. **Süreklilik teyitli momentum**: Tüm erken adaylar arka planda sessiz izlenir. Telegram yalnızca hareket 15 saniye arayla 3 kontrolde devam eder, hacim/agresif alış korunur ve giriş kalitesi eşiği geçilirse bildirim gönderir.
+2. **Gainers radarı**: Aktif ve minimum hacmi geçen USDT perpetual kontratları 24 saatlik yüzde değişime göre sıralanır. TOP 50'ye sonradan giren coin bildirilir. Ayrıca yaklaşık 10 dakikada 25 veya daha fazla sıra yükselip ilk 100'e ulaşan coinler ayrı erken uyarı üretir.
 
-- 2026 Binance WebSocket ayrımına geçirildi:
-  - `/market` = ticker, aggTrade, liquidation
-  - `/public` = bookTicker
-- 1 dakikalık mum beklemek yerine `aggTrade` akışını yaklaşık 100ms güncellemelerle izler.
-- 10 sn / 30 sn / 60 sn fiyat ivmesi hesaplar.
-- 10 sn / 30 sn / 60 sn **hacim hızı** ölçer. Coinin normal 1 dakikalık hacmiyle kıyaslar.
-- Agresif alış oranını (`buyer is maker = false`) takip eder.
-- En iyi bid/ask miktarından basit order-book baskısı ve spread ölçer.
-- BTC'ye göre 30 saniyelik göreceli güç hesaplar.
-- Short liquidation akışını takip eder.
-- Gerçek adaylarda 5 dakikalık Open Interest istatistiğini kontrol eder.
-- Çok uzamış hareketleri kovalamamak için ceza uygular.
-- Sinyal sonrası 1/3/5/15/30/60 dakikalık sonuçları SQLite'a kaydeder.
-- Telegram komutları:
-  - `/status`
-  - `/top`
-  - `/test`
-  - `/help`
+## Spam koruması
+- Bot açıldığında zaten TOP 50'de bulunan coinler topluca bildirilmez; ilk sıralama yalnızca başlangıç referansıdır.
+- Aynı gainers olayı için varsayılan cooldown 30 dakikadır.
+- Bir coin TOP 50'den çıkıp tekrar girerse yeni giriş bildirimi için en az 5 dakika dışarıda kalması gerekir.
+- Bir coin aynı kontrolde hem TOP 50'ye girmiş hem hızlı yükselmişse iki mesaj yerine öncelikle giriş mesajı gönderilir.
 
-## Railway güncelleme
+## Varsayılan momentum ayarları
+- Sessiz aday skoru: 58+
+- Süreklilik: 15 saniye arayla 3 başarılı kontrol
+- Giriş kalitesi: 76+
+- Teyitli momentum cooldown: 20 dakika
 
-Mevcut Railway projesinde Root Directory zaten `/binance_momentum_bot` ise bunu değiştirmeyin.
+## Varsayılan gainers ayarları
+- `GAINERS_TOP_N=50`
+- `GAINERS_POLL_SECONDS=30`
+- `GAINERS_RAPID_WINDOW_SECONDS=600`
+- `GAINERS_RAPID_MIN_POSITIONS=25`
+- `GAINERS_RAPID_MAX_RANK=100`
+- `GAINERS_ALERT_COOLDOWN_SECONDS=1800`
+- `GAINERS_REENTRY_MIN_OUT_SECONDS=300`
 
-GitHub repository'nizdeki eski `binance_momentum_bot` klasörünün içeriğini bu klasördeki dosyalarla değiştirin. `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` GitHub'a yazılmaz; Railway Variables altında kalır.
+## Telegram komutları
+- `/status` — canlı bağlantı, momentum ve gainers ayarları
+- `/top` — şu an ısınan ilk 10 coin (alarm değildir)
+- `/gainers` — güncel ilk 20 Futures gainers
+- `/test` — Telegram testi
 
-GitHub değişikliği sonrası Railway otomatik deploy yapmalıdır. Başlangıç mesajında `Momentum Scanner V2 başladı` görmelisiniz.
-
-## İlk test
-
-Telegram'da:
-
-- `/test` -> bot cevap vermeli
-- `/status` -> ticker/book/agg akışlarının yaşını göstermeli; normalde 90 sn altında olmalı
-- `/top` -> henüz alarm üretmeyen ama o anda ısınan coinleri göstermeli
-
-## Önemli
-
-Bu yazılım piyasa tarama/uyarı aracıdır. Kâr garantisi vermez ve otomatik emir açmaz. Özellikle Futures/kaldıraç işlemlerinde sinyal istatistiklerini yeterli örneklemde ölçmeden otomatik trade'e çevirmeyin.
+Railway'deki mevcut `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` ve Root Directory ayarları değişmeden kullanılabilir.

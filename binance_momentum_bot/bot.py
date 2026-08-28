@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from statistics import mean
-from typing import Deque, Dict, Optional, List, Tuple
+from typing import Deque, Dict, Optional, List, Tuple, Set
 
 import aiohttp
 from dotenv import load_dotenv
@@ -28,10 +28,24 @@ MIN_24H_QUOTE_VOLUME = float(os.getenv("MIN_24H_QUOTE_VOLUME", "5000000"))
 EARLY_SCORE = int(os.getenv("EARLY_SCORE", "58"))
 STRONG_SCORE = int(os.getenv("STRONG_SCORE", "74"))
 EXTREME_SCORE = int(os.getenv("EXTREME_SCORE", "88"))
-COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "180"))
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1200"))
+CONFIRM_INTERVAL_SECONDS = int(os.getenv("CONFIRM_INTERVAL_SECONDS", "15"))
+CONFIRM_REQUIRED = int(os.getenv("CONFIRM_REQUIRED", "3"))
+CANDIDATE_TTL_SECONDS = int(os.getenv("CANDIDATE_TTL_SECONDS", "120"))
+CONFIRM_MIN_SCORE = int(os.getenv("CONFIRM_MIN_SCORE", "64"))
+ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "76"))
 BOOTSTRAP_CANDLES = int(os.getenv("BOOTSTRAP_CANDLES", "30"))
 AGGTRADE_CHUNK = int(os.getenv("AGGTRADE_CHUNK", "80"))
 EVAL_MIN_INTERVAL = float(os.getenv("EVAL_MIN_INTERVAL", "1.0"))
+
+# Gainers radar. Baseline is built silently on startup; alerts only fire on later entries/moves.
+GAINERS_TOP_N = int(os.getenv("GAINERS_TOP_N", "50"))
+GAINERS_POLL_SECONDS = int(os.getenv("GAINERS_POLL_SECONDS", "30"))
+GAINERS_RAPID_WINDOW_SECONDS = int(os.getenv("GAINERS_RAPID_WINDOW_SECONDS", "600"))
+GAINERS_RAPID_MIN_POSITIONS = int(os.getenv("GAINERS_RAPID_MIN_POSITIONS", "25"))
+GAINERS_RAPID_MAX_RANK = int(os.getenv("GAINERS_RAPID_MAX_RANK", "100"))
+GAINERS_ALERT_COOLDOWN_SECONDS = int(os.getenv("GAINERS_ALERT_COOLDOWN_SECONDS", "1800"))
+GAINERS_REENTRY_MIN_OUT_SECONDS = int(os.getenv("GAINERS_REENTRY_MIN_OUT_SECONDS", "300"))
 
 # Early-momentum gates. Defaults are intentionally sensitive; use /top to inspect near-misses.
 MIN_CHG_10S = float(os.getenv("MIN_CHG_10S", "0.10"))
@@ -45,7 +59,7 @@ DB_PATH = os.getenv("DB_PATH", "signals.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v2")
+log = logging.getLogger("momentum-v4")
 
 
 @dataclass
@@ -93,6 +107,13 @@ class SymbolState:
     minute_close: float = 0.0
     minute_quote: float = 0.0
     minute_buy_quote: float = 0.0
+    candidate_since: float = 0.0
+    candidate_last_check: float = 0.0
+    candidate_checks: int = 0
+    candidate_passes: int = 0
+    candidate_prices: Deque[float] = field(default_factory=lambda: deque(maxlen=4))
+    candidate_scores: Deque[int] = field(default_factory=lambda: deque(maxlen=4))
+    buy_signal_ts: float = 0.0
 
 
 @dataclass
@@ -118,6 +139,15 @@ stream_health = {
 }
 trade_event_count = 0
 telegram_offset = 0
+
+# Gainers state
+gainers_initialized = False
+gainers_current_top: Set[str] = set()
+gainers_prev_rank: Dict[str, int] = {}
+gainers_rank_history: Dict[str, Deque[Tuple[float, int, float]]] = defaultdict(lambda: deque(maxlen=80))
+gainers_last_entry_alert: Dict[str, float] = defaultdict(float)
+gainers_last_rapid_alert: Dict[str, float] = defaultdict(float)
+gainers_left_top_at: Dict[str, float] = defaultdict(float)
 
 
 def pct_change(new: float, old: float) -> float:
@@ -478,6 +508,58 @@ def classify(score: int, m: dict):
     return 1, "🟡 YÜKSELİŞ BAŞLIYOR"
 
 
+def reset_candidate(st: SymbolState):
+    st.candidate_since = 0.0
+    st.candidate_last_check = 0.0
+    st.candidate_checks = 0
+    st.candidate_passes = 0
+    st.candidate_prices.clear()
+    st.candidate_scores.clear()
+
+
+def continuity_pass(m: dict, score: int) -> bool:
+    return (
+        score >= CONFIRM_MIN_SCORE
+        and m["chg30"] >= 0.12
+        and m["chg60"] >= 0.20
+        and m["flow30"] >= 1.5
+        and m["buy30"] >= 0.60
+        and m["spread"] <= min(MAX_SPREAD_PCT, 0.30)
+        and not m["extended"]
+    )
+
+
+def entry_quality(m: dict, score: int, st: SymbolState) -> int:
+    q = int(score * 0.68)
+    prices = list(st.candidate_prices)
+    if len(prices) >= 3 and prices[-1] > prices[-2] > prices[-3]:
+        q += 10
+    elif len(prices) >= 2 and prices[-1] > prices[-2]:
+        q += 5
+    if m["buy30"] >= 0.68:
+        q += 6
+    elif m["buy30"] >= 0.62:
+        q += 3
+    if m["flow30"] >= 3.0:
+        q += 5
+    elif m["flow30"] >= 2.0:
+        q += 3
+    if m["book_imbalance"] >= 0.60:
+        q += 4
+    if m["rel30"] >= 0.20:
+        q += 3
+    if m["breakout"]:
+        q += 4
+    if m.get("oi5") is not None:
+        if m["oi5"] >= 0.5:
+            q += 4
+        elif m["oi5"] <= -1.0:
+            q -= 6
+    if m["chg30"] > 1.8 or m["chg5"] > 4.0:
+        q -= 8
+    return max(0, min(100, q))
+
+
 async def get_oi_5m(session, symbol: str) -> Optional[float]:
     try:
         d = await fetch_json(session, "/futures/data/openInterestHist", {"symbol": symbol, "period": "5m", "limit": 2})
@@ -491,33 +573,25 @@ async def get_oi_5m(session, symbol: str) -> Optional[float]:
 
 
 def build_message(m: dict):
-    squeeze = "🔥 Short liquidation: " + fmt_money(m["short_liq"]) + " USDT" if m["short_liq"] > 0 else "⚪ Short liquidation: yok/çok düşük"
     oi_line = "⚪ OI 5 dk: veri yok" if m.get("oi5") is None else f"📈 OI 5 dk: {m['oi5']:+.2f}%"
-    breakout_line = "🚀 15 dk tepe KIRILDI" if m["breakout"] else "🎯 15 dk tepe henüz kırılmadı"
-    chase_line = "⚠️ Hareket uzamış olabilir" if m["extended"] else "✅ Henüz aşırı uzamış görünmüyor"
+    breakout_line = "🚀 15 dk tepe üstünde" if m["breakout"] else "🎯 15 dk tepe henüz kırılmadı"
     return (
-        f"{m['level']}\n\n"
+        "🟢 SÜREKLİLİK TEYİTLİ MOMENTUM\n\n"
         f"🪙 {m['symbol']}\n"
         f"💰 Fiyat: {fmt_price(m['price'])}\n\n"
-        f"⚡ 10 sn: {m['chg10']:+.2f}%\n"
         f"⚡ 30 sn: {m['chg30']:+.2f}%\n"
         f"🔥 60 sn: {m['chg60']:+.2f}%\n"
-        f"📈 5 dk: {m['chg5']:+.2f}%\n"
-        f"📈 15 dk: {m['chg15']:+.2f}%\n"
-        f"🌐 24 saat: {m['chg24']:+.2f}%\n\n"
-        f"💥 Hacim hızı 10 sn: {m['flow10']:.1f}x\n"
-        f"💥 Hacim hızı 30 sn: {m['flow30']:.1f}x\n"
-        f"💵 Son 30 sn hacim: {fmt_money(m['q30'])} USDT\n"
-        f"📊 Normal 1 dk hacim: {fmt_money(m['avg1m'])} USDT\n\n"
-        f"🟢 Agresif alış (30 sn): %{m['buy30']*100:.1f}\n"
+        f"📈 5 dk: {m['chg5']:+.2f}%\n\n"
+        f"💥 Hacim akışı 30 sn: {m['flow30']:.1f}x\n"
+        f"🟢 Agresif alış: %{m['buy30']*100:.1f}\n"
         f"📚 Bid baskısı: %{m['book_imbalance']*100:.1f}\n"
-        f"↔️ Spread: %{m['spread']:.3f}\n"
-        f"₿ BTC 30 sn: {m['btc30']:+.2f}% | Göreceli: {m['rel30']:+.2f}%\n"
-        f"{squeeze}\n"
+        f"₿ BTC'ye göre güç: {m['rel30']:+.2f}%\n"
         f"{oi_line}\n"
-        f"{breakout_line}\n"
-        f"{chase_line}\n\n"
-        f"⭐ Momentum Skoru: {m['score']}/100\n"
+        f"{breakout_line}\n\n"
+        f"✅ {m['confirm_passes']}/{CONFIRM_REQUIRED} süreklilik kontrolü geçti\n"
+        f"⭐ Momentum: {m['score']}/100\n"
+        f"🎯 Giriş kalitesi: {m['entry_quality']}/100\n\n"
+        "Not: Kural tabanlı momentum uyarısıdır; kâr garantisi veya otomatik emir değildir.\n"
         f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
     )
 
@@ -534,36 +608,81 @@ async def evaluate(session, symbol: str):
         if not m:
             return
         score = score_metrics(m)
-        if not qualifies(m, score):
+
+        # Aday oluşumu sessizdir: Telegram bildirimi gönderilmez.
+        if st.candidate_since == 0.0:
+            if not qualifies(m, score):
+                return
+            st.candidate_since = now
+            st.candidate_last_check = now
+            st.candidate_checks = 1
+            st.candidate_passes = 1 if continuity_pass(m, score) else 0
+            st.candidate_prices.append(m["price"])
+            st.candidate_scores.append(score)
+            log.info("CANDIDATE %s score=%d", symbol, score)
             return
 
-        # OI is confirmation, not a gate; fetch only for real candidates.
+        # Zaman aşımı veya belirgin bozulma: adayı sessizce bırak.
+        if now - st.candidate_since > CANDIDATE_TTL_SECONDS:
+            reset_candidate(st)
+            return
+        if m["chg30"] < -0.20 or m["buy30"] < 0.50 or m["flow30"] < 0.8:
+            reset_candidate(st)
+            return
+
+        # Sadece belirlenen aralıkta süreklilik kontrolü yap.
+        if now - st.candidate_last_check < CONFIRM_INTERVAL_SECONDS:
+            return
+        st.candidate_last_check = now
+        st.candidate_checks += 1
+        st.candidate_prices.append(m["price"])
+        st.candidate_scores.append(score)
+
+        if continuity_pass(m, score):
+            # Fiyatın en azından önceki kontrolden daha aşağıda olmamasını iste.
+            prices = list(st.candidate_prices)
+            price_ok = len(prices) < 2 or prices[-1] >= prices[-2] * 0.999
+            if price_ok:
+                st.candidate_passes += 1
+        else:
+            # Bir zayıf kontrol toleransı; art arda bozulma adayı sonlandırır.
+            if st.candidate_checks - st.candidate_passes >= 2:
+                reset_candidate(st)
+                return
+
+        if st.candidate_passes < CONFIRM_REQUIRED:
+            return
+
+        # Son teyitte OI alınır; tüm adaylar için REST tüketilmez.
         oi5 = await get_oi_5m(session, symbol)
         m["oi5"] = oi5
         if oi5 is not None:
             if oi5 >= 1.0:
                 score = min(100, score + 4)
             elif oi5 <= -1.5:
-                score = max(0, score - 3)
+                score = max(0, score - 4)
         m["score"] = score
+        quality = entry_quality(m, score, st)
+        m["entry_quality"] = quality
+        m["confirm_passes"] = st.candidate_passes
+        m["level"] = "CONFIRMED"
 
-        level_num, level_name = classify(score, m)
-        m["level"] = level_name
-        now = time.time()
-
-        # Spam guard: allow immediate re-alert on higher level, or a clearly higher price after cooldown.
-        if now - st.last_alert_ts < COOLDOWN_SECONDS and level_num <= st.last_level:
+        # Sadece yüksek kaliteli ve aşırı uzamamış devam hareketi Telegram'a gider.
+        if quality < ENTRY_MIN_SCORE or m["extended"]:
+            reset_candidate(st)
             return
-        if st.last_alert_price and level_num == st.last_level and pct_change(m["price"], st.last_alert_price) < 0.8:
+        if now - st.buy_signal_ts < COOLDOWN_SECONDS:
+            reset_candidate(st)
             return
 
+        st.buy_signal_ts = now
         st.last_alert_ts = now
         st.last_alert_price = m["price"]
-        st.last_level = level_num
         signal_id = save_signal(m)
         pending_outcomes.append(PendingOutcome(signal_id, symbol, m["price"], now))
-        log.info("SIGNAL %s score=%d chg30=%.2f flow30=%.2f buy30=%.2f", symbol, score, m["chg30"], m["flow30"], m["buy30"])
+        log.info("CONFIRMED %s momentum=%d quality=%d", symbol, score, quality)
         await telegram_send(session, build_message(m), symbol=symbol)
+        reset_candidate(st)
     finally:
         st.eval_inflight = False
 
@@ -759,6 +878,162 @@ def signal_count_today():
         return 0
 
 
+
+def gainers_ranked():
+    """Rank active, liquid USDT perpetuals by 24h price change."""
+    rows = []
+    for sym in symbols:
+        st = states[sym]
+        if st.quote_volume24 < MIN_24H_QUOTE_VOLUME or not st.last_price:
+            continue
+        rows.append((st.pct24, sym, st))
+    rows.sort(key=lambda x: x[0], reverse=True)
+    return rows
+
+
+def build_gainers_entry_message(symbol: str, rank: int, prev_rank: Optional[int]):
+    st = states[symbol]
+    m = compute_metrics(symbol)
+    prior = f"#{prev_rank}" if prev_rank else "TOP {0} dışı".format(GAINERS_TOP_N)
+    lines = [
+        "🏆 GAINERS LİSTESİNE GİRDİ",
+        "",
+        f"🪙 {symbol}",
+        f"📈 24s yükseliş: {st.pct24:+.2f}%",
+        "",
+        f"🏅 Yeni sıra: #{rank}",
+        f"⬆️ Önceki sıra: {prior}",
+    ]
+    if m:
+        score = score_metrics(m)
+        lines += [
+            "",
+            f"⚡ 30 sn: {m['chg30']:+.2f}%",
+            f"📈 5 dk: {m['chg5']:+.2f}%",
+            f"📈 15 dk: {m['chg15']:+.2f}%",
+            f"💥 Hacim akışı: {m['flow30']:.1f}x",
+            f"🟢 Agresif alış: %{m['buy30']*100:.0f}",
+            f"⭐ Anlık momentum: {score}/100",
+        ]
+        if states[symbol].buy_signal_ts and time.time() - states[symbol].buy_signal_ts <= 900:
+            lines.append("✅ Süreklilik teyitli momentum da mevcut")
+    lines += ["", f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"]
+    return "\n".join(lines)
+
+
+def build_gainers_rapid_message(symbol: str, old_rank: int, new_rank: int, old_pct: float):
+    st = states[symbol]
+    m = compute_metrics(symbol)
+    climbed = old_rank - new_rank
+    lines = [
+        "🚀 GAINERS SIRALAMASINDA HIZLI YÜKSELİŞ",
+        "",
+        f"🪙 {symbol}",
+        f"📈 24s: {st.pct24:+.2f}% (önce {old_pct:+.2f}%)",
+        "",
+        f"⬆️ Yaklaşık {GAINERS_RAPID_WINDOW_SECONDS//60} dk önce: #{old_rank}",
+        f"🏅 Şimdi: #{new_rank}",
+        f"🚀 Yükseldiği sıra: {climbed}",
+    ]
+    if m:
+        score = score_metrics(m)
+        lines += [
+            "",
+            f"⚡ 30 sn: {m['chg30']:+.2f}%",
+            f"📈 5 dk: {m['chg5']:+.2f}%",
+            f"💥 Hacim akışı: {m['flow30']:.1f}x",
+            f"🟢 Agresif alış: %{m['buy30']*100:.0f}",
+            f"⭐ Anlık momentum: {score}/100",
+        ]
+        if states[symbol].buy_signal_ts and time.time() - states[symbol].buy_signal_ts <= 900:
+            lines.append("✅ Süreklilik teyitli momentum da mevcut")
+    lines += ["", f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"]
+    return "\n".join(lines)
+
+
+async def gainers_loop(session):
+    """Alert on TOP-N entry and unusually fast rank climbs without startup spam."""
+    global gainers_initialized, gainers_current_top, gainers_prev_rank
+    while not stop_event.is_set():
+        try:
+            ranked = gainers_ranked()
+            if not ranked:
+                await asyncio.sleep(GAINERS_POLL_SECONDS)
+                continue
+
+            now = time.time()
+            rank_map = {sym: i + 1 for i, (_, sym, _) in enumerate(ranked)}
+            pct_map = {sym: pct for pct, sym, _ in ranked}
+            top_now = set(sym for _, sym, _ in ranked[:GAINERS_TOP_N])
+
+            # Keep ~10m rank history for rapid-climb detection.
+            for sym, rank in rank_map.items():
+                hist = gainers_rank_history[sym]
+                hist.append((now, rank, pct_map[sym]))
+                cutoff = now - max(GAINERS_RAPID_WINDOW_SECONDS * 2, 1200)
+                while hist and hist[0][0] < cutoff:
+                    hist.popleft()
+
+            if not gainers_initialized:
+                gainers_current_top = top_now
+                gainers_prev_rank = rank_map
+                gainers_initialized = True
+                log.info("Gainers baseline ready: TOP %d", GAINERS_TOP_N)
+                await asyncio.sleep(GAINERS_POLL_SECONDS)
+                continue
+
+            # Mark exits; a re-entry alert requires some time outside the list.
+            for sym in gainers_current_top - top_now:
+                gainers_left_top_at[sym] = now
+
+            # TOP-N new entry alerts.
+            entrants = sorted(top_now - gainers_current_top, key=lambda x: rank_map.get(x, 99999))
+            for sym in entrants:
+                left_at = gainers_left_top_at.get(sym, 0.0)
+                first_seen_entry = gainers_last_entry_alert.get(sym, 0.0) == 0.0
+                was_out_long_enough = left_at == 0.0 or now - left_at >= GAINERS_REENTRY_MIN_OUT_SECONDS
+                cooldown_ok = now - gainers_last_entry_alert.get(sym, 0.0) >= GAINERS_ALERT_COOLDOWN_SECONDS
+                if cooldown_ok and (first_seen_entry or was_out_long_enough):
+                    await telegram_send(session, build_gainers_entry_message(sym, rank_map[sym], gainers_prev_rank.get(sym)), symbol=sym)
+                    gainers_last_entry_alert[sym] = now
+                    log.info("GAINERS ENTRY %s rank=%d pct=%.2f", sym, rank_map[sym], pct_map[sym])
+
+            # Rapid rank climb alerts. Compare with a sample at least WINDOW seconds old.
+            for sym, new_rank in rank_map.items():
+                if new_rank > GAINERS_RAPID_MAX_RANK or pct_map[sym] <= 0:
+                    continue
+                hist = gainers_rank_history[sym]
+                old = None
+                target = now - GAINERS_RAPID_WINDOW_SECONDS
+                for sample in hist:
+                    if sample[0] <= target:
+                        old = sample
+                    else:
+                        break
+                if old is None:
+                    continue
+                _, old_rank, old_pct = old
+                climbed = old_rank - new_rank
+                if climbed < GAINERS_RAPID_MIN_POSITIONS:
+                    continue
+                if now - gainers_last_rapid_alert.get(sym, 0.0) < GAINERS_ALERT_COOLDOWN_SECONDS:
+                    continue
+                # If the same cycle already announced TOP-N entry, avoid duplicate Telegram spam.
+                if sym in entrants and now - gainers_last_entry_alert.get(sym, 0.0) < 5:
+                    continue
+                await telegram_send(session, build_gainers_rapid_message(sym, old_rank, new_rank, old_pct), symbol=sym)
+                gainers_last_rapid_alert[sym] = now
+                log.info("GAINERS RAPID %s %d->%d pct=%.2f", sym, old_rank, new_rank, pct_map[sym])
+
+            gainers_current_top = top_now
+            gainers_prev_rank = rank_map
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("Gainers loop error: %s", e)
+        await asyncio.sleep(GAINERS_POLL_SECONDS)
+
+
 async def telegram_command_loop(session):
     global telegram_offset
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -786,7 +1061,9 @@ async def telegram_command_loop(session):
                         f"⚡ AggTrade olayları: {trade_event_count:,}\n"
                         f"🚨 Son 24s sinyal: {signal_count_today()}\n"
                         f"📡 ticker: {age('ticker'):.0f} sn | book: {age('book'):.0f} sn | agg: {age('agg'):.0f} sn\n"
-                        f"⭐ Alarm eşiği: {EARLY_SCORE}+"
+                        f"⭐ Aday eşiği: {EARLY_SCORE}+\n"
+                        f"🎯 Teyit: {CONFIRM_REQUIRED} kontrol × {CONFIRM_INTERVAL_SECONDS} sn | giriş kalitesi {ENTRY_MIN_SCORE}+\n"
+                        f"🏆 Gainers: TOP {GAINERS_TOP_N} giriş + {GAINERS_RAPID_WINDOW_SECONDS//60} dk’da {GAINERS_RAPID_MIN_POSITIONS}+ sıra yükseliş"
                     )
                 elif text == "/top":
                     rows = current_top(10)
@@ -798,15 +1075,26 @@ async def telegram_command_loop(session):
                             lines.append(f"{score:>3}/100  {sym} | 30sn {m['chg30']:+.2f}% | flow {m['flow30']:.1f}x | buy %{m['buy30']*100:.0f}")
                         lines.append("\nNot: /top alarm değil; alarm eşiğine yaklaşanları gösterir.")
                         await telegram_send(session, "\n".join(lines))
+                elif text == "/gainers":
+                    ranked = gainers_ranked()[:min(GAINERS_TOP_N, 20)]
+                    if not ranked:
+                        await telegram_send(session, "Gainers verisi henüz hazır değil.")
+                    else:
+                        lines = [f"🏆 FUTURES GAINERS — İlk {len(ranked)}\n"]
+                        for i, (pct, sym, _) in enumerate(ranked, 1):
+                            lines.append(f"#{i:<2} {sym}  {pct:+.2f}%")
+                        lines.append(f"\nOtomatik yeni giriş alarm bölgesi: TOP {GAINERS_TOP_N}")
+                        await telegram_send(session, "\n".join(lines))
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status ve /top kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status, /top ve /gainers kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V2\n\n"
+                        "🤖 Momentum Scanner V4 — Momentum + Gainers\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
+                        "/gainers — güncel Futures gainers\n"
                         "/test — Telegram testi\n\n"
-                        "Alarm geldiğinde 10/30/60 sn fiyat ivmesi, hacim hızı, agresif alış, order-book baskısı, BTC göreceli güç, liquidation ve OI birlikte gösterilir."
+                        "Momentum adayları sessiz izlenir. Telegram yalnızca süreklilik teyidinde, gainers TOP bölgesine yeni girişte veya hızlı sıra yükselişinde bildirim gönderir."
                     )
         except asyncio.CancelledError:
             raise
@@ -832,18 +1120,20 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V2 başladı\n\n"
+                f"✅ Momentum Scanner V4 başladı\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade ile erken momentum taraması\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
-                f"⭐ Erken alarm skoru: {EARLY_SCORE}+\n\n"
-                f"Komutlar: /status  /top  /test"
+                f"⭐ Sessiz aday skoru: {EARLY_SCORE}+\n"
+                f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | giriş kalitesi {ENTRY_MIN_SCORE}+\n\n"
+                f"🏆 Gainers: TOP {GAINERS_TOP_N} + hızlı sıra yükselişi\n\n"
+                f"Komutlar: /status  /top  /gainers  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
         tasks = [
             ticker_ws(session), book_ws(session), liquidation_ws(session),
-            outcome_loop(), reset_levels_loop(), telegram_command_loop(session),
+            outcome_loop(), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         await asyncio.gather(*tasks)
