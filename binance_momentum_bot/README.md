@@ -1,46 +1,44 @@
-# Binance Futures Momentum Scanner -> Telegram
+# Binance Momentum Scanner V2
 
-Binance USDⓈ-M Futures'taki aktif USDT perpetual kontratlarını izler. 1 dakikalık fiyat ivmesi, göreceli hacim (RVOL), taker-buy oranı, 15 dakikalık breakout ve aday sinyallerde Open Interest değişimini birleştirerek Telegram alarmı üretir.
+Telegram'a **yükseliş başlarken** erken momentum alarmı gönderen Binance USDⓈ-M Futures tarayıcısı.
 
-## 1) Telegram botunu oluştur
+## V2'de ne değişti?
 
-Telegram'da `@BotFather` ile yeni bot oluşturup token al. Bota bir mesaj gönder. Chat ID'ni öğrenip `.env` dosyasına yaz.
+- 2026 Binance WebSocket ayrımına geçirildi:
+  - `/market` = ticker, aggTrade, liquidation
+  - `/public` = bookTicker
+- 1 dakikalık mum beklemek yerine `aggTrade` akışını yaklaşık 100ms güncellemelerle izler.
+- 10 sn / 30 sn / 60 sn fiyat ivmesi hesaplar.
+- 10 sn / 30 sn / 60 sn **hacim hızı** ölçer. Coinin normal 1 dakikalık hacmiyle kıyaslar.
+- Agresif alış oranını (`buyer is maker = false`) takip eder.
+- En iyi bid/ask miktarından basit order-book baskısı ve spread ölçer.
+- BTC'ye göre 30 saniyelik göreceli güç hesaplar.
+- Short liquidation akışını takip eder.
+- Gerçek adaylarda 5 dakikalık Open Interest istatistiğini kontrol eder.
+- Çok uzamış hareketleri kovalamamak için ceza uygular.
+- Sinyal sonrası 1/3/5/15/30/60 dakikalık sonuçları SQLite'a kaydeder.
+- Telegram komutları:
+  - `/status`
+  - `/top`
+  - `/test`
+  - `/help`
 
-## 2) Kurulum
+## Railway güncelleme
 
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-# source .venv/bin/activate
+Mevcut Railway projesinde Root Directory zaten `/binance_momentum_bot` ise bunu değiştirmeyin.
 
-pip install -r requirements.txt
-copy .env.example .env   # Windows
-# cp .env.example .env   # Linux/macOS
-```
+GitHub repository'nizdeki eski `binance_momentum_bot` klasörünün içeriğini bu klasördeki dosyalarla değiştirin. `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` GitHub'a yazılmaz; Railway Variables altında kalır.
 
-`.env` içindeki `TELEGRAM_BOT_TOKEN` ve `TELEGRAM_CHAT_ID` değerlerini doldur.
+GitHub değişikliği sonrası Railway otomatik deploy yapmalıdır. Başlangıç mesajında `Momentum Scanner V2 başladı` görmelisiniz.
 
-## 3) Çalıştır
+## İlk test
 
-```bash
-python bot.py
-```
+Telegram'da:
 
-Binance API key gerekmez. Bot yalnızca public market data kullanır ve emir açmaz.
+- `/test` -> bot cevap vermeli
+- `/status` -> ticker/book/agg akışlarının yaşını göstermeli; normalde 90 sn altında olmalı
+- `/top` -> henüz alarm üretmeyen ama o anda ısınan coinleri göstermeli
 
-## Varsayılan sinyal mantığı
+## Önemli
 
-- Tüm aktif USDT perpetual kontratlar taranır.
-- Minimum 24 saat quote volume: 5M USDT.
-- Aday için RVOL >= 2x, 1m fiyat >= +0.35%, taker-buy >= %58 ve skor >= 60 gerekir.
-- RVOL, o anki 1 dakikalık mum hacminin dakika sonuna projeksiyonunun önceki 20 kapalı 1m mum ortalamasına oranıdır.
-- 15m high breakout ek puan verir.
-- Open Interest sadece aday coinlerde sorgulanır; yaklaşık 5 dakikalık baz ile karşılaştırılır.
-- Aynı seviye alarmında 5 dakika cooldown vardır; sinyal seviyesi yükselirse cooldown içinde yeni alarm gelebilir.
-- Sinyaller `signals.db` SQLite veritabanına yazılır.
-
-## Uyarı
-
-Bu yazılım yatırım tavsiyesi veya otomatik trade sistemi değildir. Momentum sinyalleri false-positive üretebilir; özellikle düşük likidite ve yüksek kaldıraç ciddi kayıp riski taşır. Önce paper trading / küçük boyutla istatistik toplamak mantıklıdır.
+Bu yazılım piyasa tarama/uyarı aracıdır. Kâr garantisi vermez ve otomatik emir açmaz. Özellikle Futures/kaldıraç işlemlerinde sinyal istatistiklerini yeterli örneklemde ölçmeden otomatik trade'e çevirmeyin.
