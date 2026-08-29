@@ -58,10 +58,42 @@ MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.45"))
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 RISE_MIN_SCORE = int(os.getenv("RISE_MIN_SCORE", "66"))
 
+# V5.3 quality-first alerting. Confirmed momentum is still tracked, but Telegram
+# "ALIM FIRSATI" is reserved for stricter, trade-quality setups.
+PREMIUM_MIN_MOMENTUM_SCORE = int(os.getenv("PREMIUM_MIN_MOMENTUM_SCORE", "64"))
+PREMIUM_ENTRY_MIN_SCORE = int(os.getenv("PREMIUM_ENTRY_MIN_SCORE", "78"))
+PREMIUM_RISE_MIN_SCORE = int(os.getenv("PREMIUM_RISE_MIN_SCORE", "70"))
+PREMIUM_MIN_CHG30 = float(os.getenv("PREMIUM_MIN_CHG30", "0.35"))
+PREMIUM_MAX_CHG30 = float(os.getenv("PREMIUM_MAX_CHG30", "1.40"))
+PREMIUM_MIN_CHG60 = float(os.getenv("PREMIUM_MIN_CHG60", "0.70"))
+PREMIUM_MAX_CHG60 = float(os.getenv("PREMIUM_MAX_CHG60", "2.50"))
+PREMIUM_MIN_FLOW30 = float(os.getenv("PREMIUM_MIN_FLOW30", "1.80"))
+PREMIUM_MIN_BUY30 = float(os.getenv("PREMIUM_MIN_BUY30", "0.62"))
+PREMIUM_MAX_BUY30 = float(os.getenv("PREMIUM_MAX_BUY30", "0.80"))
+PREMIUM_MAX_BOOK_IMBALANCE = float(os.getenv("PREMIUM_MAX_BOOK_IMBALANCE", "0.90"))
+PREMIUM_MAX_CANDIDATE_RUNUP_PCT = float(os.getenv("PREMIUM_MAX_CANDIDATE_RUNUP_PCT", "2.00"))
+PREMIUM_REQUIRE_BREAKOUT = os.getenv("PREMIUM_REQUIRE_BREAKOUT", "1").strip() not in ("0", "false", "False")
+
+# A selective pre-signal warning. It is explicitly a radar/watch alert, not a buy call.
+EARLY_ALERT_ENABLED = os.getenv("EARLY_ALERT_ENABLED", "1").strip() not in ("0", "false", "False")
+EARLY_ALERT_MIN_SCORE = int(os.getenv("EARLY_ALERT_MIN_SCORE", "64"))
+EARLY_ALERT_MIN_CHG30 = float(os.getenv("EARLY_ALERT_MIN_CHG30", "0.25"))
+EARLY_ALERT_MIN_CHG60 = float(os.getenv("EARLY_ALERT_MIN_CHG60", "0.40"))
+EARLY_ALERT_MIN_FLOW30 = float(os.getenv("EARLY_ALERT_MIN_FLOW30", "2.00"))
+EARLY_ALERT_MIN_BUY30 = float(os.getenv("EARLY_ALERT_MIN_BUY30", "0.62"))
+EARLY_ALERT_MAX_BUY30 = float(os.getenv("EARLY_ALERT_MAX_BUY30", "0.80"))
+EARLY_ALERT_MAX_BOOK = float(os.getenv("EARLY_ALERT_MAX_BOOK", "0.90"))
+EARLY_ALERT_COOLDOWN_SECONDS = int(os.getenv("EARLY_ALERT_COOLDOWN_SECONDS", "1800"))
+
+# Optional one-shot continuation message after a confirmed setup has already moved.
+CONTINUATION_ALERT_ENABLED = os.getenv("CONTINUATION_ALERT_ENABLED", "1").strip() not in ("0", "false", "False")
+CONTINUATION_MIN_MFE_PCT = float(os.getenv("CONTINUATION_MIN_MFE_PCT", "2.00"))
+CONTINUATION_MIN_SCORE = int(os.getenv("CONTINUATION_MIN_SCORE", "72"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.1")
+log = logging.getLogger("momentum-v5.3")
 
 
 @dataclass
@@ -116,6 +148,8 @@ class SymbolState:
     candidate_prices: Deque[float] = field(default_factory=lambda: deque(maxlen=6))
     candidate_scores: Deque[int] = field(default_factory=lambda: deque(maxlen=6))
     buy_signal_ts: float = 0.0
+    early_alert_ts: float = 0.0
+    early_alert_price: float = 0.0
 
 
 @dataclass
@@ -124,9 +158,12 @@ class PendingOutcome:
     symbol: str
     entry_price: float
     created_ts: float
+    target1: float = 0.0
+    target2: float = 0.0
     mfe: float = 0.0
     mae: float = 0.0
     completed: set = field(default_factory=set)
+    continuation_sent: bool = False
 
 
 states: Dict[str, SymbolState] = defaultdict(SymbolState)
@@ -221,6 +258,41 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event TEXT NOT NULL,
+            price REAL, score INTEGER,
+            chg30 REAL, chg60 REAL, chg5 REAL,
+            flow30 REAL, buy30 REAL, book_imbalance REAL, rel30 REAL,
+            breakout INTEGER, candidate_age_s REAL, confirm_passes INTEGER,
+            gainer_rank INTEGER, qv24 REAL, note TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_meta (
+            signal_id INTEGER PRIMARY KEY,
+            entry_quality INTEGER, rise_score INTEGER, candidate_runup REAL,
+            gainer_rank INTEGER, qv24 REAL, premium INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gainers_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event TEXT NOT NULL,
+            rank_now INTEGER, rank_old INTEGER, pct24 REAL, price REAL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -257,6 +329,55 @@ def save_outcome(signal_id: int, horizon_s: int, ret: float, mfe: float, mae: fl
     )
     conn.commit()
     conn.close()
+
+
+def save_candidate_event(symbol: str, event: str, m: Optional[dict] = None, score: Optional[int] = None, st: Optional[SymbolState] = None, note: str = ""):
+    try:
+        m = m or {}
+        st = st or states[symbol]
+        rank = gainers_prev_rank.get(symbol)
+        age = (time.time() - st.candidate_since) if st.candidate_since else 0.0
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """INSERT INTO candidate_events
+            (ts,symbol,event,price,score,chg30,chg60,chg5,flow30,buy30,book_imbalance,rel30,breakout,candidate_age_s,confirm_passes,gainer_rank,qv24,note)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (int(time.time()), symbol, event, m.get("price"), score, m.get("chg30"), m.get("chg60"), m.get("chg5"),
+             m.get("flow30"), m.get("buy30"), m.get("book_imbalance"), m.get("rel30"), int(bool(m.get("breakout", False))),
+             age, st.candidate_passes, rank, m.get("qv24"), note[:500]),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.debug("candidate event save failed %s %s: %r", symbol, event, e)
+
+
+def save_signal_meta(signal_id: int, m: dict):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO signal_meta(signal_id,entry_quality,rise_score,candidate_runup,gainer_rank,qv24,premium) VALUES (?,?,?,?,?,?,?)",
+            (signal_id, m.get("entry_quality"), m.get("rise_score"), m.get("candidate_runup"),
+             gainers_prev_rank.get(m.get("symbol", "")), m.get("qv24"), 1),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.debug("signal meta save failed id=%s: %r", signal_id, e)
+
+
+def save_gainers_event(symbol: str, event: str, rank_now: Optional[int], rank_old: Optional[int]):
+    try:
+        st = states[symbol]
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO gainers_events(ts,symbol,event,rank_now,rank_old,pct24,price) VALUES (?,?,?,?,?,?,?)",
+            (int(time.time()), symbol, event, rank_now, rank_old, st.pct24, st.last_price),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.debug("gainers event save failed %s %s: %r", symbol, event, e)
 
 
 telegram_send_lock = asyncio.Lock()
@@ -658,6 +779,108 @@ def entry_quality(m: dict, score: int, st: SymbolState) -> int:
     return max(0, min(100, q))
 
 
+def candidate_runup_pct(st: SymbolState, current_price: float) -> float:
+    prices = list(st.candidate_prices)
+    if not prices or prices[0] <= 0:
+        return 0.0
+    return pct_change(current_price, prices[0])
+
+
+def early_watch_pass(m: dict, score: int) -> bool:
+    return (
+        EARLY_ALERT_ENABLED
+        and score >= EARLY_ALERT_MIN_SCORE
+        and m["chg30"] >= EARLY_ALERT_MIN_CHG30
+        and m["chg60"] >= EARLY_ALERT_MIN_CHG60
+        and m["flow30"] >= EARLY_ALERT_MIN_FLOW30
+        and EARLY_ALERT_MIN_BUY30 <= m["buy30"] <= EARLY_ALERT_MAX_BUY30
+        and m["book_imbalance"] <= EARLY_ALERT_MAX_BOOK
+        and m["spread"] <= min(MAX_SPREAD_PCT, 0.30)
+        and not m["extended"]
+        and (m["breakout"] or m["rel30"] >= 0.15)
+    )
+
+
+def premium_trade_guard(m: dict, score: int, quality: int, rise_score: int, st: SymbolState):
+    reasons = []
+    runup = candidate_runup_pct(st, m["price"])
+    if score < PREMIUM_MIN_MOMENTUM_SCORE: reasons.append(f"momentum {score}<{PREMIUM_MIN_MOMENTUM_SCORE}")
+    if quality < PREMIUM_ENTRY_MIN_SCORE: reasons.append(f"giriş kalitesi {quality}<{PREMIUM_ENTRY_MIN_SCORE}")
+    if rise_score < PREMIUM_RISE_MIN_SCORE: reasons.append(f"yükseliş {rise_score}<{PREMIUM_RISE_MIN_SCORE}")
+    if PREMIUM_REQUIRE_BREAKOUT and not m["breakout"]: reasons.append("15dk breakout yok")
+    if not (PREMIUM_MIN_BUY30 <= m["buy30"] <= PREMIUM_MAX_BUY30): reasons.append("agresif alış tatlı bölge dışında")
+    if m["book_imbalance"] > PREMIUM_MAX_BOOK_IMBALANCE: reasons.append("bid baskısı aşırı/tek taraflı")
+    if not (PREMIUM_MIN_CHG30 <= m["chg30"] <= PREMIUM_MAX_CHG30): reasons.append("30sn hareket uygun aralık dışında")
+    if not (PREMIUM_MIN_CHG60 <= m["chg60"] <= PREMIUM_MAX_CHG60): reasons.append("60sn hareket uygun aralık dışında")
+    if m["flow30"] < PREMIUM_MIN_FLOW30: reasons.append("hacim akışı yetersiz")
+    if runup > PREMIUM_MAX_CANDIDATE_RUNUP_PCT: reasons.append(f"adaydan beri +%{runup:.2f} uzamış")
+    if m["extended"]: reasons.append("hareket uzamış")
+    return len(reasons) == 0, reasons, runup
+
+
+def build_early_message(m: dict, score: int, st: SymbolState):
+    rank = gainers_prev_rank.get(m["symbol"])
+    rank_line = f"🏆 Gainers sırası: #{rank}" if rank else "🏆 Gainers: TOP sıralamada değil/henüz veri yok"
+    return (
+        "👀 ERKEN MOMENTUM — İZLE / TEYİT BEKLE\n\n"
+        f"🪙 {m['symbol']}\n"
+        f"💰 Fiyat: {fmt_price(m['price'])}\n\n"
+        f"⚡ 30 sn: {m['chg30']:+.2f}% | 60 sn: {m['chg60']:+.2f}%\n"
+        f"📈 5 dk: {m['chg5']:+.2f}%\n"
+        f"💥 Hacim akışı: {m['flow30']:.1f}x\n"
+        f"🟢 Agresif alış: %{m['buy30']*100:.1f}\n"
+        f"₿ BTC relatif güç: {m['rel30']:+.2f}%\n"
+        f"{rank_line}\n"
+        f"⭐ Momentum: {score}/100\n\n"
+        "Bu bir alım sinyali değildir. Bot hareketin erken safhasını fark etti; 3/3 süreklilik ve işlem kalitesi teyidi bekleniyor.\n"
+        f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
+    )
+
+
+def build_continuation_message(p: PendingOutcome, m: dict, score: int):
+    return (
+        "🚀 MOMENTUM DEVAMI — HEDEF SONRASI GÜÇ SÜRÜYOR\n\n"
+        f"🪙 {p.symbol}\n"
+        f"💰 İlk sinyal: {fmt_price(p.entry_price)} | Anlık: {fmt_price(m['price'])}\n"
+        f"📈 Sinyal sonrası MFE: +%{p.mfe:.2f}\n"
+        f"⚡ 30 sn: {m['chg30']:+.2f}% | 60 sn: {m['chg60']:+.2f}%\n"
+        f"💥 Flow: {m['flow30']:.1f}x | Buy: %{m['buy30']*100:.1f}\n"
+        f"⭐ Momentum: {score}/100\n\n"
+        "Bu mesaj yeni giriş çağrısı değildir; teyitli hareketin TP2 sonrasında da canlı kaldığını belirtir.\n"
+        f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
+    )
+
+
+def build_manual_analysis(symbol: str, m: dict, score: int, quality: int, rise_score: int, plan: dict):
+    st = states[symbol]
+    early = early_watch_pass(m, score)
+    # Manual analysis has no guaranteed 3/3 history; verdict intentionally remains conservative.
+    if st.candidate_passes >= CONFIRM_REQUIRED:
+        guard_ok, reasons, runup = premium_trade_guard(m, score, quality, rise_score, st)
+    else:
+        guard_ok, reasons, runup = False, [f"süreklilik {st.candidate_passes}/{CONFIRM_REQUIRED}"], candidate_runup_pct(st, m["price"])
+    verdict = "🟢 Güçlü kurulum" if guard_ok else ("🟡 Erken momentum / teyit bekle" if early else "⚪ Şu an premium giriş teyidi yok")
+    rank = gainers_prev_rank.get(symbol)
+    why = "; ".join(reasons[:3]) if reasons else "premium filtreler uyumlu"
+    oi_line = "veri yok" if m.get("oi5") is None else f"{m['oi5']:+.2f}%"
+    return (
+        f"🔎 {symbol} — ANLIK ANALİZ\n\n"
+        f"{verdict}\n"
+        f"⭐ Momentum: {score}/100 | 📈 Yükseliş: {rise_score}/100 | 🎯 Giriş: {quality}/100\n"
+        f"✅ Süreklilik: {st.candidate_passes}/{CONFIRM_REQUIRED} | aday run-up: {runup:+.2f}%\n\n"
+        f"⚡ 30 sn {m['chg30']:+.2f}% | 60 sn {m['chg60']:+.2f}% | 5 dk {m['chg5']:+.2f}%\n"
+        f"💥 Flow {m['flow30']:.1f}x | 🟢 Buy %{m['buy30']*100:.1f} | 📚 Bid %{m['book_imbalance']*100:.1f}\n"
+        f"₿ BTC relatif {m['rel30']:+.2f}% | OI 5dk {oi_line} | Breakout {'evet' if m['breakout'] else 'hayır'}\n"
+        f"🏆 Gainers: {'#'+str(rank) if rank else '—'}\n\n"
+        f"🧭 Neden: {why}\n\n"
+        "📍 Kural tabanlı bölge\n"
+        f"🟩 {fmt_price(plan['entry_low'])} – {fmt_price(plan['entry_high'])}\n"
+        f"🎯 TP1 {fmt_price(plan['target1'])} | TP2 {fmt_price(plan['target2'])}\n"
+        f"🛑 Geçersizlik {fmt_price(plan['invalidation'])}\n\n"
+        "Not: Bu analiz emir vermez ve kâr garantisi değildir; özellikle teyit yoksa bekleme/risk kontrolü daha önemlidir."
+    )
+
+
 def estimate_trade_plan(symbol: str, m: dict) -> dict:
     """Rule-based indicative entry/target levels from recent volatility; not an order recommendation."""
     st = states[symbol]
@@ -735,7 +958,7 @@ def build_message(m: dict):
     breakout_line = "🚀 15 dk tepe üstünde" if m["breakout"] else "🎯 15 dk tepe henüz kırılmadı"
     plan = m.get("trade_plan") or estimate_trade_plan(m["symbol"], m)
     return (
-        "🟢 ALIM FIRSATI — SÜREKLİLİK TEYİTLİ\n\n"
+        "🟢 ALIM FIRSATI — PREMIUM + SÜREKLİLİK TEYİTLİ\n\n"
         f"🪙 {m['symbol']}\n"
         f"💰 Anlık fiyat: {fmt_price(m['price'])}\n\n"
         f"⚡ 30 sn: {m['chg30']:+.2f}%\n"
@@ -750,7 +973,8 @@ def build_message(m: dict):
         f"✅ {m['confirm_passes']}/{CONFIRM_REQUIRED} süreklilik kontrolü geçti\n"
         f"📈 Yükseliş potansiyeli: {m['rise_score']}/100\n"
         f"⚡ Momentum yoğunluğu: {m['score']}/100\n"
-        f"🎯 Giriş kalitesi: {m['entry_quality']}/100\n\n"
+        f"🎯 Giriş kalitesi: {m['entry_quality']}/100\n"
+        f"🧭 İlk adaydan beri: {m.get('candidate_runup', 0.0):+.2f}%\n\n"
         "📍 TAHMİNİ İŞLEM BÖLGESİ\n"
         f"🟩 Alım bölgesi: {fmt_price(plan['entry_low'])} – {fmt_price(plan['entry_high'])}\n"
         f"🎯 Kâr al 1: {fmt_price(plan['target1'])}  (R/R ~{plan['rr1']:.1f})\n"
@@ -786,16 +1010,25 @@ async def evaluate(session, symbol: str):
             st.candidate_passes = 1 if continuity_pass(m, score) else 0
             st.candidate_prices.append(m["price"])
             st.candidate_scores.append(score)
+            save_candidate_event(symbol, "candidate_start", m, score, st)
             log.info("CANDIDATE %s score=%d", symbol, score)
+            if early_watch_pass(m, score) and now - st.early_alert_ts >= EARLY_ALERT_COOLDOWN_SECONDS:
+                st.early_alert_ts = now
+                st.early_alert_price = m["price"]
+                funnel_hit("early_alert")
+                save_candidate_event(symbol, "early_alert", m, score, st)
+                await telegram_send(session, build_early_message(m, score, st), symbol=symbol)
             return
 
         # Zaman aşımı veya belirgin bozulma: adayı sessizce bırak.
         if now - st.candidate_since > CANDIDATE_TTL_SECONDS:
             funnel_hit("ttl_reject")
+            save_candidate_event(symbol, "ttl_reject", m, score, st)
             reset_candidate(st)
             return
         if m["chg30"] < -0.20 or m["buy30"] < 0.50 or m["flow30"] < 0.8:
             funnel_hit("breakdown_reject")
+            save_candidate_event(symbol, "breakdown_reject", m, score, st)
             reset_candidate(st)
             return
 
@@ -814,10 +1047,12 @@ async def evaluate(session, symbol: str):
             if price_ok:
                 st.candidate_passes += 1
                 funnel_hit("confirm_pass")
+                save_candidate_event(symbol, "confirm_pass", m, score, st)
         else:
             # Bir zayıf kontrol toleransı; art arda bozulma adayı sonlandırır.
             if st.candidate_checks - st.candidate_passes >= 2:
                 funnel_hit("continuity_reject")
+                save_candidate_event(symbol, "continuity_reject", m, score, st)
                 reset_candidate(st)
                 return
 
@@ -840,20 +1075,33 @@ async def evaluate(session, symbol: str):
         m["confirm_passes"] = st.candidate_passes
         m["level"] = "CONFIRMED"
 
-        # Sadece yüksek kaliteli ve aşırı uzamamış devam hareketi Telegram'a gider.
+        # V5.3: every 3/3 setup is recorded, but only stricter premium setups become
+        # actionable Telegram opportunities. This deliberately prefers precision over volume.
         if quality < ENTRY_MIN_SCORE:
             funnel_hit("quality_reject")
+            save_candidate_event(symbol, "quality_reject", m, score, st, f"quality={quality}")
             reset_candidate(st)
             return
         if rise_score < RISE_MIN_SCORE:
             funnel_hit("rise_reject")
+            save_candidate_event(symbol, "rise_reject", m, score, st, f"rise={rise_score}")
             reset_candidate(st)
             return
         if m["extended"]:
             funnel_hit("extended_reject")
+            save_candidate_event(symbol, "extended_reject", m, score, st)
+            reset_candidate(st)
+            return
+
+        premium_ok, premium_reasons, runup = premium_trade_guard(m, score, quality, rise_score, st)
+        m["candidate_runup"] = runup
+        if not premium_ok:
+            funnel_hit("premium_reject")
+            save_candidate_event(symbol, "premium_reject", m, score, st, "; ".join(premium_reasons))
             reset_candidate(st)
             return
         if now - st.buy_signal_ts < COOLDOWN_SECONDS:
+            save_candidate_event(symbol, "cooldown_reject", m, score, st)
             reset_candidate(st)
             return
 
@@ -862,9 +1110,12 @@ async def evaluate(session, symbol: str):
         st.last_alert_price = m["price"]
         m["trade_plan"] = estimate_trade_plan(symbol, m)
         funnel_hit("telegram_signal")
+        save_candidate_event(symbol, "premium_signal", m, score, st, f"quality={quality}; rise={rise_score}; runup={runup:.2f}")
         signal_id = save_signal(m)
-        pending_outcomes.append(PendingOutcome(signal_id, symbol, m["price"], now))
-        log.info("CONFIRMED %s momentum=%d rise=%d quality=%d", symbol, score, rise_score, quality)
+        save_signal_meta(signal_id, m)
+        plan = m["trade_plan"]
+        pending_outcomes.append(PendingOutcome(signal_id, symbol, m["price"], now, plan["target1"], plan["target2"]))
+        log.info("PREMIUM CONFIRMED %s momentum=%d rise=%d quality=%d runup=%.2f", symbol, score, rise_score, quality, runup)
         await telegram_send(session, build_message(m), symbol=symbol)
         reset_candidate(st)
     finally:
@@ -1005,7 +1256,7 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
             await asyncio.sleep(2)
 
 
-async def outcome_loop():
+async def outcome_loop(session):
     horizons = (60, 180, 300, 900, 1800, 3600)
     while not stop_event.is_set():
         now = time.time()
@@ -1018,6 +1269,18 @@ async def outcome_loop():
             p.mfe = max(p.mfe, ret)
             p.mae = min(p.mae, ret)
             age = now - p.created_ts
+            t2_ret = pct_change(p.target2, p.entry_price) if p.target2 else CONTINUATION_MIN_MFE_PCT
+            continuation_trigger = max(CONTINUATION_MIN_MFE_PCT, t2_ret)
+            if CONTINUATION_ALERT_ENABLED and not p.continuation_sent and age <= 1800 and p.mfe >= continuation_trigger:
+                m = compute_metrics(p.symbol)
+                if m:
+                    sc = score_metrics(m)
+                    if (sc >= CONTINUATION_MIN_SCORE and m["chg30"] >= 0.15 and m["flow30"] >= 2.0
+                            and 0.60 <= m["buy30"] <= 0.84 and not m["extended"]):
+                        p.continuation_sent = True
+                        funnel_hit("continuation_alert")
+                        save_candidate_event(p.symbol, "continuation_alert", m, sc, states[p.symbol], f"mfe={p.mfe:.2f}")
+                        await telegram_send(session, build_continuation_message(p, m, sc), symbol=p.symbol)
             for h in horizons:
                 if age >= h and h not in p.completed:
                     save_outcome(p.signal_id, h, ret, p.mfe, p.mae)
@@ -1080,7 +1343,7 @@ def build_gainers_entry_message(symbol: str, rank: int, prev_rank: Optional[int]
     m = compute_metrics(symbol)
     prior = f"#{prev_rank}" if prev_rank else "TOP {0} dışı".format(GAINERS_TOP_N)
     lines = [
-        "🏆 GAINERS LİSTESİNE GİRDİ",
+        "🏆 GAINERS RADAR — TOP LİSTEYE GİRDİ",
         "",
         f"🪙 {symbol}",
         f"📈 24s yükseliş: {st.pct24:+.2f}%",
@@ -1110,7 +1373,7 @@ def build_gainers_rapid_message(symbol: str, old_rank: int, new_rank: int, old_p
     m = compute_metrics(symbol)
     climbed = old_rank - new_rank
     lines = [
-        "🚀 GAINERS SIRALAMASINDA HIZLI YÜKSELİŞ",
+        "🚀 GAINERS RADAR — HIZLI SIRA YÜKSELİŞİ",
         "",
         f"🪙 {symbol}",
         f"📈 24s: {st.pct24:+.2f}% (önce {old_pct:+.2f}%)",
@@ -1178,6 +1441,7 @@ async def gainers_loop(session):
                 was_out_long_enough = left_at == 0.0 or now - left_at >= GAINERS_REENTRY_MIN_OUT_SECONDS
                 cooldown_ok = now - gainers_last_entry_alert.get(sym, 0.0) >= GAINERS_ALERT_COOLDOWN_SECONDS
                 if cooldown_ok and (first_seen_entry or was_out_long_enough):
+                    save_gainers_event(sym, "top_entry", rank_map[sym], gainers_prev_rank.get(sym))
                     await telegram_send(session, build_gainers_entry_message(sym, rank_map[sym], gainers_prev_rank.get(sym)), symbol=sym)
                     gainers_last_entry_alert[sym] = now
                     log.info("GAINERS ENTRY %s rank=%d pct=%.2f", sym, rank_map[sym], pct_map[sym])
@@ -1205,6 +1469,7 @@ async def gainers_loop(session):
                 # If the same cycle already announced TOP-N entry, avoid duplicate Telegram spam.
                 if sym in entrants and now - gainers_last_entry_alert.get(sym, 0.0) < 5:
                     continue
+                save_gainers_event(sym, "rapid_climb", new_rank, old_rank)
                 await telegram_send(session, build_gainers_rapid_message(sym, old_rank, new_rank, old_pct), symbol=sym)
                 gainers_last_rapid_alert[sym] = now
                 log.info("GAINERS RAPID %s %d->%d pct=%.2f", sym, old_rank, new_rank, pct_map[sym])
@@ -1248,7 +1513,8 @@ async def telegram_command_loop(session):
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 if chat_id != str(TELEGRAM_CHAT_ID):
                     continue
-                text = str(msg.get("text", "")).strip().lower()
+                raw_text = str(msg.get("text", "")).strip()
+                text = raw_text.lower()
                 if text == "/status":
                     age = lambda k: (time.time() - stream_health[k]) if stream_health[k] else 9999
                     healthy = all(age(k) < 90 for k in ("ticker", "book", "agg"))
@@ -1260,7 +1526,7 @@ async def telegram_command_loop(session):
                         f"🚨 Son 24s sinyal: {signal_count_today()}\n"
                         f"📡 ticker: {age('ticker'):.0f} sn | book: {age('book'):.0f} sn | agg: {age('agg'):.0f} sn\n"
                         f"⭐ Aday eşiği: {EARLY_SCORE}+\n"
-                        f"🎯 Teyit: {CONFIRM_REQUIRED} kontrol × {CONFIRM_INTERVAL_SECONDS} sn | giriş kalitesi {ENTRY_MIN_SCORE}+ | yükseliş {RISE_MIN_SCORE}+\n"
+                        f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
                         f"🏆 Gainers: TOP {GAINERS_TOP_N} giriş + {GAINERS_RAPID_WINDOW_SECONDS//60} dk’da {GAINERS_RAPID_MIN_POSITIONS}+ sıra yükseliş"
                     )
                 elif text == "/top":
@@ -1296,7 +1562,10 @@ async def telegram_command_loop(session):
                         f"❌ Giriş kalitesi yetersiz: {funnel_counts['quality_reject']}\n"
                         f"❌ Yükseliş skoru yetersiz: {funnel_counts['rise_reject']}\n"
                         f"❌ Hareket uzamış: {funnel_counts['extended_reject']}\n"
-                        f"🟢 Telegram alım fırsatı: {funnel_counts['telegram_signal']}\n\n"
+                        f"🧱 Premium filtreden elendi: {funnel_counts['premium_reject']}\n"
+                        f"👀 Erken momentum uyarısı: {funnel_counts['early_alert']}\n"
+                        f"🟢 Premium alım fırsatı: {funnel_counts['telegram_signal']}\n"
+                        f"🚀 Momentum devamı: {funnel_counts['continuation_alert']}\n\n"
                         "Bu ekran hangi filtrenin adayları elediğini gösterir."
                     )
                 elif text == "/stats":
@@ -1308,18 +1577,39 @@ async def telegram_command_loop(session):
                         await telegram_send(session, "Henüz tamamlanmış 60 dk performans verisi yok.")
                     else:
                         await telegram_send(session, f"📊 60 DK SİNYAL PERFORMANSI\n\nTamamlanan: {n}\n+%0.5 gördü: %{100*row[1]/n:.1f}\n+%1 gördü: %{100*row[2]/n:.1f}\n+%2 gördü: %{100*row[3]/n:.1f}\nOrt. maksimum yükseliş: {row[4]:+.2f}%\nOrt. maksimum ters hareket: {row[5]:+.2f}%\n\nNot: Maksimum yükseliş, sinyal sonrası fırsatı ölçer; son fiyatı değil.")
+                elif text.startswith("/analiz ") or (not text.startswith("/") and text not in ("test",) and 1 <= len(raw_text) <= 20):
+                    token = raw_text.split(maxsplit=1)[1] if text.startswith("/analiz ") else raw_text
+                    token = token.strip().upper().replace("/", "")
+                    sym = token if token.endswith("USDT") else token + "USDT"
+                    if sym not in states:
+                        await telegram_send(session, f"❌ {token} için aktif USDT perpetual bulamadım. Örnek: /analiz TUT")
+                    else:
+                        m = compute_metrics(sym)
+                        if not m:
+                            await telegram_send(session, f"⏳ {sym} için henüz yeterli canlı veri yok. 30-60 sn sonra tekrar dene.")
+                        else:
+                            sc = score_metrics(m)
+                            m["oi5"] = await get_oi_5m(session, sym)
+                            if m["oi5"] is not None:
+                                if m["oi5"] >= 1.0: sc = min(100, sc + 4)
+                                elif m["oi5"] <= -1.5: sc = max(0, sc - 4)
+                            q = entry_quality(m, sc, states[sym])
+                            rscore = rise_probability(m, sc, states[sym])
+                            plan = estimate_trade_plan(sym, m)
+                            await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status, /top, /gainers, /funnel ve /stats kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V5.2 — Data-tuned Momentum + Gainers\n\n"
+                        "🤖 Momentum Scanner V5.3 — Quality-First + Early Radar\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
                         "/funnel — adayların hangi filtrelerde elendiği\n"
-                        "/stats — tamamlanan sinyallerin 60 dk performansı\n"
+                        "/stats — premium sinyallerin 60 dk performansı\n"
+                        "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
-                        "Momentum adayları sessiz izlenir. Telegram yalnızca süreklilik teyidinde, gainers TOP bölgesine yeni girişte veya hızlı sıra yükselişinde bildirim gönderir."
+                        "V5.3 daha az ama daha seçici ALIM FIRSATI hedefler. ERKEN MOMENTUM yalnızca radar uyarısıdır; işlem sinyali değildir."
                     )
         except asyncio.CancelledError:
             raise
@@ -1345,20 +1635,21 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.2 başladı\n\n"
+                f"✅ Momentum Scanner V5.3 başladı — QUALITY FIRST\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade ile erken momentum taraması\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                 f"⭐ Sessiz aday skoru: {EARLY_SCORE}+\n"
-                f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | giriş {ENTRY_MIN_SCORE}+ | yükseliş {RISE_MIN_SCORE}+\n\n"
+                f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
+                f"👀 Erken radar: seçici ve işlem sinyali değil\n\n"
                 f"🏆 Gainers: TOP {GAINERS_TOP_N} + hızlı sıra yükselişi\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /test"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
         tasks = [
             ticker_ws(session), book_ws(session), liquidation_ws(session),
-            outcome_loop(), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session),
+            outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         await asyncio.gather(*tasks)
