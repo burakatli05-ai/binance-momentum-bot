@@ -259,10 +259,19 @@ def save_outcome(signal_id: int, horizon_s: int, ret: float, mfe: float, mae: fl
     conn.close()
 
 
-async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None):
+telegram_send_lock = asyncio.Lock()
+
+
+async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None) -> bool:
+    """Send a Telegram message reliably.
+
+    Retries transient network/5xx/429 failures and logs the real exception type,
+    HTTP status and Telegram response body so Railway logs are actionable.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram credentials missing; alert printed only:\n%s", text)
-        return
+        return False
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
     if symbol:
@@ -271,12 +280,54 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                 {"text": "Binance Futures", "url": "https://www.binance.com/en/futures/" + symbol}
             ]]
         }
-    try:
-        async with session.post(url, json=payload, timeout=10) as r:
-            if r.status != 200:
-                log.error("Telegram error %s: %s", r.status, await r.text())
-    except Exception as e:
-        log.warning("Telegram send failed: %s", e)
+
+    timeout = aiohttp.ClientTimeout(total=15, connect=6, sock_read=10)
+    max_attempts = 4
+
+    # Serialize Telegram writes. This prevents several gainers/signal/command
+    # messages from hitting Telegram at exactly the same moment.
+    async with telegram_send_lock:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with session.post(url, json=payload, timeout=timeout) as r:
+                    body = await r.text()
+                    if r.status == 200:
+                        try:
+                            data = json.loads(body)
+                        except Exception:
+                            data = {"ok": True}
+                        if data.get("ok", True):
+                            return True
+                        log.warning("Telegram API ok=false attempt=%d body=%s", attempt, body[:1000])
+                    elif r.status == 429:
+                        retry_after = 2
+                        try:
+                            data = json.loads(body)
+                            retry_after = int(data.get("parameters", {}).get("retry_after", 2))
+                        except Exception:
+                            pass
+                        log.warning("Telegram rate limited (429), retry_after=%ss body=%s", retry_after, body[:1000])
+                        if attempt < max_attempts:
+                            await asyncio.sleep(min(max(retry_after, 1), 30))
+                            continue
+                    else:
+                        log.warning("Telegram HTTP %s attempt=%d body=%s", r.status, attempt, body[:1000])
+                        # 4xx errors other than 429 are usually permanent for this payload.
+                        if 400 <= r.status < 500:
+                            return False
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning(
+                    "Telegram send exception attempt=%d/%d type=%s repr=%r",
+                    attempt, max_attempts, type(e).__name__, e,
+                )
+
+            if attempt < max_attempts:
+                await asyncio.sleep(min(2 ** (attempt - 1), 8))
+
+    log.error("Telegram message abandoned after %d attempts; preview=%r", max_attempts, text[:160])
+    return False
 
 
 async def fetch_json(session, path, params=None):
@@ -1175,8 +1226,22 @@ async def telegram_command_loop(session):
     while not stop_event.is_set():
         try:
             params = {"timeout": 20, "offset": telegram_offset, "allowed_updates": json.dumps(["message"])}
-            async with session.get(url, params=params, timeout=25) as r:
-                data = await r.json()
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30, connect=6, sock_read=25)) as r:
+                raw = await r.text()
+                if r.status != 200:
+                    log.warning("Telegram getUpdates HTTP %s body=%s", r.status, raw[:1000])
+                    await asyncio.sleep(3)
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception as e:
+                    log.warning("Telegram getUpdates invalid JSON type=%s repr=%r body=%r", type(e).__name__, e, raw[:500])
+                    await asyncio.sleep(3)
+                    continue
+                if not data.get("ok", True):
+                    log.warning("Telegram getUpdates ok=false body=%s", raw[:1000])
+                    await asyncio.sleep(3)
+                    continue
             for upd in data.get("result", []):
                 telegram_offset = max(telegram_offset, int(upd.get("update_id", 0)) + 1)
                 msg = upd.get("message", {})
@@ -1247,7 +1312,7 @@ async def telegram_command_loop(session):
                     await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status, /top, /gainers, /funnel ve /stats kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V5.1 — Data-tuned Momentum + Gainers\n\n"
+                        "🤖 Momentum Scanner V5.2 — Data-tuned Momentum + Gainers\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
@@ -1259,7 +1324,7 @@ async def telegram_command_loop(session):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log.debug("Telegram command polling: %s", e)
+            log.warning("Telegram command polling exception type=%s repr=%r", type(e).__name__, e)
             await asyncio.sleep(3)
 
 
@@ -1280,7 +1345,7 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.1 başladı\n\n"
+                f"✅ Momentum Scanner V5.2 başladı\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade ile erken momentum taraması\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
