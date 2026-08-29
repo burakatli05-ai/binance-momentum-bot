@@ -30,10 +30,10 @@ STRONG_SCORE = int(os.getenv("STRONG_SCORE", "74"))
 EXTREME_SCORE = int(os.getenv("EXTREME_SCORE", "88"))
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1200"))
 CONFIRM_INTERVAL_SECONDS = int(os.getenv("CONFIRM_INTERVAL_SECONDS", "15"))
-CONFIRM_REQUIRED = int(os.getenv("CONFIRM_REQUIRED", "3"))
+CONFIRM_REQUIRED = int(os.getenv("CONFIRM_REQUIRED", "4"))
 CANDIDATE_TTL_SECONDS = int(os.getenv("CANDIDATE_TTL_SECONDS", "120"))
 CONFIRM_MIN_SCORE = int(os.getenv("CONFIRM_MIN_SCORE", "64"))
-ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "76"))
+ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "78"))
 BOOTSTRAP_CANDLES = int(os.getenv("BOOTSTRAP_CANDLES", "30"))
 AGGTRADE_CHUNK = int(os.getenv("AGGTRADE_CHUNK", "80"))
 EVAL_MIN_INTERVAL = float(os.getenv("EVAL_MIN_INTERVAL", "1.0"))
@@ -59,7 +59,7 @@ DB_PATH = os.getenv("DB_PATH", "signals.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v4")
+log = logging.getLogger("momentum-v5")
 
 
 @dataclass
@@ -456,9 +456,17 @@ def score_metrics(m: dict) -> int:
     elif c10 >= 0.10 or c30 >= 0.22:
         score += 10
 
-    # 3) Aggressive buyer dominance (max 20)
+    # 3) Aggressive buyer dominance. Real outcomes showed that extreme 85-95%
+    # taker-buy can be late-stage FOMO/absorption, so the sweet spot is rewarded most.
     b = m["buy30"]
-    score += 20 if b >= 0.72 else 16 if b >= 0.66 else 12 if b >= 0.60 else 7 if b >= 0.56 else 0
+    if 0.64 <= b <= 0.82:
+        score += 18
+    elif 0.60 <= b < 0.64 or 0.82 < b <= 0.88:
+        score += 12
+    elif 0.56 <= b < 0.60:
+        score += 7
+    elif b > 0.88:
+        score += 6
 
     # 4) Microstructure / order book (max 8)
     bi = m["book_imbalance"]
@@ -481,7 +489,13 @@ def score_metrics(m: dict) -> int:
         score -= 10
     if m["spread"] > 0.25:
         score -= 5
-
+    # Saturated buying without proportional price progress often marked exhaustion.
+    if m["buy30"] >= 0.86 and m["chg30"] < 0.55:
+        score -= 10
+    if m["flow30"] >= 12 and m["chg30"] < 0.45:
+        score -= 7
+    # Very high raw scores were not the best cohort in the first live sample.
+    # Keep momentum visible, but avoid interpreting raw intensity as entry quality.
     return max(0, min(100, score))
 
 
@@ -518,45 +532,68 @@ def reset_candidate(st: SymbolState):
 
 
 def continuity_pass(m: dict, score: int) -> bool:
+    # Require persistence, but reject likely late-stage buyer saturation.
+    absorption = (m["buy30"] >= 0.86 and m["chg30"] < 0.55) or (m["flow30"] >= 12 and m["chg30"] < 0.45)
     return (
         score >= CONFIRM_MIN_SCORE
         and m["chg30"] >= 0.12
-        and m["chg60"] >= 0.20
+        and m["chg60"] >= 0.30
         and m["flow30"] >= 1.5
-        and m["buy30"] >= 0.60
+        and 0.58 <= m["buy30"] <= 0.92
         and m["spread"] <= min(MAX_SPREAD_PCT, 0.30)
         and not m["extended"]
+        and not absorption
     )
 
 
-def entry_quality(m: dict, score: int, st: SymbolState) -> int:
-    q = int(score * 0.68)
+def rise_probability(m: dict, score: int, st: SymbolState) -> int:
+    """Empirical heuristic for chance of a meaningful post-signal rise, not a probability model."""
+    r = 50
+    # First live sample: 77-82 raw momentum cohort was strongest; >82 was not monotonic.
+    if 77 <= score <= 84: r += 15
+    elif 72 <= score < 77: r += 8
+    elif score > 84: r += 5
+    if 0.64 <= m["buy30"] <= 0.78: r += 12
+    elif 0.78 < m["buy30"] <= 0.84: r += 5
+    elif m["buy30"] > 0.88: r -= 10
+    if 0.45 <= m["chg30"] <= 1.20: r += 8
+    elif m["chg30"] > 1.6: r -= 5
+    if 0.8 <= m["chg60"] <= 2.0: r += 8
+    if 5 <= m["flow30"] <= 15: r += 7
+    elif m["flow30"] > 20: r -= 4
+    if 0.55 <= m["book_imbalance"] <= 0.82: r += 5
+    elif m["book_imbalance"] > 0.90: r -= 3
     prices = list(st.candidate_prices)
-    if len(prices) >= 3 and prices[-1] > prices[-2] > prices[-3]:
-        q += 10
-    elif len(prices) >= 2 and prices[-1] > prices[-2]:
-        q += 5
-    if m["buy30"] >= 0.68:
-        q += 6
-    elif m["buy30"] >= 0.62:
-        q += 3
-    if m["flow30"] >= 3.0:
-        q += 5
-    elif m["flow30"] >= 2.0:
-        q += 3
-    if m["book_imbalance"] >= 0.60:
-        q += 4
-    if m["rel30"] >= 0.20:
-        q += 3
-    if m["breakout"]:
-        q += 4
+    if len(prices) >= 4 and prices[-1] > prices[-2] > prices[-3]: r += 8
+    if m["extended"]: r -= 15
+    return max(0, min(100, r))
+def entry_quality(m: dict, score: int, st: SymbolState) -> int:
+    # Entry quality is deliberately separate from momentum intensity.
+    q = 48
+    prices = list(st.candidate_prices)
+    if len(prices) >= 4:
+        steps = [prices[i] / prices[i-1] - 1 for i in range(1, len(prices))]
+        if all(x >= -0.0005 for x in steps[-3:]) and sum(x > 0 for x in steps[-3:]) >= 2:
+            q += 18
+        if prices[-1] < max(prices[:-1]) * 0.995:
+            q -= 12
+    if 0.64 <= m["buy30"] <= 0.80: q += 12
+    elif 0.80 < m["buy30"] <= 0.85: q += 5
+    elif m["buy30"] >= 0.88: q -= 12
+    if 5.0 <= m["flow30"] <= 15.0: q += 8
+    elif 2.0 <= m["flow30"] < 5.0: q += 4
+    elif m["flow30"] > 20.0: q -= 6
+    if 0.40 <= m["chg30"] <= 1.20: q += 8
+    elif m["chg30"] > 1.8: q -= 10
+    if 0.55 <= m["book_imbalance"] <= 0.82: q += 5
+    elif m["book_imbalance"] > 0.92: q -= 4
+    if m["rel30"] >= 0.20: q += 3
+    if m["breakout"]: q += 3
     if m.get("oi5") is not None:
-        if m["oi5"] >= 0.5:
-            q += 4
-        elif m["oi5"] <= -1.0:
-            q -= 6
-    if m["chg30"] > 1.8 or m["chg5"] > 4.0:
-        q -= 8
+        if 0.0 <= m["oi5"] <= 0.8: q += 3
+        elif m["oi5"] <= -1.0: q -= 5
+        elif m["oi5"] > 2.0: q -= 3
+    if m["extended"] or m["chg5"] > 4.0: q -= 15
     return max(0, min(100, q))
 
 
@@ -576,7 +613,7 @@ def build_message(m: dict):
     oi_line = "⚪ OI 5 dk: veri yok" if m.get("oi5") is None else f"📈 OI 5 dk: {m['oi5']:+.2f}%"
     breakout_line = "🚀 15 dk tepe üstünde" if m["breakout"] else "🎯 15 dk tepe henüz kırılmadı"
     return (
-        "🟢 SÜREKLİLİK TEYİTLİ MOMENTUM\n\n"
+        "🟢 AL ADAYI — SÜREKLİLİK TEYİTLİ\n\n"
         f"🪙 {m['symbol']}\n"
         f"💰 Fiyat: {fmt_price(m['price'])}\n\n"
         f"⚡ 30 sn: {m['chg30']:+.2f}%\n"
@@ -589,7 +626,8 @@ def build_message(m: dict):
         f"{oi_line}\n"
         f"{breakout_line}\n\n"
         f"✅ {m['confirm_passes']}/{CONFIRM_REQUIRED} süreklilik kontrolü geçti\n"
-        f"⭐ Momentum: {m['score']}/100\n"
+        f"📈 Yükseliş potansiyeli: {m['rise_score']}/100\n"
+        f"⚡ Momentum yoğunluğu: {m['score']}/100\n"
         f"🎯 Giriş kalitesi: {m['entry_quality']}/100\n\n"
         "Not: Kural tabanlı momentum uyarısıdır; kâr garantisi veya otomatik emir değildir.\n"
         f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
@@ -663,12 +701,14 @@ async def evaluate(session, symbol: str):
                 score = max(0, score - 4)
         m["score"] = score
         quality = entry_quality(m, score, st)
+        rise_score = rise_probability(m, score, st)
         m["entry_quality"] = quality
+        m["rise_score"] = rise_score
         m["confirm_passes"] = st.candidate_passes
         m["level"] = "CONFIRMED"
 
         # Sadece yüksek kaliteli ve aşırı uzamamış devam hareketi Telegram'a gider.
-        if quality < ENTRY_MIN_SCORE or m["extended"]:
+        if quality < ENTRY_MIN_SCORE or rise_score < 70 or m["extended"]:
             reset_candidate(st)
             return
         if now - st.buy_signal_ts < COOLDOWN_SECONDS:
@@ -680,7 +720,7 @@ async def evaluate(session, symbol: str):
         st.last_alert_price = m["price"]
         signal_id = save_signal(m)
         pending_outcomes.append(PendingOutcome(signal_id, symbol, m["price"], now))
-        log.info("CONFIRMED %s momentum=%d quality=%d", symbol, score, quality)
+        log.info("CONFIRMED %s momentum=%d rise=%d quality=%d", symbol, score, rise_score, quality)
         await telegram_send(session, build_message(m), symbol=symbol)
         reset_candidate(st)
     finally:
@@ -1062,7 +1102,7 @@ async def telegram_command_loop(session):
                         f"🚨 Son 24s sinyal: {signal_count_today()}\n"
                         f"📡 ticker: {age('ticker'):.0f} sn | book: {age('book'):.0f} sn | agg: {age('agg'):.0f} sn\n"
                         f"⭐ Aday eşiği: {EARLY_SCORE}+\n"
-                        f"🎯 Teyit: {CONFIRM_REQUIRED} kontrol × {CONFIRM_INTERVAL_SECONDS} sn | giriş kalitesi {ENTRY_MIN_SCORE}+\n"
+                        f"🎯 Teyit: {CONFIRM_REQUIRED} kontrol × {CONFIRM_INTERVAL_SECONDS} sn | giriş kalitesi {ENTRY_MIN_SCORE}+ | yükseliş 70+\n"
                         f"🏆 Gainers: TOP {GAINERS_TOP_N} giriş + {GAINERS_RAPID_WINDOW_SECONDS//60} dk’da {GAINERS_RAPID_MIN_POSITIONS}+ sıra yükseliş"
                     )
                 elif text == "/top":
@@ -1085,14 +1125,24 @@ async def telegram_command_loop(session):
                             lines.append(f"#{i:<2} {sym}  {pct:+.2f}%")
                         lines.append(f"\nOtomatik yeni giriş alarm bölgesi: TOP {GAINERS_TOP_N}")
                         await telegram_send(session, "\n".join(lines))
+                elif text == "/stats":
+                    conn = sqlite3.connect(DB_PATH)
+                    row = conn.execute("""SELECT COUNT(*), SUM(CASE WHEN o.mfe_pct>=0.5 THEN 1 ELSE 0 END), SUM(CASE WHEN o.mfe_pct>=1 THEN 1 ELSE 0 END), SUM(CASE WHEN o.mfe_pct>=2 THEN 1 ELSE 0 END), AVG(o.mfe_pct), AVG(o.mae_pct) FROM signals_v2 s JOIN signal_outcomes o ON o.signal_id=s.id AND o.horizon_s=3600""").fetchone()
+                    conn.close()
+                    n = row[0] or 0
+                    if not n:
+                        await telegram_send(session, "Henüz tamamlanmış 60 dk performans verisi yok.")
+                    else:
+                        await telegram_send(session, f"📊 60 DK SİNYAL PERFORMANSI\n\nTamamlanan: {n}\n+%0.5 gördü: %{100*row[1]/n:.1f}\n+%1 gördü: %{100*row[2]/n:.1f}\n+%2 gördü: %{100*row[3]/n:.1f}\nOrt. maksimum yükseliş: {row[4]:+.2f}%\nOrt. maksimum ters hareket: {row[5]:+.2f}%\n\nNot: Maksimum yükseliş, sinyal sonrası fırsatı ölçer; son fiyatı değil.")
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status, /top ve /gainers kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. Binance canlı akışlarını dinliyorum. /status, /top, /gainers ve /stats kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V4 — Momentum + Gainers\n\n"
+                        "🤖 Momentum Scanner V5 — Data-tuned Momentum + Gainers\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
+                        "/stats — tamamlanan sinyallerin 60 dk performansı\n"
                         "/test — Telegram testi\n\n"
                         "Momentum adayları sessiz izlenir. Telegram yalnızca süreklilik teyidinde, gainers TOP bölgesine yeni girişte veya hızlı sıra yükselişinde bildirim gönderir."
                     )

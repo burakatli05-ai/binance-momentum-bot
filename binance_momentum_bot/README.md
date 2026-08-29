@@ -1,35 +1,26 @@
-# Binance Futures Momentum Scanner V4
+# Binance Momentum Scanner V5 — Data-tuned
 
-V4 iki ayrı radar çalıştırır:
+V5, ilk canlı örneklemdeki 59 sinyal / 342 outcome kaydından çıkan bulgulara göre V4'ün filtrelerini sıkılaştırır.
 
-1. **Süreklilik teyitli momentum**: Tüm erken adaylar arka planda sessiz izlenir. Telegram yalnızca hareket 15 saniye arayla 3 kontrolde devam eder, hacim/agresif alış korunur ve giriş kalitesi eşiği geçilirse bildirim gönderir.
-2. **Gainers radarı**: Aktif ve minimum hacmi geçen USDT perpetual kontratları 24 saatlik yüzde değişime göre sıralanır. TOP 50'ye sonradan giren coin bildirilir. Ayrıca yaklaşık 10 dakikada 25 veya daha fazla sıra yükselip ilk 100'e ulaşan coinler ayrı erken uyarı üretir.
-
-## Spam koruması
-- Bot açıldığında zaten TOP 50'de bulunan coinler topluca bildirilmez; ilk sıralama yalnızca başlangıç referansıdır.
-- Aynı gainers olayı için varsayılan cooldown 30 dakikadır.
-- Bir coin TOP 50'den çıkıp tekrar girerse yeni giriş bildirimi için en az 5 dakika dışarıda kalması gerekir.
-- Bir coin aynı kontrolde hem TOP 50'ye girmiş hem hızlı yükselmişse iki mesaj yerine öncelikle giriş mesajı gönderilir.
-
-## Varsayılan momentum ayarları
-- Sessiz aday skoru: 58+
-- Süreklilik: 15 saniye arayla 3 başarılı kontrol
-- Giriş kalitesi: 76+
-- Teyitli momentum cooldown: 20 dakika
-
-## Varsayılan gainers ayarları
-- `GAINERS_TOP_N=50`
-- `GAINERS_POLL_SECONDS=30`
-- `GAINERS_RAPID_WINDOW_SECONDS=600`
-- `GAINERS_RAPID_MIN_POSITIONS=25`
-- `GAINERS_RAPID_MAX_RANK=100`
-- `GAINERS_ALERT_COOLDOWN_SECONDS=1800`
-- `GAINERS_REENTRY_MIN_OUT_SECONDS=300`
+## V5 değişiklikleri
+- Teyit 3 kontrolden 4 kontrole çıktı (varsayılan 15 sn aralık).
+- Momentum yoğunluğu, yükseliş potansiyeli ve giriş kalitesi ayrı skorlanır.
+- Aşırı agresif alış (%88+) artık otomatik olarak güçlü kabul edilmez; FOMO/absorpsiyon cezası alabilir.
+- Çok yüksek flow fakat zayıf fiyat ilerlemesi tükenme/absorpsiyon olarak cezalandırılır.
+- 77–84 momentum bandı ve orta-yüksek fakat doygun olmayan alıcı baskısı daha dengeli değerlendirilir.
+- Telegram teyitli alarmı için varsayılan giriş kalitesi 78+ ve yükseliş potansiyeli 70+ gerekir.
+- `/stats` komutu tamamlanmış 60 dk sinyallerinin +%0.5 / +%1 / +%2 görme oranlarını, ortalama MFE ve MAE'yi gösterir.
+- Gainers sistemi V4'teki gibi korunur.
 
 ## Telegram komutları
-- `/status` — canlı bağlantı, momentum ve gainers ayarları
-- `/top` — şu an ısınan ilk 10 coin (alarm değildir)
-- `/gainers` — güncel ilk 20 Futures gainers
-- `/test` — Telegram testi
+- `/status` bağlantı ve eşikler
+- `/top` ısınan coinler (alarm değildir)
+- `/gainers` Futures gainers
+- `/stats` 60 dk gerçekleşen sinyal performansı
+- `/test` bot testi
 
-Railway'deki mevcut `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` ve Root Directory ayarları değişmeden kullanılabilir.
+## Railway
+Mevcut `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` ve Root Directory ayarları değişmez. V5 dosyalarını mevcut GitHub klasörüne yükleyip commit etmek yeterlidir.
+
+## Önemli
+Bu bir kural tabanlı araştırma/uyarı aracıdır. “Yükseliş potansiyeli” skoru kalibre edilmiş gerçek olasılık yüzdesi değildir ve alım emri/kâr garantisi anlamına gelmez. Örneklem büyüdükçe eşikler yeniden analiz edilmelidir.
