@@ -1,43 +1,44 @@
-# Binance Momentum Scanner V5.4 — Quality First + Path Tracking
+# Binance Momentum Scanner V5.5
 
-V5.4, V5.3'ün çalışan Binance Futures + Telegram altyapısını ve Premium ALIM FIRSATI filtresini korur. Amaç sinyal sayısını artırmak değil; daha az gürültü, daha gerçekçi işlem-yolu ölçümü ve sonraki optimizasyon için daha kaliteli veri toplamaktır.
+V5.5, V5.4 Quality-First sisteminin sinyal üretimini değiştirmeden araştırma/çıkış gözlem katmanı ekler.
 
-## V5.4'te ne değişti?
+## Değişmeyenler
 
-- **Premium filtre değiştirilmedi.** 17 canlı V5.3 Premium örneği hâlâ küçük bir örneklem olduğu için CYS/ZRO gibi birkaç kötü vakaya aşırı uyum yapılmadı.
-- **Erken radar iki katmana ayrıldı.** İç radar hareketi 1/3 aşamasında DB'ye kaydeder; Telegram uyarısı ise varsayılan olarak ancak **2/3 süreklilik + daha sıkı erken kalite filtresi** sonrasında gider.
-- **Erken radarların sonuçları artık ölçülüyor.** `radar_signals` ve `radar_outcomes` tabloları sayesinde Premium'a dönüşmeyen erken uyarıların da 1/3/5/15/30/60 dk MFE/MAE performansı görülebilir.
-- **İşlem yolu ölçümü eklendi.** `signal_paths` tablosu alım bölgesi temasını, TP1/TP2/geçersizlik zamanlarını ve hangi olayın önce gerçekleştiğini kaydeder.
-- **Alım bölgesi gelmeden hedefe kaçan hareket ayrı sayılır.** Böylece yalnızca “bir ara +%2 gördü” diye gerçekçi olmayan başarı yazılmaz.
-- **TP1'e kadar ters hareket ölçülür.** Giriş kalitesini MFE'den bağımsız değerlendirmek mümkün olur.
-- **`/stats` genişletildi.** Yeni V5.4 kayıtlarında alım bölgesi teması, TP1'in geçersizlikten önce gelme oranı, TP2 ve TP1'e kadar ters hareket gösterilir.
-- **`/radarstats` eklendi.** Erken radarların gerçek 60 dk performansını gösterir.
+- Premium seçim filtreleri ve eşikleri
+- Momentum / giriş kalitesi / yükseliş skoru hesapları
+- 3×15 sn süreklilik yapısı
+- Erken Momentum seçiciliği
+- Tahmini alım bölgesi, TP1, TP2 ve geçersizlik formülleri
+- Gainers ve Momentum Devamı yapısı
 
-## Erken uyarı mantığı
+## Yeni özellikler
 
-İç radarın varsayılan eşiği V5.3'e yakın tutulur; araştırma verisi kaybolmaz. Telegram'a giden erken uyarı ise 2/3 süreklilik ister ve ayrıca varsayılan olarak skor 70+, 30/60 sn pozitif ivme, yeterli flow, dengeli aggressive-buy, aşırı uzamamış 5 dk hareketi ve breakout/relatif güç koşullarını arar.
+- 🧪 Shadow Kâr Koruma Adayı
+- 🧪 Shadow Çıkış Adayı
+- Premium sonrası ilk/aktif tepe takibi
+- Tepeden -%0.5 / -%1 / -%1.5 / -%2 geri çekilme kayıtları
+- Geri çekilme anında mikro yapı metrikleri
+- Erken radar → Premium doğrudan ilişkilendirmesi
+- Erken→Premium süre ve fiyat maliyeti kaydı
+- `/shadowstats`
 
-Bu uyarı **alım emri değildir**. Premium 3/3 teyit ve işlem kalitesi filtresi ayrı çalışmaya devam eder.
-
-## Komutlar
-
-- `/status`
-- `/top`
-- `/gainers`
-- `/funnel`
-- `/stats`
-- `/radarstats`
-- `/analiz TUT`
-- `TUT`
-- `/test`
+Shadow mesajları test içindir; gerçek satış emri veya otomatik işlem değildir.
 
 ## Railway
 
-Mevcut değişkenler yeterlidir:
+Mevcut V5.4 Railway değişkenleri yeterlidir. Yeni değişken eklemek zorunlu değildir. Varsayılan olarak Shadow takip ve Telegram Shadow bildirimi açıktır.
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
+İsteğe bağlı değişkenler:
 
-Yeni V5.4 eşikleri environment variable ile değiştirilebilir; ilk canlı örnekler toplanana kadar varsayılanları değiştirmemek daha sağlıklıdır.
+- `SHADOW_EXIT_ENABLED=1`
+- `SHADOW_EXIT_NOTIFY=1`
+- `SHADOW_MIN_PEAK_MFE_PCT=1.00`
+- `SHADOW_PROTECT_MIN_PEAK_PCT=1.50`
+- `SHADOW_PROTECT_DRAWDOWN_PCT=0.60`
+- `SHADOW_EXIT_DRAWDOWN_PCT=1.00`
+- `SHADOW_HARD_DRAWDOWN_PCT=2.00`
+- `SHADOW_MIN_AGE_SECONDS=30`
 
-> Bu yazılım otomatik emir vermez. Sinyaller ve seviyeler kural tabanlı piyasa araştırmasıdır; zarar etmeme veya kâr garantisi vermez. Pozisyon büyüklüğü, kaldıraç, stop ve toplam portföy riski ayrıca yönetilmelidir.
+## Telegram komutları
+
+`/status` `/top` `/gainers` `/funnel` `/stats` `/radarstats` `/shadowstats` `/analiz COIN` `/test`

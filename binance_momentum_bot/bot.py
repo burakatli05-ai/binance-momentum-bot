@@ -101,10 +101,23 @@ CONTINUATION_ALERT_ENABLED = os.getenv("CONTINUATION_ALERT_ENABLED", "1").strip(
 CONTINUATION_MIN_MFE_PCT = float(os.getenv("CONTINUATION_MIN_MFE_PCT", "2.00"))
 CONTINUATION_MIN_SCORE = int(os.getenv("CONTINUATION_MIN_SCORE", "72"))
 
+# V5.5 observer-only research layer. These settings never gate Premium creation,
+# never alter TP1/TP2, and never place orders. They only store path data and
+# optionally send clearly labelled SHADOW test notifications.
+SHADOW_EXIT_ENABLED = os.getenv("SHADOW_EXIT_ENABLED", "1").strip() not in ("0", "false", "False")
+SHADOW_EXIT_NOTIFY = os.getenv("SHADOW_EXIT_NOTIFY", "1").strip() not in ("0", "false", "False")
+SHADOW_MIN_PEAK_MFE_PCT = float(os.getenv("SHADOW_MIN_PEAK_MFE_PCT", "1.00"))
+SHADOW_PROTECT_MIN_PEAK_PCT = float(os.getenv("SHADOW_PROTECT_MIN_PEAK_PCT", "1.50"))
+SHADOW_PROTECT_DRAWDOWN_PCT = float(os.getenv("SHADOW_PROTECT_DRAWDOWN_PCT", "0.60"))
+SHADOW_EXIT_DRAWDOWN_PCT = float(os.getenv("SHADOW_EXIT_DRAWDOWN_PCT", "1.00"))
+SHADOW_HARD_DRAWDOWN_PCT = float(os.getenv("SHADOW_HARD_DRAWDOWN_PCT", "2.00"))
+SHADOW_MIN_AGE_SECONDS = int(os.getenv("SHADOW_MIN_AGE_SECONDS", "30"))
+WAVE_PULLBACK_LEVELS = (0.50, 1.00, 1.50, 2.00)
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.4")
+log = logging.getLogger("momentum-v5.5")
 
 
 @dataclass
@@ -192,6 +205,12 @@ class PendingOutcome:
     first_event: Optional[str] = None
     completed: set = field(default_factory=set)
     continuation_sent: bool = False
+    peak_price: float = 0.0
+    peak_mfe_pct: float = 0.0
+    peak_s: float = 0.0
+    pullbacks_seen: set = field(default_factory=set)
+    shadow_protect_sent: bool = False
+    shadow_exit_sent: bool = False
 
 
 @dataclass
@@ -373,6 +392,46 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_radar_links (
+            signal_id INTEGER PRIMARY KEY,
+            radar_id INTEGER,
+            symbol TEXT NOT NULL,
+            early_ts INTEGER, premium_ts INTEGER NOT NULL,
+            early_price REAL, premium_price REAL NOT NULL,
+            early_to_premium_s REAL, price_cost_pct REAL,
+            early_notified INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_wave_tracking (
+            signal_id INTEGER PRIMARY KEY,
+            peak_price REAL, peak_mfe_pct REAL, peak_s REAL,
+            pullback_0_5_s REAL, pullback_1_0_s REAL, pullback_1_5_s REAL, pullback_2_0_s REAL,
+            max_drawdown_from_peak_pct REAL DEFAULT 0,
+            completed_60m INTEGER DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shadow_exit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            signal_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            event TEXT NOT NULL,
+            age_s REAL, price REAL, return_pct REAL,
+            peak_mfe_pct REAL, drawdown_from_peak_pct REAL,
+            score INTEGER, chg30 REAL, chg60 REAL, flow30 REAL, buy30 REAL,
+            book_imbalance REAL, rel30 REAL, breakout INTEGER, reason TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -473,6 +532,103 @@ def save_radar_outcome(radar_id: int, horizon_s: int, ret: float, mfe: float, ma
         (radar_id,horizon_s,ret,mfe,mae,int(time.time())),
     )
     conn.commit(); conn.close()
+
+
+def save_premium_radar_link(signal_id: int, symbol: str, premium_price: float, premium_ts: float, radar_id: int):
+    if not radar_id:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT ts,price,notified FROM radar_signals WHERE id=?", (radar_id,)).fetchone()
+    if row:
+        early_ts, early_price, notified = row
+        dt = max(0.0, premium_ts - float(early_ts))
+        cost = pct_change(premium_price, float(early_price)) if early_price else None
+        conn.execute(
+            """INSERT OR REPLACE INTO premium_radar_links
+            (signal_id,radar_id,symbol,early_ts,premium_ts,early_price,premium_price,early_to_premium_s,price_cost_pct,early_notified)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (signal_id,radar_id,symbol,int(early_ts),int(premium_ts),float(early_price),premium_price,dt,cost,int(notified or 0)),
+        )
+        conn.commit()
+    conn.close()
+
+
+def save_wave_tracking(p: PendingOutcome, drawdown_from_peak: float = 0.0, completed_60m: bool = False):
+    vals = {0.5: None, 1.0: None, 1.5: None, 2.0: None}
+    for level, hit_s in p.pullbacks_seen:
+        vals[float(level)] = hit_s
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO premium_wave_tracking
+        (signal_id,peak_price,peak_mfe_pct,peak_s,pullback_0_5_s,pullback_1_0_s,pullback_1_5_s,pullback_2_0_s,max_drawdown_from_peak_pct,completed_60m,updated_ts)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(signal_id) DO UPDATE SET
+          peak_price=excluded.peak_price,peak_mfe_pct=excluded.peak_mfe_pct,peak_s=excluded.peak_s,
+          pullback_0_5_s=COALESCE(premium_wave_tracking.pullback_0_5_s,excluded.pullback_0_5_s),
+          pullback_1_0_s=COALESCE(premium_wave_tracking.pullback_1_0_s,excluded.pullback_1_0_s),
+          pullback_1_5_s=COALESCE(premium_wave_tracking.pullback_1_5_s,excluded.pullback_1_5_s),
+          pullback_2_0_s=COALESCE(premium_wave_tracking.pullback_2_0_s,excluded.pullback_2_0_s),
+          max_drawdown_from_peak_pct=MAX(premium_wave_tracking.max_drawdown_from_peak_pct,excluded.max_drawdown_from_peak_pct),
+          completed_60m=MAX(premium_wave_tracking.completed_60m,excluded.completed_60m),updated_ts=excluded.updated_ts""",
+        (p.signal_id,p.peak_price,p.peak_mfe_pct,p.peak_s,vals[0.5],vals[1.0],vals[1.5],vals[2.0],drawdown_from_peak,1 if completed_60m else 0,int(time.time())),
+    )
+    conn.commit(); conn.close()
+
+
+def save_shadow_event(p: PendingOutcome, event: str, age: float, price: float, ret: float, drawdown: float,
+                      m: Optional[dict], score: Optional[int], reason: str):
+    m = m or {}
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO shadow_exit_events
+        (ts,signal_id,symbol,event,age_s,price,return_pct,peak_mfe_pct,drawdown_from_peak_pct,score,chg30,chg60,flow30,buy30,book_imbalance,rel30,breakout,reason)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(time.time()),p.signal_id,p.symbol,event,age,price,ret,p.peak_mfe_pct,drawdown,score,m.get("chg30"),m.get("chg60"),
+         m.get("flow30"),m.get("buy30"),m.get("book_imbalance"),m.get("rel30"),int(bool(m.get("breakout",False))),reason[:500]),
+    )
+    conn.commit(); conn.close()
+
+
+def shadow_weakness_score(m: dict, score: int, drawdown: float) -> Tuple[int, List[str]]:
+    points = 0
+    reasons: List[str] = []
+    if drawdown >= SHADOW_EXIT_DRAWDOWN_PCT:
+        points += 2; reasons.append(f"tepeden -%{drawdown:.2f}")
+    elif drawdown >= SHADOW_PROTECT_DRAWDOWN_PCT:
+        points += 1; reasons.append(f"tepeden -%{drawdown:.2f}")
+    if m.get("chg30", 0) <= -0.15:
+        points += 2; reasons.append(f"30sn {m['chg30']:+.2f}%")
+    if m.get("chg60", 0) <= 0.00:
+        points += 1; reasons.append(f"60sn {m['chg60']:+.2f}%")
+    if m.get("buy30", 1) < 0.52:
+        points += 2; reasons.append(f"buy %{m['buy30']*100:.1f}")
+    elif m.get("buy30", 1) < 0.58:
+        points += 1; reasons.append(f"buy %{m['buy30']*100:.1f}")
+    if m.get("flow30", 99) < 1.0:
+        points += 1; reasons.append(f"flow {m['flow30']:.1f}x")
+    if m.get("rel30", 0) < -0.15:
+        points += 1; reasons.append(f"BTC relatif {m['rel30']:+.2f}%")
+    if score < 55:
+        points += 2; reasons.append(f"momentum {score}")
+    elif score < 65:
+        points += 1; reasons.append(f"momentum {score}")
+    return points, reasons
+
+
+def build_shadow_message(p: PendingOutcome, event: str, price: float, ret: float, drawdown: float, m: dict, score: int, reasons: List[str]):
+    title = "🧪 SHADOW — KÂR KORUMA ADAYI" if event == "PROTECT" else "🧪 SHADOW — ÇIKIŞ ADAYI"
+    return (
+        f"{title}\n\n"
+        f"🪙 {p.symbol}\n"
+        f"💰 Premium: {fmt_price(p.entry_price)} | Anlık: {fmt_price(price)}\n"
+        f"📈 Anlık getiri: {ret:+.2f}% | İlk/aktif tepe: +%{p.peak_mfe_pct:.2f}\n"
+        f"↘️ Tepeden geri çekilme: -%{drawdown:.2f}\n"
+        f"⭐ Momentum: {score}/100 | 30sn {m['chg30']:+.2f}% | 60sn {m['chg60']:+.2f}%\n"
+        f"💥 Flow {m['flow30']:.1f}x | Buy %{m['buy30']*100:.1f} | BTC relatif {m['rel30']:+.2f}%\n"
+        f"🧭 Neden: {', '.join(reasons[:5]) if reasons else 'gözlemsel zayıflama'}\n\n"
+        "⚠️ SHADOW TEST: Bu gerçek satış emri/sinyali değildir. Şimdilik işlem kararında dikkate alma; model doğrulaması için kaydediliyor.\n"
+        f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
+    )
 
 
 def save_candidate_event(symbol: str, event: str, m: Optional[dict] = None, score: Optional[int] = None, st: Optional[SymbolState] = None, note: str = ""):
@@ -995,7 +1151,7 @@ def build_early_message(m: dict, score: int, st: SymbolState):
         f"₿ BTC relatif güç: {m['rel30']:+.2f}%\n"
         f"{rank_line}\n"
         f"⭐ Momentum: {score}/100\n\n"
-        "Bu bir alım sinyali değildir. Bot hareketin erken safhasını fark etti; 3/3 süreklilik ve işlem kalitesi teyidi bekleniyor.\n"
+        "Bu bir alım sinyali değildir. Bot hareketin erken safhasını 2/3 süreklilikte fark etti; Premium için 3/3 süreklilik ve işlem kalitesi teyidi bekleniyor.\n"
         f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
     )
 
@@ -1297,14 +1453,19 @@ async def evaluate(session, symbol: str):
         save_candidate_event(symbol, "premium_signal", m, score, st, f"quality={quality}; rise={rise_score}; runup={runup:.2f}")
         signal_id = save_signal(m)
         save_signal_meta(signal_id, m)
+        # Observer-only V5.5 linkage: connect this Premium with the currently active early-radar episode.
+        save_premium_radar_link(signal_id, symbol, m["price"], now, st.active_radar_id)
         plan = m["trade_plan"]
         entry_touch = 0.0 if plan["entry_low"] <= m["price"] <= plan["entry_high"] else None
         path_entry_price = m["price"] if entry_touch is not None else 0.0
         init_signal_path(signal_id, plan["entry_low"], plan["entry_high"], plan["target1"], plan["target2"], plan["invalidation"], entry_touch, path_entry_price)
-        pending_outcomes.append(PendingOutcome(
+        po = PendingOutcome(
             signal_id, symbol, m["price"], now, plan["target1"], plan["target2"], plan["invalidation"],
             plan["entry_low"], plan["entry_high"], entry_touch, path_entry_price
-        ))
+        )
+        po.peak_price = m["price"]
+        pending_outcomes.append(po)
+        save_wave_tracking(po)
         log.info("PREMIUM CONFIRMED %s momentum=%d rise=%d quality=%d runup=%.2f", symbol, score, rise_score, quality, runup)
         await telegram_send(session, build_message(m), symbol=symbol)
         reset_candidate(st)
@@ -1460,6 +1621,51 @@ async def outcome_loop(session):
             p.mae = min(p.mae, ret)
             age = now - p.created_ts
             path_changed = False
+
+            # V5.5 observer-only first-wave tracking. This does not affect Premium, TP or path logic.
+            wave_changed = False
+            if price > (p.peak_price or p.entry_price):
+                p.peak_price = price
+                p.peak_mfe_pct = max(p.peak_mfe_pct, pct_change(price, p.entry_price))
+                p.peak_s = age
+                wave_changed = True
+            drawdown_from_peak = max(0.0, -pct_change(price, p.peak_price or price))
+            m_shadow = None
+            sc_shadow = None
+            # Record each first pullback threshold once, together with live microstructure.
+            for pb in WAVE_PULLBACK_LEVELS:
+                if drawdown_from_peak >= pb and not any(abs(float(x[0])-pb) < 1e-9 for x in p.pullbacks_seen):
+                    p.pullbacks_seen.add((pb, age))
+                    m_shadow = m_shadow or compute_metrics(p.symbol)
+                    sc_shadow = score_metrics(m_shadow) if m_shadow else None
+                    save_shadow_event(p, f"PULLBACK_{pb:.1f}", age, price, ret, drawdown_from_peak, m_shadow, sc_shadow, f"first -{pb:.1f}% from peak")
+                    wave_changed = True
+            if wave_changed:
+                save_wave_tracking(p, drawdown_from_peak)
+
+            # SHADOW notifications are test-only and can never modify or close a signal.
+            if SHADOW_EXIT_ENABLED and age >= SHADOW_MIN_AGE_SECONDS and p.peak_mfe_pct >= SHADOW_MIN_PEAK_MFE_PCT:
+                m_shadow = m_shadow or compute_metrics(p.symbol)
+                if m_shadow:
+                    sc_shadow = score_metrics(m_shadow)
+                    weakness, weak_reasons = shadow_weakness_score(m_shadow, sc_shadow, drawdown_from_peak)
+                    if (not p.shadow_protect_sent and p.peak_mfe_pct >= SHADOW_PROTECT_MIN_PEAK_PCT
+                            and drawdown_from_peak >= SHADOW_PROTECT_DRAWDOWN_PCT and weakness >= 3):
+                        p.shadow_protect_sent = True
+                        save_shadow_event(p, "PROTECT", age, price, ret, drawdown_from_peak, m_shadow, sc_shadow, "; ".join(weak_reasons))
+                        if SHADOW_EXIT_NOTIFY:
+                            await telegram_send(session, build_shadow_message(p, "PROTECT", price, ret, drawdown_from_peak, m_shadow, sc_shadow, weak_reasons), symbol=p.symbol)
+                    hard_exit = drawdown_from_peak >= SHADOW_HARD_DRAWDOWN_PCT
+                    structured_exit = drawdown_from_peak >= SHADOW_EXIT_DRAWDOWN_PCT and weakness >= 4
+                    invalid_exit = p.entry_touch_s is not None and p.invalidation and price <= p.invalidation
+                    if not p.shadow_exit_sent and (hard_exit or structured_exit or invalid_exit):
+                        p.shadow_exit_sent = True
+                        extra = list(weak_reasons)
+                        if hard_exit: extra.append("sert tepe geri çekilmesi")
+                        if invalid_exit: extra.append("geçersizlik seviyesi")
+                        save_shadow_event(p, "EXIT", age, price, ret, drawdown_from_peak, m_shadow, sc_shadow, "; ".join(extra))
+                        if SHADOW_EXIT_NOTIFY:
+                            await telegram_send(session, build_shadow_message(p, "EXIT", price, ret, drawdown_from_peak, m_shadow, sc_shadow, extra), symbol=p.symbol)
             # Realistic trade-path accounting: the suggested entry zone must be touched
             # before TP/invalidity statistics count as a hypothetical trade.
             if p.entry_touch_s is None:
@@ -1515,6 +1721,7 @@ async def outcome_loop(session):
                     p.completed.add(h)
             if 3600 in p.completed:
                 save_signal_path(p, completed_60m=True)
+                save_wave_tracking(p, max(0.0, -pct_change(price, p.peak_price or price)), completed_60m=True)
                 remove.append(p)
         for p in remove:
             if p in pending_outcomes:
@@ -1777,6 +1984,7 @@ async def telegram_command_loop(session):
                         f"⭐ Aday eşiği: {EARLY_SCORE}+\n"
                         f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
                         f"👀 Erken bildirim: 2/3 süreklilik + skor {EARLY_NOTIFY_MIN_SCORE}+ (iç radar ayrı kaydolur)\n"
+                        f"🧪 Shadow Exit: {'açık' if SHADOW_EXIT_ENABLED else 'kapalı'} | Telegram: {'açık' if SHADOW_EXIT_NOTIFY else 'kapalı'} | sadece test\n"
                         f"🏆 Gainers: TOP {GAINERS_TOP_N} giriş + {GAINERS_RAPID_WINDOW_SECONDS//60} dk’da {GAINERS_RAPID_MIN_POSITIONS}+ sıra yükseliş"
                     )
                 elif text == "/top":
@@ -1860,6 +2068,34 @@ async def telegram_command_loop(session):
                     else:
                         await telegram_send(session,
                             f"👀 60 DK ERKEN RADAR PERFORMANSI\n\nİç radar kaydı: {n}\nTelegram'a bildirilen: {int(row[6] or 0)}\n+%0.5 gördü: %{100*(row[1] or 0)/n:.1f}\n+%1 gördü: %{100*(row[2] or 0)/n:.1f}\n+%2 gördü: %{100*(row[3] or 0)/n:.1f}\nOrt. MFE: {(row[4] or 0):+.2f}%\nOrt. MAE: {(row[5] or 0):+.2f}%\n\nİç radar tüm araştırma örneklerini tutar; Telegram yalnız 2/3 süreklilikteki seçici alt kümeyi bildirir.")
+                elif text == "/shadowstats":
+                    conn = sqlite3.connect(DB_PATH)
+                    ev = conn.execute("""SELECT COUNT(DISTINCT CASE WHEN event='PROTECT' THEN signal_id END),
+                        COUNT(DISTINCT CASE WHEN event='EXIT' THEN signal_id END),
+                        COUNT(DISTINCT signal_id) FROM shadow_exit_events""").fetchone()
+                    wave = conn.execute("""SELECT COUNT(*),AVG(peak_mfe_pct),AVG(peak_s),
+                        SUM(CASE WHEN pullback_0_5_s IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN pullback_1_0_s IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN pullback_1_5_s IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN pullback_2_0_s IS NOT NULL THEN 1 ELSE 0 END)
+                        FROM premium_wave_tracking WHERE completed_60m=1""").fetchone()
+                    links = conn.execute("""SELECT COUNT(*),SUM(early_notified),AVG(early_to_premium_s),AVG(price_cost_pct) FROM premium_radar_links""").fetchone()
+                    conn.close()
+                    wn = wave[0] or 0
+                    await telegram_send(session,
+                        f"🧪 V5.5 SHADOW / DALGA İSTATİSTİĞİ\n\n"
+                        f"Shadow kâr-koruma adayı: {int(ev[0] or 0)}\n"
+                        f"Shadow çıkış adayı: {int(ev[1] or 0)}\n"
+                        f"Shadow event görülen Premium: {int(ev[2] or 0)}\n\n"
+                        f"60 dk tamamlanan dalga: {wn}\n"
+                        f"Ort. tepe MFE: {(wave[1] or 0):+.2f}%\n"
+                        f"Ort. tepe zamanı: {(wave[2] or 0):.0f} sn\n"
+                        f"Tepeden -%0.5 gördü: {int(wave[3] or 0)} | -%1: {int(wave[4] or 0)} | -%1.5: {int(wave[5] or 0)} | -%2: {int(wave[6] or 0)}\n\n"
+                        f"Erken radar→Premium bağlantısı: {int(links[0] or 0)}\n"
+                        f"Bunlardan Telegram erken uyarılı: {int(links[1] or 0)}\n"
+                        f"Ort. erken→Premium süre: {(links[2] or 0):.1f} sn\n"
+                        f"Ort. teyit fiyat maliyeti: {(links[3] or 0):+.2f}%\n\n"
+                        "Not: Shadow bildirimleri test verisidir; işlem kararı değildir.")
                 elif text.startswith("/analiz ") or (not text.startswith("/") and text not in ("test",) and 1 <= len(raw_text) <= 20):
                     token = raw_text.split(maxsplit=1)[1] if text.startswith("/analiz ") else raw_text
                     token = token.strip().upper().replace("/", "")
@@ -1881,19 +2117,20 @@ async def telegram_command_loop(session):
                             plan = estimate_trade_plan(sym, m)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V5.4 — Quality-First + Path Tracking\n\n"
+                        "🤖 Momentum Scanner V5.5 — Quality-First + Shadow Research\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
                         "/funnel — adayların hangi filtrelerde elendiği\n"
                         "/stats — premium sinyal + işlem yolu performansı\n"
                         "/radarstats — erken radarların 60 dk performansı\n"
+                        "/shadowstats — Shadow Exit + ilk dalga + erken→Premium özeti\n"
                         "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
-                        "V5.3 daha az ama daha seçici ALIM FIRSATI hedefler. ERKEN MOMENTUM yalnızca radar uyarısıdır; işlem sinyali değildir."
+                        "Premium seçim kuralları V5.4 ile aynıdır. SHADOW bildirimleri yalnız araştırma/test içindir; işlem sinyali değildir."
                     )
         except asyncio.CancelledError:
             raise
@@ -1919,15 +2156,16 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.4 başladı — QUALITY FIRST\n\n"
+                f"✅ Momentum Scanner V5.5 başladı — QUALITY FIRST + SHADOW RESEARCH\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade ile erken momentum taraması\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                 f"⭐ Sessiz aday skoru: {EARLY_SCORE}+\n"
                 f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
-                f"👀 Erken radar: iç kayıt + 2/3 seçici Telegram uyarısı; işlem sinyali değil\n\n"
+                f"👀 Erken radar: iç kayıt + 2/3 seçici Telegram uyarısı; işlem sinyali değil\n"
+                f"🧪 Shadow Exit + ilk momentum dalgası takibi: AÇIK; Premium/TP kurallarını değiştirmez\n\n"
                 f"🏆 Gainers: TOP {GAINERS_TOP_N} + hızlı sıra yükselişi\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /analiz COIN  /test"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
