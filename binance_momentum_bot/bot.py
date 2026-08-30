@@ -58,7 +58,7 @@ MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.45"))
 DB_PATH = os.getenv("DB_PATH", "signals.db")
 RISE_MIN_SCORE = int(os.getenv("RISE_MIN_SCORE", "66"))
 
-# V5.3 quality-first alerting. Confirmed momentum is still tracked, but Telegram
+# V5.4 quality-first alerting. Confirmed momentum is still tracked, but Telegram
 # "ALIM FIRSATI" is reserved for stricter, trade-quality setups.
 PREMIUM_MIN_MOMENTUM_SCORE = int(os.getenv("PREMIUM_MIN_MOMENTUM_SCORE", "64"))
 PREMIUM_ENTRY_MIN_SCORE = int(os.getenv("PREMIUM_ENTRY_MIN_SCORE", "78"))
@@ -84,6 +84,17 @@ EARLY_ALERT_MIN_BUY30 = float(os.getenv("EARLY_ALERT_MIN_BUY30", "0.62"))
 EARLY_ALERT_MAX_BUY30 = float(os.getenv("EARLY_ALERT_MAX_BUY30", "0.80"))
 EARLY_ALERT_MAX_BOOK = float(os.getenv("EARLY_ALERT_MAX_BOOK", "0.90"))
 EARLY_ALERT_COOLDOWN_SECONDS = int(os.getenv("EARLY_ALERT_COOLDOWN_SECONDS", "1800"))
+# V5.4: every qualifying early radar can be recorded internally, but Telegram waits for
+# 2/3 continuity plus a stricter notification gate. This keeps the research data rich
+# while reducing user-facing noise.
+EARLY_RADAR_RECORD_COOLDOWN_SECONDS = int(os.getenv("EARLY_RADAR_RECORD_COOLDOWN_SECONDS", "600"))
+EARLY_NOTIFY_MIN_SCORE = int(os.getenv("EARLY_NOTIFY_MIN_SCORE", "70"))
+EARLY_NOTIFY_MIN_CHG30 = float(os.getenv("EARLY_NOTIFY_MIN_CHG30", "0.30"))
+EARLY_NOTIFY_MIN_CHG60 = float(os.getenv("EARLY_NOTIFY_MIN_CHG60", "0.45"))
+EARLY_NOTIFY_MIN_FLOW30 = float(os.getenv("EARLY_NOTIFY_MIN_FLOW30", "2.20"))
+EARLY_NOTIFY_MIN_BUY30 = float(os.getenv("EARLY_NOTIFY_MIN_BUY30", "0.62"))
+EARLY_NOTIFY_MAX_BUY30 = float(os.getenv("EARLY_NOTIFY_MAX_BUY30", "0.80"))
+EARLY_NOTIFY_MAX_CHG5 = float(os.getenv("EARLY_NOTIFY_MAX_CHG5", "2.50"))
 
 # Optional one-shot continuation message after a confirmed setup has already moved.
 CONTINUATION_ALERT_ENABLED = os.getenv("CONTINUATION_ALERT_ENABLED", "1").strip() not in ("0", "false", "False")
@@ -93,7 +104,7 @@ CONTINUATION_MIN_SCORE = int(os.getenv("CONTINUATION_MIN_SCORE", "72"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.3")
+log = logging.getLogger("momentum-v5.4")
 
 
 @dataclass
@@ -150,6 +161,9 @@ class SymbolState:
     buy_signal_ts: float = 0.0
     early_alert_ts: float = 0.0
     early_alert_price: float = 0.0
+    radar_record_ts: float = 0.0
+    active_radar_id: int = 0
+    active_radar_notified: bool = False
 
 
 @dataclass
@@ -160,16 +174,42 @@ class PendingOutcome:
     created_ts: float
     target1: float = 0.0
     target2: float = 0.0
+    invalidation: float = 0.0
+    entry_low: float = 0.0
+    entry_high: float = 0.0
+    entry_touch_s: Optional[float] = None
+    path_entry_price: float = 0.0
+    target_before_entry_s: Optional[float] = None
+    mfe: float = 0.0
+    mae: float = 0.0
+    mfe_before_tp1: float = 0.0
+    mae_before_tp1: float = 0.0
+    trade_mfe: float = 0.0
+    trade_mae: float = 0.0
+    tp1_hit_s: Optional[float] = None
+    tp2_hit_s: Optional[float] = None
+    invalidation_hit_s: Optional[float] = None
+    first_event: Optional[str] = None
+    completed: set = field(default_factory=set)
+    continuation_sent: bool = False
+
+
+@dataclass
+class PendingRadar:
+    radar_id: int
+    symbol: str
+    entry_price: float
+    created_ts: float
     mfe: float = 0.0
     mae: float = 0.0
     completed: set = field(default_factory=set)
-    continuation_sent: bool = False
 
 
 states: Dict[str, SymbolState] = defaultdict(SymbolState)
 symbols: List[str] = []
 stop_event = asyncio.Event()
 pending_outcomes: List[PendingOutcome] = []
+pending_radars: List[PendingRadar] = []
 stream_health = {
     "ticker": 0.0,
     "book": 0.0,
@@ -293,6 +333,46 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_paths (
+            signal_id INTEGER PRIMARY KEY,
+            entry_low REAL, entry_high REAL, entry_touch_s REAL, path_entry_price REAL,
+            target1 REAL, target2 REAL, invalidation REAL, target_before_entry_s REAL,
+            tp1_hit_s REAL, tp2_hit_s REAL, invalidation_hit_s REAL,
+            first_event TEXT,
+            mfe_before_tp1 REAL, mae_before_tp1 REAL, trade_mfe REAL, trade_mae REAL,
+            completed_60m INTEGER DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS radar_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            price REAL NOT NULL,
+            score INTEGER,
+            chg30 REAL, chg60 REAL, chg5 REAL,
+            flow30 REAL, buy30 REAL, book_imbalance REAL, rel30 REAL,
+            breakout INTEGER, gainer_rank INTEGER,
+            notified INTEGER DEFAULT 0, notify_ts INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS radar_outcomes (
+            radar_id INTEGER NOT NULL,
+            horizon_s INTEGER NOT NULL,
+            return_pct REAL, mfe_pct REAL, mae_pct REAL,
+            ts INTEGER NOT NULL,
+            PRIMARY KEY(radar_id, horizon_s)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -329,6 +409,70 @@ def save_outcome(signal_id: int, horizon_s: int, ret: float, mfe: float, mae: fl
     )
     conn.commit()
     conn.close()
+
+
+def init_signal_path(signal_id: int, entry_low: float, entry_high: float, target1: float, target2: float, invalidation: float,
+                     entry_touch_s: Optional[float] = None, path_entry_price: float = 0.0):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT OR REPLACE INTO signal_paths
+        (signal_id,entry_low,entry_high,entry_touch_s,path_entry_price,target1,target2,invalidation,updated_ts)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (signal_id,entry_low,entry_high,entry_touch_s,path_entry_price,target1,target2,invalidation,int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_signal_path(p: PendingOutcome, completed_60m: bool = False):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO signal_paths
+        (signal_id,entry_low,entry_high,entry_touch_s,path_entry_price,target1,target2,invalidation,target_before_entry_s,
+         tp1_hit_s,tp2_hit_s,invalidation_hit_s,first_event,mfe_before_tp1,mae_before_tp1,trade_mfe,trade_mae,completed_60m,updated_ts)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(signal_id) DO UPDATE SET
+          entry_low=excluded.entry_low,entry_high=excluded.entry_high,entry_touch_s=excluded.entry_touch_s,path_entry_price=excluded.path_entry_price,
+          target1=excluded.target1,target2=excluded.target2,invalidation=excluded.invalidation,target_before_entry_s=excluded.target_before_entry_s,
+          tp1_hit_s=excluded.tp1_hit_s,tp2_hit_s=excluded.tp2_hit_s,invalidation_hit_s=excluded.invalidation_hit_s,
+          first_event=excluded.first_event,mfe_before_tp1=excluded.mfe_before_tp1,mae_before_tp1=excluded.mae_before_tp1,
+          trade_mfe=excluded.trade_mfe,trade_mae=excluded.trade_mae,
+          completed_60m=MAX(signal_paths.completed_60m,excluded.completed_60m),updated_ts=excluded.updated_ts""",
+        (p.signal_id,p.entry_low,p.entry_high,p.entry_touch_s,p.path_entry_price,p.target1,p.target2,p.invalidation,p.target_before_entry_s,
+         p.tp1_hit_s,p.tp2_hit_s,p.invalidation_hit_s,p.first_event,p.mfe_before_tp1,p.mae_before_tp1,p.trade_mfe,p.trade_mae,
+         1 if completed_60m else 0,int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_radar_signal(symbol: str, m: dict, score: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        """INSERT INTO radar_signals
+        (ts,symbol,price,score,chg30,chg60,chg5,flow30,buy30,book_imbalance,rel30,breakout,gainer_rank,notified)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+        (int(time.time()),symbol,m["price"],score,m.get("chg30"),m.get("chg60"),m.get("chg5"),m.get("flow30"),
+         m.get("buy30"),m.get("book_imbalance"),m.get("rel30"),int(bool(m.get("breakout",False))),gainers_prev_rank.get(symbol)),
+    )
+    rid = cur.lastrowid
+    conn.commit(); conn.close()
+    return rid
+
+
+def mark_radar_notified(radar_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE radar_signals SET notified=1, notify_ts=? WHERE id=?", (int(time.time()), radar_id))
+    conn.commit(); conn.close()
+
+
+def save_radar_outcome(radar_id: int, horizon_s: int, ret: float, mfe: float, mae: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO radar_outcomes(radar_id,horizon_s,return_pct,mfe_pct,mae_pct,ts) VALUES (?,?,?,?,?,?)",
+        (radar_id,horizon_s,ret,mfe,mae,int(time.time())),
+    )
+    conn.commit(); conn.close()
 
 
 def save_candidate_event(symbol: str, event: str, m: Optional[dict] = None, score: Optional[int] = None, st: Optional[SymbolState] = None, note: str = ""):
@@ -710,6 +854,8 @@ def reset_candidate(st: SymbolState):
     st.candidate_passes = 0
     st.candidate_prices.clear()
     st.candidate_scores.clear()
+    st.active_radar_id = 0
+    st.active_radar_notified = False
 
 
 def continuity_pass(m: dict, score: int) -> bool:
@@ -798,6 +944,23 @@ def early_watch_pass(m: dict, score: int) -> bool:
         and m["spread"] <= min(MAX_SPREAD_PCT, 0.30)
         and not m["extended"]
         and (m["breakout"] or m["rel30"] >= 0.15)
+    )
+
+
+def early_notify_pass(m: dict, score: int, st: SymbolState) -> bool:
+    """User-facing early alert: stricter than internal radar and requires 2/3 continuity."""
+    return (
+        st.candidate_passes >= 2
+        and score >= EARLY_NOTIFY_MIN_SCORE
+        and m["chg30"] >= EARLY_NOTIFY_MIN_CHG30
+        and m["chg60"] >= EARLY_NOTIFY_MIN_CHG60
+        and m["flow30"] >= EARLY_NOTIFY_MIN_FLOW30
+        and EARLY_NOTIFY_MIN_BUY30 <= m["buy30"] <= EARLY_NOTIFY_MAX_BUY30
+        and m["chg5"] <= EARLY_NOTIFY_MAX_CHG5
+        and m["book_imbalance"] <= EARLY_ALERT_MAX_BOOK
+        and m["spread"] <= min(MAX_SPREAD_PCT, 0.30)
+        and not m["extended"]
+        and (m["breakout"] or m["rel30"] >= 0.20)
     )
 
 
@@ -1012,12 +1175,15 @@ async def evaluate(session, symbol: str):
             st.candidate_scores.append(score)
             save_candidate_event(symbol, "candidate_start", m, score, st)
             log.info("CANDIDATE %s score=%d", symbol, score)
-            if early_watch_pass(m, score) and now - st.early_alert_ts >= EARLY_ALERT_COOLDOWN_SECONDS:
-                st.early_alert_ts = now
-                st.early_alert_price = m["price"]
-                funnel_hit("early_alert")
-                save_candidate_event(symbol, "early_alert", m, score, st)
-                await telegram_send(session, build_early_message(m, score, st), symbol=symbol)
+            # V5.4: record the early radar immediately for research/outcome tracking,
+            # but do not notify the user at 1/3. Telegram waits for 2/3 continuity.
+            if early_watch_pass(m, score) and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS:
+                st.radar_record_ts = now
+                st.active_radar_id = save_radar_signal(symbol, m, score)
+                st.active_radar_notified = False
+                pending_radars.append(PendingRadar(st.active_radar_id, symbol, m["price"], now))
+                funnel_hit("early_radar")
+                save_candidate_event(symbol, "early_radar", m, score, st)
             return
 
         # Zaman aşımı veya belirgin bozulma: adayı sessizce bırak.
@@ -1048,6 +1214,24 @@ async def evaluate(session, symbol: str):
                 st.candidate_passes += 1
                 funnel_hit("confirm_pass")
                 save_candidate_event(symbol, "confirm_pass", m, score, st)
+                if (not st.active_radar_id and early_watch_pass(m, score)
+                        and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS):
+                    st.radar_record_ts = now
+                    st.active_radar_id = save_radar_signal(symbol, m, score)
+                    st.active_radar_notified = False
+                    pending_radars.append(PendingRadar(st.active_radar_id, symbol, m["price"], now))
+                    funnel_hit("early_radar")
+                    save_candidate_event(symbol, "early_radar", m, score, st, "created at confirm stage")
+                if (st.active_radar_id and not st.active_radar_notified
+                        and now - st.early_alert_ts >= EARLY_ALERT_COOLDOWN_SECONDS
+                        and early_notify_pass(m, score, st)):
+                    st.early_alert_ts = now
+                    st.early_alert_price = m["price"]
+                    st.active_radar_notified = True
+                    mark_radar_notified(st.active_radar_id)
+                    funnel_hit("early_alert")
+                    save_candidate_event(symbol, "early_alert", m, score, st, "V5.4 2/3 selective notify")
+                    await telegram_send(session, build_early_message(m, score, st), symbol=symbol)
         else:
             # Bir zayıf kontrol toleransı; art arda bozulma adayı sonlandırır.
             if st.candidate_checks - st.candidate_passes >= 2:
@@ -1114,7 +1298,13 @@ async def evaluate(session, symbol: str):
         signal_id = save_signal(m)
         save_signal_meta(signal_id, m)
         plan = m["trade_plan"]
-        pending_outcomes.append(PendingOutcome(signal_id, symbol, m["price"], now, plan["target1"], plan["target2"]))
+        entry_touch = 0.0 if plan["entry_low"] <= m["price"] <= plan["entry_high"] else None
+        path_entry_price = m["price"] if entry_touch is not None else 0.0
+        init_signal_path(signal_id, plan["entry_low"], plan["entry_high"], plan["target1"], plan["target2"], plan["invalidation"], entry_touch, path_entry_price)
+        pending_outcomes.append(PendingOutcome(
+            signal_id, symbol, m["price"], now, plan["target1"], plan["target2"], plan["invalidation"],
+            plan["entry_low"], plan["entry_high"], entry_touch, path_entry_price
+        ))
         log.info("PREMIUM CONFIRMED %s momentum=%d rise=%d quality=%d runup=%.2f", symbol, score, rise_score, quality, runup)
         await telegram_send(session, build_message(m), symbol=symbol)
         reset_candidate(st)
@@ -1269,6 +1459,44 @@ async def outcome_loop(session):
             p.mfe = max(p.mfe, ret)
             p.mae = min(p.mae, ret)
             age = now - p.created_ts
+            path_changed = False
+            # Realistic trade-path accounting: the suggested entry zone must be touched
+            # before TP/invalidity statistics count as a hypothetical trade.
+            if p.entry_touch_s is None:
+                if p.target1 and p.target_before_entry_s is None and price >= p.target1:
+                    p.target_before_entry_s = age
+                    p.first_event = p.first_event or "TARGET_BEFORE_ENTRY"
+                    path_changed = True
+                elif p.entry_high and price <= p.entry_high:
+                    if p.invalidation and price <= p.invalidation:
+                        p.invalidation_hit_s = age
+                        p.first_event = p.first_event or "INVALIDATION_BEFORE_ENTRY"
+                    else:
+                        p.entry_touch_s = age
+                        p.path_entry_price = price
+                    path_changed = True
+            if p.entry_touch_s is not None:
+                trade_ret = pct_change(price, p.path_entry_price or p.entry_price)
+                p.trade_mfe = max(p.trade_mfe, trade_ret)
+                p.trade_mae = min(p.trade_mae, trade_ret)
+                if p.tp1_hit_s is None:
+                    p.mfe_before_tp1 = max(p.mfe_before_tp1, trade_ret)
+                    p.mae_before_tp1 = min(p.mae_before_tp1, trade_ret)
+                if p.target1 and p.tp1_hit_s is None and price >= p.target1:
+                    p.tp1_hit_s = age
+                    if p.first_event is None:
+                        p.first_event = "TP1"
+                    path_changed = True
+                if p.target2 and p.tp2_hit_s is None and price >= p.target2:
+                    p.tp2_hit_s = age
+                    path_changed = True
+                if p.invalidation and p.invalidation_hit_s is None and price <= p.invalidation:
+                    p.invalidation_hit_s = age
+                    if p.first_event is None:
+                        p.first_event = "INVALIDATION"
+                    path_changed = True
+            if path_changed:
+                save_signal_path(p)
             t2_ret = pct_change(p.target2, p.entry_price) if p.target2 else CONTINUATION_MIN_MFE_PCT
             continuation_trigger = max(CONTINUATION_MIN_MFE_PCT, t2_ret)
             if CONTINUATION_ALERT_ENABLED and not p.continuation_sent and age <= 1800 and p.mfe >= continuation_trigger:
@@ -1286,10 +1514,31 @@ async def outcome_loop(session):
                     save_outcome(p.signal_id, h, ret, p.mfe, p.mae)
                     p.completed.add(h)
             if 3600 in p.completed:
+                save_signal_path(p, completed_60m=True)
                 remove.append(p)
         for p in remove:
             if p in pending_outcomes:
                 pending_outcomes.remove(p)
+
+        radar_remove = []
+        radar_horizons = (60, 180, 300, 900, 1800, 3600)
+        for r in list(pending_radars):
+            price = states[r.symbol].last_price
+            if not price:
+                continue
+            ret = pct_change(price, r.entry_price)
+            r.mfe = max(r.mfe, ret)
+            r.mae = min(r.mae, ret)
+            age = now - r.created_ts
+            for h in radar_horizons:
+                if age >= h and h not in r.completed:
+                    save_radar_outcome(r.radar_id, h, ret, r.mfe, r.mae)
+                    r.completed.add(h)
+            if 3600 in r.completed:
+                radar_remove.append(r)
+        for r in radar_remove:
+            if r in pending_radars:
+                pending_radars.remove(r)
         await asyncio.sleep(2)
 
 
@@ -1527,6 +1776,7 @@ async def telegram_command_loop(session):
                         f"📡 ticker: {age('ticker'):.0f} sn | book: {age('book'):.0f} sn | agg: {age('agg'):.0f} sn\n"
                         f"⭐ Aday eşiği: {EARLY_SCORE}+\n"
                         f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
+                        f"👀 Erken bildirim: 2/3 süreklilik + skor {EARLY_NOTIFY_MIN_SCORE}+ (iç radar ayrı kaydolur)\n"
                         f"🏆 Gainers: TOP {GAINERS_TOP_N} giriş + {GAINERS_RAPID_WINDOW_SECONDS//60} dk’da {GAINERS_RAPID_MIN_POSITIONS}+ sıra yükseliş"
                     )
                 elif text == "/top":
@@ -1563,7 +1813,8 @@ async def telegram_command_loop(session):
                         f"❌ Yükseliş skoru yetersiz: {funnel_counts['rise_reject']}\n"
                         f"❌ Hareket uzamış: {funnel_counts['extended_reject']}\n"
                         f"🧱 Premium filtreden elendi: {funnel_counts['premium_reject']}\n"
-                        f"👀 Erken momentum uyarısı: {funnel_counts['early_alert']}\n"
+                        f"🧪 İç radar kaydı: {funnel_counts['early_radar']}\n"
+                        f"👀 Seçici erken uyarı: {funnel_counts['early_alert']}\n"
                         f"🟢 Premium alım fırsatı: {funnel_counts['telegram_signal']}\n"
                         f"🚀 Momentum devamı: {funnel_counts['continuation_alert']}\n\n"
                         "Bu ekran hangi filtrenin adayları elediğini gösterir."
@@ -1571,12 +1822,44 @@ async def telegram_command_loop(session):
                 elif text == "/stats":
                     conn = sqlite3.connect(DB_PATH)
                     row = conn.execute("""SELECT COUNT(*), SUM(CASE WHEN o.mfe_pct>=0.5 THEN 1 ELSE 0 END), SUM(CASE WHEN o.mfe_pct>=1 THEN 1 ELSE 0 END), SUM(CASE WHEN o.mfe_pct>=2 THEN 1 ELSE 0 END), AVG(o.mfe_pct), AVG(o.mae_pct) FROM signals_v2 s JOIN signal_outcomes o ON o.signal_id=s.id AND o.horizon_s=3600""").fetchone()
+                    path = conn.execute("""SELECT
+                        SUM(CASE WHEN entry_touch_s IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN entry_touch_s IS NOT NULL AND first_event='TP1' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN entry_touch_s IS NOT NULL AND first_event='INVALIDATION' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN entry_touch_s IS NOT NULL AND tp2_hit_s IS NOT NULL THEN 1 ELSE 0 END),
+                        AVG(CASE WHEN entry_touch_s IS NOT NULL THEN mae_before_tp1 END),
+                        SUM(CASE WHEN target_before_entry_s IS NOT NULL THEN 1 ELSE 0 END),
+                        COUNT(*)
+                        FROM signal_paths WHERE completed_60m=1""").fetchone()
                     conn.close()
                     n = row[0] or 0
                     if not n:
                         await telegram_send(session, "Henüz tamamlanmış 60 dk performans verisi yok.")
                     else:
-                        await telegram_send(session, f"📊 60 DK SİNYAL PERFORMANSI\n\nTamamlanan: {n}\n+%0.5 gördü: %{100*row[1]/n:.1f}\n+%1 gördü: %{100*row[2]/n:.1f}\n+%2 gördü: %{100*row[3]/n:.1f}\nOrt. maksimum yükseliş: {row[4]:+.2f}%\nOrt. maksimum ters hareket: {row[5]:+.2f}%\n\nNot: Maksimum yükseliş, sinyal sonrası fırsatı ölçer; son fiyatı değil.")
+                        msg = (f"📊 60 DK SİNYAL PERFORMANSI\n\nTamamlanan: {n}\n+%0.5 gördü: %{100*row[1]/n:.1f}\n+%1 gördü: %{100*row[2]/n:.1f}\n+%2 gördü: %{100*row[3]/n:.1f}\nOrt. maksimum yükseliş: {row[4]:+.2f}%\nOrt. maksimum ters hareket: {row[5]:+.2f}%")
+                        pn = path[0] or 0
+                        total_paths = path[6] or 0
+                        if total_paths:
+                            msg += f"\n\n🧭 V5.4 İŞLEM YOLU ({total_paths})\nAlım bölgesi temas etti: %{100*pn/total_paths:.1f}\nHedefe alım bölgesi gelmeden kaçtı: {int(path[5] or 0)}"
+                        if pn:
+                            msg += (f"\nTP1, geçersizlikten önce: %{100*(path[1] or 0)/pn:.1f}\nGeçersizlik önce: %{100*(path[2] or 0)/pn:.1f}\nTP2 gördü: %{100*(path[3] or 0)/pn:.1f}\nTP1'e kadar ort. ters hareket: {(path[4] or 0):+.2f}%")
+                        msg += "\n\nNot: MFE tek başına başarı sayılmaz; V5.4 hedef/geçersizlik sırasını da ölçer."
+                        await telegram_send(session, msg)
+                elif text == "/radarstats":
+                    conn = sqlite3.connect(DB_PATH)
+                    row = conn.execute("""SELECT COUNT(*),
+                        SUM(CASE WHEN o.mfe_pct>=0.5 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN o.mfe_pct>=1 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN o.mfe_pct>=2 THEN 1 ELSE 0 END),
+                        AVG(o.mfe_pct), AVG(o.mae_pct), SUM(r.notified)
+                        FROM radar_signals r JOIN radar_outcomes o ON o.radar_id=r.id AND o.horizon_s=3600""").fetchone()
+                    conn.close()
+                    n = row[0] or 0
+                    if not n:
+                        await telegram_send(session, "Henüz tamamlanmış 60 dk radar performansı yok.")
+                    else:
+                        await telegram_send(session,
+                            f"👀 60 DK ERKEN RADAR PERFORMANSI\n\nİç radar kaydı: {n}\nTelegram'a bildirilen: {int(row[6] or 0)}\n+%0.5 gördü: %{100*(row[1] or 0)/n:.1f}\n+%1 gördü: %{100*(row[2] or 0)/n:.1f}\n+%2 gördü: %{100*(row[3] or 0)/n:.1f}\nOrt. MFE: {(row[4] or 0):+.2f}%\nOrt. MAE: {(row[5] or 0):+.2f}%\n\nİç radar tüm araştırma örneklerini tutar; Telegram yalnız 2/3 süreklilikteki seçici alt kümeyi bildirir.")
                 elif text.startswith("/analiz ") or (not text.startswith("/") and text not in ("test",) and 1 <= len(raw_text) <= 20):
                     token = raw_text.split(maxsplit=1)[1] if text.startswith("/analiz ") else raw_text
                     token = token.strip().upper().replace("/", "")
@@ -1598,15 +1881,16 @@ async def telegram_command_loop(session):
                             plan = estimate_trade_plan(sym, m)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V5.3 — Quality-First + Early Radar\n\n"
+                        "🤖 Momentum Scanner V5.4 — Quality-First + Path Tracking\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
                         "/funnel — adayların hangi filtrelerde elendiği\n"
-                        "/stats — premium sinyallerin 60 dk performansı\n"
+                        "/stats — premium sinyal + işlem yolu performansı\n"
+                        "/radarstats — erken radarların 60 dk performansı\n"
                         "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
                         "V5.3 daha az ama daha seçici ALIM FIRSATI hedefler. ERKEN MOMENTUM yalnızca radar uyarısıdır; işlem sinyali değildir."
@@ -1635,15 +1919,15 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.3 başladı — QUALITY FIRST\n\n"
+                f"✅ Momentum Scanner V5.4 başladı — QUALITY FIRST\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade ile erken momentum taraması\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                 f"⭐ Sessiz aday skoru: {EARLY_SCORE}+\n"
                 f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
-                f"👀 Erken radar: seçici ve işlem sinyali değil\n\n"
+                f"👀 Erken radar: iç kayıt + 2/3 seçici Telegram uyarısı; işlem sinyali değil\n\n"
                 f"🏆 Gainers: TOP {GAINERS_TOP_N} + hızlı sıra yükselişi\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /analiz COIN  /test"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]

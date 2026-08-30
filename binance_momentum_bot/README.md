@@ -1,20 +1,23 @@
-# Binance Momentum Scanner V5.3 — Quality First
+# Binance Momentum Scanner V5.4 — Quality First + Path Tracking
 
-V5.3, V5.2'nin çalışan Binance Futures + Telegram altyapısını korur. Amaç daha fazla sinyal üretmek değil, daha seçici bildirim göndermek ve sonraki optimizasyon için daha iyi veri toplamaktır.
+V5.4, V5.3'ün çalışan Binance Futures + Telegram altyapısını ve Premium ALIM FIRSATI filtresini korur. Amaç sinyal sayısını artırmak değil; daha az gürültü, daha gerçekçi işlem-yolu ölçümü ve sonraki optimizasyon için daha kaliteli veri toplamaktır.
 
-## Başlıca yenilikler
+## V5.4'te ne değişti?
 
-- **Premium ALIM FIRSATI filtresi:** 3/3 süreklilik yetmez; giriş kalitesi, yükseliş skoru, breakout, aggressive-buy tatlı bölgesi, kısa vadeli fiyat hızı, hacim akışı, order-book aşırılığı ve adaydan beri fiyatın ne kadar uzadığı birlikte kontrol edilir.
-- **ERKEN MOMENTUM / İZLE:** Hareketin erken safhasında seçici radar uyarısı. Bu mesaj işlem sinyali değildir; 3/3 teyit beklenir.
-- **/analiz COIN:** Örn. `/analiz TUT` veya sadece `TUT`. Coinin canlı momentum, flow, aggressive-buy, bid baskısı, BTC relatif güç, OI, breakout, Gainers sırası ve kural tabanlı işlem bölgesi gösterilir.
-- **Momentum devamı:** Premium sinyal TP2 ölçeğini geçtikten sonra momentum hâlâ güçlü ise yalnızca bir kez devam uyarısı üretilebilir. Bu yeni giriş çağrısı değildir.
-- **Aday geçmişi:** `candidate_events` tablosu ilk aday, erken uyarı, süreklilik geçişleri, reddedilme nedeni ve premium sinyali kaydeder.
-- **Gainers olayları:** TOP giriş ve hızlı sıra yükselişi `gainers_events` tablosuna kaydedilir.
-- **Signal meta:** giriş kalitesi, yükseliş skoru, aday run-up, Gainers sırası ve 24s hacim `signal_meta` tablosuna yazılır.
+- **Premium filtre değiştirilmedi.** 17 canlı V5.3 Premium örneği hâlâ küçük bir örneklem olduğu için CYS/ZRO gibi birkaç kötü vakaya aşırı uyum yapılmadı.
+- **Erken radar iki katmana ayrıldı.** İç radar hareketi 1/3 aşamasında DB'ye kaydeder; Telegram uyarısı ise varsayılan olarak ancak **2/3 süreklilik + daha sıkı erken kalite filtresi** sonrasında gider.
+- **Erken radarların sonuçları artık ölçülüyor.** `radar_signals` ve `radar_outcomes` tabloları sayesinde Premium'a dönüşmeyen erken uyarıların da 1/3/5/15/30/60 dk MFE/MAE performansı görülebilir.
+- **İşlem yolu ölçümü eklendi.** `signal_paths` tablosu alım bölgesi temasını, TP1/TP2/geçersizlik zamanlarını ve hangi olayın önce gerçekleştiğini kaydeder.
+- **Alım bölgesi gelmeden hedefe kaçan hareket ayrı sayılır.** Böylece yalnızca “bir ara +%2 gördü” diye gerçekçi olmayan başarı yazılmaz.
+- **TP1'e kadar ters hareket ölçülür.** Giriş kalitesini MFE'den bağımsız değerlendirmek mümkün olur.
+- **`/stats` genişletildi.** Yeni V5.4 kayıtlarında alım bölgesi teması, TP1'in geçersizlikten önce gelme oranı, TP2 ve TP1'e kadar ters hareket gösterilir.
+- **`/radarstats` eklendi.** Erken radarların gerçek 60 dk performansını gösterir.
 
-## Varsayılan premium yaklaşım
+## Erken uyarı mantığı
 
-V5.3 daha az ama daha seçici ALIM FIRSATI hedefler. Varsayılan temel market-yapısı filtresi, elimizdeki 28 tamamlanmış V5.2 sinyal üzerinde geriye dönük olarak yaklaşık yarı kadar sinyal seçmiştir. Bu küçük ve aynı veri üzerinde yapılan bir örneklem testidir; gelecekte aynı başarıyı garanti etmez. V5.3 bu nedenle veriyi ayrıca kaydeder ve eşikler yeni örneklerle yeniden değerlendirilmelidir.
+İç radarın varsayılan eşiği V5.3'e yakın tutulur; araştırma verisi kaybolmaz. Telegram'a giden erken uyarı ise 2/3 süreklilik ister ve ayrıca varsayılan olarak skor 70+, 30/60 sn pozitif ivme, yeterli flow, dengeli aggressive-buy, aşırı uzamamış 5 dk hareketi ve breakout/relatif güç koşullarını arar.
+
+Bu uyarı **alım emri değildir**. Premium 3/3 teyit ve işlem kalitesi filtresi ayrı çalışmaya devam eder.
 
 ## Komutlar
 
@@ -23,17 +26,18 @@ V5.3 daha az ama daha seçici ALIM FIRSATI hedefler. Varsayılan temel market-ya
 - `/gainers`
 - `/funnel`
 - `/stats`
+- `/radarstats`
 - `/analiz TUT`
-- `TUT` (kısa kullanım)
+- `TUT`
 - `/test`
 
 ## Railway
 
-Mevcut değişkenler çalışmaya devam eder:
+Mevcut değişkenler yeterlidir:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 
-Yeni V5.3 eşiklerinin tamamı environment variable ile değiştirilebilir ancak ilk deploy'da varsayılanları kullanmak daha sağlıklıdır.
+Yeni V5.4 eşikleri environment variable ile değiştirilebilir; ilk canlı örnekler toplanana kadar varsayılanları değiştirmemek daha sağlıklıdır.
 
-> Bu yazılım otomatik emir vermez. Üretilen seviyeler ve sinyaller kural tabanlı piyasa araştırmasıdır; kâr garantisi değildir. Gerçek para ile kullanımda pozisyon büyüklüğü, kaldıraç ve zarar sınırı ayrıca yönetilmelidir.
+> Bu yazılım otomatik emir vermez. Sinyaller ve seviyeler kural tabanlı piyasa araştırmasıdır; zarar etmeme veya kâr garantisi vermez. Pozisyon büyüklüğü, kaldıraç, stop ve toplam portföy riski ayrıca yönetilmelidir.
