@@ -1,44 +1,55 @@
-# Binance Momentum Scanner V5.5
+# Binance Momentum Scanner V5.6
 
-V5.5, V5.4 Quality-First sisteminin sinyal üretimini değiştirmeden araştırma/çıkış gözlem katmanı ekler.
+V5.6, V5.5 Quality-First Premium üretimini ve TP1/TP2 hesaplarını değiştirmeden ölçüm ve araştırma altyapısını genişletir.
 
-## Değişmeyenler
+## Değişmeyen production kuralları
 
-- Premium seçim filtreleri ve eşikleri
+- Premium seçim fonksiyonları ve eşikleri
 - Momentum / giriş kalitesi / yükseliş skoru hesapları
 - 3×15 sn süreklilik yapısı
-- Erken Momentum seçiciliği
+- Erken Momentum production seçiciliği
+- Premium breakout / flow / aggressive buy / candidate-runup guard'ları
 - Tahmini alım bölgesi, TP1, TP2 ve geçersizlik formülleri
-- Gainers ve Momentum Devamı yapısı
+- Shadow Exit eşikleri (hala test amaçlı)
 
-## Yeni özellikler
+## V5.6 yeni ölçüm katmanları
 
-- 🧪 Shadow Kâr Koruma Adayı
-- 🧪 Shadow Çıkış Adayı
-- Premium sonrası ilk/aktif tepe takibi
-- Tepeden -%0.5 / -%1 / -%1.5 / -%2 geri çekilme kayıtları
-- Geri çekilme anında mikro yapı metrikleri
-- Erken radar → Premium doğrudan ilişkilendirmesi
-- Erken→Premium süre ve fiyat maliyeti kaydı
-- `/shadowstats`
+- Event-level aggTrade ile daha hassas Premium MFE/MAE ve trade-path takibi
+- `episode_id` ile ayrı momentum hareketlerinin ilişkilendirilmesi
+- Second-Wave / reacceleration shadow araştırma kayıtları
+- Pre-Breakout shadow araştırma kayıtları
+- 3/3 teyit sonrası reddedilen adayların outcome takibi
+- Flow-to-price efficiency ve pre-episode hacim baseline alanları
+- Squeeze-risk araştırma etiketi
+- Gainers rank velocity + 1/5/15/30/60 dk outcome; Telegram push varsayılan kapalı
+- First-wave peak ile 60 dk session peak ayrımı
+- Çoklu wave / pullback olay kayıtları
+- Shadow EXIT sonrası 30 sn / 1 dk / 5 dk / 15 dk outcome
+- Coin bazında günün kaçıncı kullanıcı bildirimi olduğu
+- SQLite WAL + busy timeout
+- Persistent DB varsa restart sonrası açık tracker recovery
+- AggTrade chunk bazında stream health
+- `/researchstats`
 
-Shadow mesajları test içindir; gerçek satış emri veya otomatik işlem değildir.
+## Telegram
+
+Varsayılan kullanıcı bildirimleri:
+
+- Erken Momentum: açık
+- Premium: açık
+- Shadow: açık ve açıkça TEST olarak işaretli
+- Gainers otomatik push: kapalı; veri arka planda toplanır
+
+Komutlar:
+
+`/status` `/top` `/gainers` `/funnel` `/stats` `/radarstats` `/shadowstats` `/researchstats` `/analiz COIN` `/test`
 
 ## Railway
 
-Mevcut V5.4 Railway değişkenleri yeterlidir. Yeni değişken eklemek zorunlu değildir. Varsayılan olarak Shadow takip ve Telegram Shadow bildirimi açıktır.
+Mevcut Telegram değişkenleri yeterlidir. Yeni research değişkenleri zorunlu değildir; varsayılanlar güvenli ölçüm modundadır.
 
-İsteğe bağlı değişkenler:
+Önemli: `signals.db` Railway'in ephemeral dosya sisteminde ise deploy/restart sırasında kaybolabilir. Kalıcı Volume kullanılana kadar deploy öncesi DB yedeği alın.
 
-- `SHADOW_EXIT_ENABLED=1`
-- `SHADOW_EXIT_NOTIFY=1`
-- `SHADOW_MIN_PEAK_MFE_PCT=1.00`
-- `SHADOW_PROTECT_MIN_PEAK_PCT=1.50`
-- `SHADOW_PROTECT_DRAWDOWN_PCT=0.60`
-- `SHADOW_EXIT_DRAWDOWN_PCT=1.00`
-- `SHADOW_HARD_DRAWDOWN_PCT=2.00`
-- `SHADOW_MIN_AGE_SECONDS=30`
+## Araştırma prensibi
 
-## Telegram komutları
-
-`/status` `/top` `/gainers` `/funnel` `/stats` `/radarstats` `/shadowstats` `/analiz COIN` `/test`
+Second-Wave, Pre-Breakout, Gainers re-scan, squeeze/absorption ve Shadow outcome verileri production alım filtresi değildir. Yeterli forward örneklem oluşmadan Premium eşikleri değiştirilmemelidir.
