@@ -148,10 +148,16 @@ TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip() or TELE
 TELEGRAM_ADMIN_USER_ID = os.getenv("TELEGRAM_ADMIN_USER_ID", "").strip()
 JOIN_REQUEST_APPROVAL_ENABLED = bool(TELEGRAM_APPROVAL_CHAT_ID) and os.getenv("JOIN_REQUEST_APPROVAL_ENABLED", "1").strip() not in ("0", "false", "False")
 
+# V5.7.1: public channel broadcast. By default reuse the approved-members channel.
+# Commands, /test, research statistics and join approvals stay in the private admin chat.
+TELEGRAM_BROADCAST_CHAT_ID = os.getenv("TELEGRAM_BROADCAST_CHAT_ID", "").strip() or TELEGRAM_APPROVAL_CHAT_ID
+TELEGRAM_BROADCAST_ENABLED = bool(TELEGRAM_BROADCAST_CHAT_ID) and os.getenv("TELEGRAM_BROADCAST_ENABLED", "1").strip() not in ("0", "false", "False")
+PUBLIC_NOTIFICATION_KINDS = {"EARLY", "PREMIUM", "CONTINUATION"}
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.7")
+log = logging.getLogger("momentum-v5.7.1")
 
 
 @dataclass
@@ -1762,7 +1768,7 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                         notification_kind: Optional[str] = None, notification_ordinal: Optional[int] = None,
                         signal_id: Optional[int] = None, signal_price: Optional[float] = None,
                         entry_status: Optional[str] = None, chat_id: Optional[str] = None,
-                        reply_markup: Optional[dict] = None) -> bool:
+                        reply_markup: Optional[dict] = None, track_delivery: bool = True) -> bool:
     """Send a Telegram message reliably.
 
     Retries transient network/5xx/429 failures and logs the real exception type,
@@ -1798,10 +1804,11 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
             live_ask = st_live.ask_price or st_live.last_price or None
             if signal_price and live_ask:
                 drift = pct_change(live_ask, signal_price)
-        update_notification_delivery(
-            symbol or "", notification_kind, notification_ordinal, signal_id=signal_id, send_start_ts_ms=send_start_ms,
-            live_bid=live_bid, live_ask=live_ask, price_drift_pct=drift, entry_status=entry_status,
-        )
+        if track_delivery:
+            update_notification_delivery(
+                symbol or "", notification_kind, notification_ordinal, signal_id=signal_id, send_start_ts_ms=send_start_ms,
+                live_bid=live_bid, live_ask=live_ask, price_drift_pct=drift, entry_status=entry_status,
+            )
         for attempt in range(1, max_attempts + 1):
             try:
                 async with session.post(url, json=payload, timeout=timeout) as r:
@@ -1817,11 +1824,12 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                                 msg_id = int((data.get("result") or {}).get("message_id"))
                             except Exception:
                                 msg_id = None
-                            update_notification_delivery(
-                                symbol or "", notification_kind, notification_ordinal, signal_id=signal_id,
-                                send_done_ts_ms=now_ms(), telegram_message_id=msg_id, live_bid=live_bid, live_ask=live_ask,
-                                price_drift_pct=drift, entry_status=entry_status,
-                            )
+                            if track_delivery:
+                                update_notification_delivery(
+                                    symbol or "", notification_kind, notification_ordinal, signal_id=signal_id,
+                                    send_done_ts_ms=now_ms(), telegram_message_id=msg_id, live_bid=live_bid, live_ask=live_ask,
+                                    price_drift_pct=drift, entry_status=entry_status,
+                                )
                             return True
                         log.warning("Telegram API ok=false attempt=%d body=%s", attempt, body[:1000])
                     elif r.status == 429:
@@ -1853,6 +1861,35 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
 
     log.error("Telegram message abandoned after %d attempts; preview=%r", max_attempts, text[:160])
     return False
+
+
+async def telegram_public_alert(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
+                                notification_kind: Optional[str] = None, notification_ordinal: Optional[int] = None,
+                                signal_id: Optional[int] = None, signal_price: Optional[float] = None,
+                                entry_status: Optional[str] = None) -> bool:
+    """Send a trading alert to the private owner chat and, when enabled, the subscriber channel.
+
+    Delivery/latency metrics are recorded only for the primary private send so the second channel
+    delivery cannot overwrite execution measurements. Admin commands/research messages do not use
+    this wrapper and therefore remain private.
+    """
+    primary_ok = await telegram_send(
+        session, text, symbol=symbol, notification_kind=notification_kind,
+        notification_ordinal=notification_ordinal, signal_id=signal_id,
+        signal_price=signal_price, entry_status=entry_status, track_delivery=True,
+    )
+    if (TELEGRAM_BROADCAST_ENABLED and notification_kind in PUBLIC_NOTIFICATION_KINDS
+            and str(TELEGRAM_BROADCAST_CHAT_ID) != str(TELEGRAM_CHAT_ID)):
+        channel_ok = await telegram_send(
+            session, text, symbol=symbol, notification_kind=notification_kind,
+            notification_ordinal=notification_ordinal, signal_id=signal_id,
+            signal_price=signal_price, entry_status=entry_status,
+            chat_id=TELEGRAM_BROADCAST_CHAT_ID, track_delivery=False,
+        )
+        if not channel_ok:
+            log.warning("Public channel broadcast failed kind=%s symbol=%s chat=%s",
+                        notification_kind, symbol, TELEGRAM_BROADCAST_CHAT_ID)
+    return primary_ok
 
 
 async def telegram_api_call(session: aiohttp.ClientSession, method: str, payload: dict) -> dict:
@@ -2817,8 +2854,8 @@ async def evaluate(session, symbol: str):
                     mark_radar_notified(st.active_radar_id, m["daily_notice_no"])
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
-                    await telegram_send(session, build_early_message(m, score, st), symbol=symbol,
-                                        notification_kind="EARLY", notification_ordinal=m.get("daily_notice_no"), signal_price=m.get("price"))
+                    await telegram_public_alert(session, build_early_message(m, score, st), symbol=symbol,
+                                                notification_kind="EARLY", notification_ordinal=m.get("daily_notice_no"), signal_price=m.get("price"))
         else:
             if st.candidate_checks - st.candidate_passes >= 2:
                 funnel_hit("continuity_reject")
@@ -2956,7 +2993,7 @@ async def evaluate(session, symbol: str):
         save_wave_tracking(po)
         log.info("PREMIUM CONFIRMED %s momentum=%d rise=%d quality=%d runup=%.2f oi=%s exec=%s episode=%s",
                  symbol, score, rise_score, quality, runup, m.get("oi_regime"), m["execution"]["status"], st.episode_id)
-        await telegram_send(
+        await telegram_public_alert(
             session, build_message(m), symbol=symbol, notification_kind="PREMIUM", notification_ordinal=m.get("daily_notice_no"),
             signal_id=signal_id, signal_price=m["price"], entry_status=m["execution"]["status"]
         )
@@ -3329,8 +3366,8 @@ async def outcome_loop(session):
                         funnel_hit("continuation_alert")
                         save_candidate_event(p.symbol, "continuation_alert", m, sc, states[p.symbol], f"mfe={p.mfe:.2f}")
                         m["daily_notice_no"] = next_daily_notice_no(p.symbol, "CONTINUATION")
-                        await telegram_send(session, build_continuation_message(p, m, sc), symbol=p.symbol,
-                                            notification_kind="CONTINUATION", notification_ordinal=m.get("daily_notice_no"), signal_id=p.signal_id, signal_price=m.get("price"))
+                        await telegram_public_alert(session, build_continuation_message(p, m, sc), symbol=p.symbol,
+                                                   notification_kind="CONTINUATION", notification_ordinal=m.get("daily_notice_no"), signal_id=p.signal_id, signal_price=m.get("price"))
             for h in horizons:
                 if age >= h and h not in p.completed:
                     save_outcome(p.signal_id, h, ret, p.mfe, p.mae)
@@ -3640,7 +3677,7 @@ async def telegram_command_loop(session):
                     expected_chunks = max(1, (len(symbols) + AGGTRADE_CHUNK - 1) // AGGTRADE_CHUNK)
                     healthy = age("ticker") < 90 and age("book") < 90 and len(agg_ages) >= expected_chunks and agg_stale == 0
                     await telegram_send(session,
-                        f"{'✅' if healthy else '⚠️'} Scanner durumu — V5.7\n\n"
+                        f"{'✅' if healthy else '⚠️'} Scanner durumu — V5.7.1\n\n"
                         f"🪙 Kontrat: {len(symbols)}\n"
                         f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                         f"⚡ AggTrade olayları: {trade_event_count:,}\n"
@@ -3655,6 +3692,7 @@ async def telegram_command_loop(session):
                         f"🧭 1–60sn micro snapshot + 15sn entry acceptance: AÇIK (Shadow; Premium filtresini değiştirmez)\n"
                         f"🔁 Stop sonrası reclaim + TP2 sonrası runner: {'açık' if RECLAIM_SHADOW_ENABLED and RUNNER_SHADOW_ENABLED else 'kısmi/kapalı'} (Shadow)\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
+                        f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
                         f"🏆 Gainers: arka plan kayıt AÇIK | Telegram push: {'açık' if GAINERS_NOTIFY else 'kapalı'} | TOP {GAINERS_TOP_N}"
                     )
                 elif text == "/top":
@@ -3975,7 +4013,7 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.7 başladı — PREMIUM DISCOVERY + EXECUTION RESEARCH\n\n"
+                f"✅ Momentum Scanner V5.7.1 başladı — PREMIUM DISCOVERY + EXECUTION RESEARCH\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade + event-level Premium path + 1–60sn micro execution takibi\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
@@ -3987,6 +4025,7 @@ async def main():
                 f"🧭 15sn breakout acceptance + stop sonrası reclaim + TP2 runner: SHADOW\n"
                 f"💸 Funding/mark stream: AÇIK | OI 5m + OI ivmesi: kayıt AÇIK\n"
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
+                f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
                 f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n\n"
                 f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /joinstatus  /analiz COIN  /test"
             )
