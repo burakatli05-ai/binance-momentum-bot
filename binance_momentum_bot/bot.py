@@ -23,8 +23,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.10.1"
-RESEARCH_LOGIC_VERSION = "v5101-forward-holdout"
+BOT_VERSION = "5.11"
+RESEARCH_LOGIC_VERSION = "v511-gate-bias-guard"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -213,10 +213,22 @@ LIQ_CORE_HOSTILE_SCORE = int(os.getenv("LIQ_CORE_HOSTILE_SCORE", str(LIQ_V2_HOST
 DISCOVERY_EPISODE_GAP_S = int(os.getenv("DISCOVERY_EPISODE_GAP_S", "600"))
 DISCOVERY_EPISODE_MAX_S = int(os.getenv("DISCOVERY_EPISODE_MAX_S", "1800"))
 
+# V5.11: SHADOW execution-gate simulator. IMPORTANT: this does NOT delay, suppress, or alter
+# the production Premium alert. Latest analysis showed a look-ahead trap: many apparently
+# "good 15/30s confirmations" had already reached TP1 before the confirmation horizon.
+# We therefore measure a real delayed-entry counterfactual before considering a production gate.
+EXECUTION_GATE_SHADOW_ENABLED = os.getenv("EXECUTION_GATE_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
+EXECUTION_GATE_HORIZON_MS = int(os.getenv("EXECUTION_GATE_HORIZON_MS", "15000"))
+EXECUTION_GATE_DATA_TIMEOUT_MS = int(os.getenv("EXECUTION_GATE_DATA_TIMEOUT_MS", "25000"))
+GATE_COUNTERFACTUAL_HORIZONS_S = (15, 30, 60, 120, 300, 900)
+ABSORPTION_RISK_SHADOW_ENABLED = os.getenv("ABSORPTION_RISK_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
+ABSORPTION_FLOW30_MIN = float(os.getenv("ABSORPTION_FLOW30_MIN", "8.0"))
+ABSORPTION_BID_MAX = float(os.getenv("ABSORPTION_BID_MAX", "0.30"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.10.1")
+log = logging.getLogger("momentum-v5.11")
 
 
 @dataclass
@@ -387,6 +399,19 @@ class PendingOutcome:
     liq_risk_15_saved: bool = False
     liq_risk_30_saved: bool = False
     fail_risk_60_saved: bool = False
+    # V5.11 delayed-entry gate simulator. SHADOW only; production Premium is still immediate.
+    gate_shadow_finalized: bool = False
+    gate_shadow_decision: str = "PENDING"
+    gate_shadow_ts: float = 0.0
+    gate_shadow_price: float = 0.0
+    gate_shadow_mfe: float = 0.0
+    gate_shadow_mae: float = 0.0
+    gate_shadow_tp1_hit_s: Optional[float] = None
+    gate_shadow_tp2_hit_s: Optional[float] = None
+    gate_shadow_stop_hit_s: Optional[float] = None
+    gate_shadow_first_event: Optional[str] = None
+    gate_shadow_completed: set = field(default_factory=set)
+    sticky_early_hostile: bool = False
 
 
 @dataclass
@@ -927,6 +952,38 @@ def init_db():
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS premium_execution_gate_shadow (
+            signal_id INTEGER PRIMARY KEY,
+            gate_horizon_ms INTEGER NOT NULL, observed_ts_ms INTEGER NOT NULL,
+            decision TEXT NOT NULL, reason TEXT,
+            liquidity_v1_state TEXT, liquidity_v1_score INTEGER,
+            liquidity_v2_state TEXT, liquidity_v2_score INTEGER,
+            liquidity_core_state TEXT, liquidity_core_score INTEGER,
+            any_hostile INTEGER, sticky_early_hostile INTEGER,
+            recovered_30 INTEGER, persistent_hostile_30 INTEGER,
+            absorption_risk INTEGER,
+            original_price REAL, gate_price REAL, signal_to_gate_pct REAL,
+            micro_mfe REAL, micro_mae REAL,
+            trade_active INTEGER, terminal_event TEXT, execution_status TEXT,
+            tp1_remaining_pct REAL, tp2_remaining_pct REAL, stop_risk_pct REAL,
+            gate_tp1_hit_s REAL, gate_tp2_hit_s REAL, gate_stop_hit_s REAL,
+            gate_first_event TEXT, gate_mfe REAL, gate_mae REAL, completed_60m INTEGER DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_gate_counterfactual (
+            signal_id INTEGER NOT NULL, post_gate_horizon_s INTEGER NOT NULL,
+            observed_ts_ms INTEGER NOT NULL, return_pct REAL, mfe_pct REAL, mae_pct REAL,
+            PRIMARY KEY(signal_id, post_gate_horizon_s)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS missed_runner_audit (
             source_event_id INTEGER PRIMARY KEY,
             event_type TEXT NOT NULL,
@@ -1082,12 +1139,22 @@ def init_db():
     ensure_column(conn, "premium_execution_composite", "trade_active", "INTEGER")
     ensure_column(conn, "premium_execution_composite", "terminal_event", "TEXT")
     ensure_column(conn, "premium_execution_composite", "terminal_age_s", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "recovered_30", "INTEGER")
+    ensure_column(conn, "premium_execution_gate_shadow", "persistent_hostile_30", "INTEGER")
+    ensure_column(conn, "premium_execution_gate_shadow", "absorption_risk", "INTEGER")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_tp1_hit_s", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_tp2_hit_s", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_stop_hit_s", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_first_event", "TEXT")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_mfe", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "gate_mae", "REAL")
+    ensure_column(conn, "premium_execution_gate_shadow", "completed_60m", "INTEGER DEFAULT 0")
     conn.execute(
         """INSERT OR IGNORE INTO bot_deployments
            (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
            VALUES (?,?,?,?,?,?)""",
         (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
-         "V5.10.1 research-only holdout revision; production Premium/Early/TP/stop unchanged",int(time.time())),
+         "V5.11 gate-bias guard + sticky early-liquidity research; production Premium/Early/TP/stop unchanged",int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -1805,7 +1872,7 @@ def save_post_premium_risk(p: PendingOutcome, horizon_ms: int, observed_ts_ms: i
             sc = score_metrics(m) if m else None
             save_shadow_event(p,event_name,max(0.0,(observed_ts_ms-(p.signal_generated_ts_ms or int(p.created_ts*1000)))/1000.0),
                               price,ret,max(0.0,-pct_change(price,p.peak_price or price)),m,sc,
-                              f"V5.10.1 shadow; state={risk_state}; {'; '.join(reasons)}",None)
+                              f"V5.11 shadow; state={risk_state}; {'; '.join(reasons)}",None)
             if horizon_ms <= 15000:
                 p.liq_risk_15_saved = True
             else:
@@ -1815,7 +1882,7 @@ def save_post_premium_risk(p: PendingOutcome, horizon_ms: int, observed_ts_ms: i
         sc = score_metrics(m) if m else None
         save_shadow_event(p,"FAIL_RISK_60",max(0.0,(observed_ts_ms-(p.signal_generated_ts_ms or int(p.created_ts*1000)))/1000.0),
                           price,ret,max(0.0,-pct_change(price,p.peak_price or price)),m,sc,
-                          f"V5.10.1 shadow; state={risk_state}; {'; '.join(reasons)}",None)
+                          f"V5.11 shadow; state={risk_state}; {'; '.join(reasons)}",None)
         p.fail_risk_60_saved = True
     return risk_state
 
@@ -1906,6 +1973,192 @@ def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional
         conn.close()
 
 
+def _gate_execution_status(p: PendingOutcome, gate_price: Optional[float]) -> Tuple[str, Optional[float], Optional[float], Optional[float]]:
+    if not gate_price or gate_price <= 0:
+        return "UNKNOWN", None, None, None
+    tp1_remaining = pct_change(p.target1, gate_price) if p.target1 else None
+    tp2_remaining = pct_change(p.target2, gate_price) if p.target2 else None
+    stop_risk = abs(pct_change(p.invalidation, gate_price)) if p.invalidation else None
+    if p.invalidation and gate_price <= p.invalidation:
+        status = "INVALIDATED"
+    elif tp1_remaining is not None and tp1_remaining <= 0:
+        status = "TARGET_ALREADY_PASSED"
+    elif tp1_remaining is not None and stop_risk and tp1_remaining / max(stop_risk, 1e-9) < EXEC_MIN_LIVE_RR1:
+        status = "CHASED"
+    else:
+        status = "OBSERVABLE"
+    return status, tp1_remaining, tp2_remaining, stop_risk
+
+
+def maybe_finalize_execution_gate_shadow(p: PendingOutcome, observed_ts_ms: int) -> bool:
+    """Freeze a 15s *counterfactual* gate decision without touching production alerts.
+
+    This explicitly guards against look-ahead bias: if TP1/TP2/stop already happened before
+    the gate horizon, the sample is labelled as such instead of pretending a delayed entry
+    could have captured the original result.
+    """
+    if not EXECUTION_GATE_SHADOW_ENABLED or p.gate_shadow_finalized:
+        return bool(p.gate_shadow_finalized)
+    signal_ms = p.signal_generated_ts_ms or int(p.created_ts * 1000)
+    age_ms = max(0, int(observed_ts_ms) - int(signal_ms))
+    if age_ms < EXECUTION_GATE_HORIZON_MS:
+        return False
+
+    conn = db_connect()
+    try:
+        liq = conn.execute(
+            """SELECT dynamic_state,dynamic_score,liquidity_v2_state,liquidity_v2_score,
+                      liquidity_core_state,liquidity_core_score
+               FROM premium_liquidity_snapshots WHERE signal_id=? AND horizon_ms=?""",
+            (p.signal_id, EXECUTION_GATE_HORIZON_MS),
+        ).fetchone()
+        micro = conn.execute(
+            """SELECT last_price,return_pct,mfe_pct,mae_pct
+               FROM premium_micro_snapshots WHERE signal_id=? AND horizon_ms=?""",
+            (p.signal_id, EXECUTION_GATE_HORIZON_MS),
+        ).fetchone()
+        sig = conn.execute(
+            """SELECT flow30,book_imbalance FROM signals_v2 WHERE id=?""", (p.signal_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if (not liq or not micro) and age_ms < EXECUTION_GATE_DATA_TIMEOUT_MS:
+        return False
+
+    term = _terminal_context(p, EXECUTION_GATE_HORIZON_MS)
+    v1_state = liq[0] if liq else "MISSING"
+    v1_score = liq[1] if liq else None
+    v2_state = liq[2] if liq else "MISSING"
+    v2_score = liq[3] if liq else None
+    core_state = liq[4] if liq else "MISSING"
+    core_score = liq[5] if liq else None
+    gate_price = float(micro[0]) if micro and micro[0] else float(states[p.symbol].last_price or p.entry_price)
+    gate_ret = micro[1] if micro else pct_change(gate_price, p.entry_price)
+    gate_mfe = micro[2] if micro else p.mfe
+    gate_mae = micro[3] if micro else p.mae
+    states3 = (v1_state, v2_state, core_state)
+    complete = all(x in ("SUPPORTIVE", "MIXED", "HOSTILE") for x in states3)
+    any_hostile = any(x == "HOSTILE" for x in states3)
+    p.sticky_early_hostile = bool(any_hostile)
+    absorption = bool(
+        ABSORPTION_RISK_SHADOW_ENABLED and sig and sig[0] is not None and sig[1] is not None
+        and float(sig[0]) >= ABSORPTION_FLOW30_MIN and float(sig[1]) < ABSORPTION_BID_MAX
+    )
+
+    if term.get("tp2_before_horizon") or term.get("tp1_before_horizon"):
+        decision = "FAST_TARGET_BEFORE_GATE"
+    elif term.get("stop_before_horizon"):
+        decision = "STOP_BEFORE_GATE"
+    elif not term.get("entry_touched_before_horizon"):
+        decision = "NO_ENTRY_BEFORE_GATE"
+    elif not complete:
+        decision = "DATA_INCOMPLETE"
+    elif any_hostile:
+        decision = "WOULD_REJECT_HOSTILE_15"
+    else:
+        decision = "WOULD_PASS_15"
+
+    exec_status, tp1_remaining, tp2_remaining, stop_risk = _gate_execution_status(p, gate_price)
+    reasons = [f"v1={v1_state}", f"v2={v2_state}", f"core={core_state}", f"ret15={gate_ret:+.3f}%"]
+    if absorption:
+        reasons.append("absorption_shadow")
+    if term.get("terminal_event"):
+        reasons.append(f"terminal={term['terminal_event']}")
+    reasons.append("PRODUCTION_GATE=OFF")
+
+    p.gate_shadow_finalized = True
+    p.gate_shadow_decision = decision
+    p.gate_shadow_ts = signal_ms / 1000.0 + EXECUTION_GATE_HORIZON_MS / 1000.0
+    p.gate_shadow_price = gate_price
+    p.gate_shadow_mfe = 0.0
+    p.gate_shadow_mae = 0.0
+
+    conn = db_connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO premium_execution_gate_shadow
+               (signal_id,gate_horizon_ms,observed_ts_ms,decision,reason,
+                liquidity_v1_state,liquidity_v1_score,liquidity_v2_state,liquidity_v2_score,
+                liquidity_core_state,liquidity_core_score,any_hostile,sticky_early_hostile,
+                recovered_30,persistent_hostile_30,absorption_risk,
+                original_price,gate_price,signal_to_gate_pct,micro_mfe,micro_mae,
+                trade_active,terminal_event,execution_status,tp1_remaining_pct,tp2_remaining_pct,stop_risk_pct,
+                gate_tp1_hit_s,gate_tp2_hit_s,gate_stop_hit_s,gate_first_event,gate_mfe,gate_mae,completed_60m,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (p.signal_id,EXECUTION_GATE_HORIZON_MS,observed_ts_ms,decision,"; ".join(reasons)[:500],
+             v1_state,v1_score,v2_state,v2_score,core_state,core_score,int(any_hostile),int(any_hostile),
+             None,None,int(absorption),p.entry_price,gate_price,pct_change(gate_price,p.entry_price),gate_mfe,gate_mae,
+             term.get("trade_active"),term.get("terminal_event"),exec_status,tp1_remaining,tp2_remaining,stop_risk,
+             None,None,None,None,0.0,0.0,0,int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def update_gate_recovery_30(signal_id: int):
+    if not EXECUTION_GATE_SHADOW_ENABLED:
+        return
+    conn = db_connect()
+    try:
+        gate = conn.execute(
+            "SELECT sticky_early_hostile FROM premium_execution_gate_shadow WHERE signal_id=?", (signal_id,)
+        ).fetchone()
+        if not gate or not gate[0]:
+            return
+        row = conn.execute(
+            """SELECT dynamic_state,liquidity_v2_state,liquidity_core_state
+               FROM premium_liquidity_snapshots WHERE signal_id=? AND horizon_ms=30000""", (signal_id,)
+        ).fetchone()
+        if not row:
+            return
+        hostile30 = any(x == "HOSTILE" for x in row)
+        conn.execute(
+            """UPDATE premium_execution_gate_shadow SET recovered_30=?,persistent_hostile_30=?,updated_ts=? WHERE signal_id=?""",
+            (int(not hostile30), int(hostile30), int(time.time()), signal_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_gate_counterfactual_snapshot(p: PendingOutcome, horizon_s: int, observed_ts_ms: int, price: float):
+    if not p.gate_shadow_finalized or not p.gate_shadow_price:
+        return
+    ret = pct_change(price, p.gate_shadow_price)
+    conn = db_connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO premium_gate_counterfactual
+               (signal_id,post_gate_horizon_s,observed_ts_ms,return_pct,mfe_pct,mae_pct)
+               VALUES (?,?,?,?,?,?)""",
+            (p.signal_id,horizon_s,observed_ts_ms,ret,p.gate_shadow_mfe,p.gate_shadow_mae),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_gate_shadow_path(p: PendingOutcome, completed_60m: Optional[int] = None):
+    if not p.gate_shadow_finalized:
+        return
+    conn = db_connect()
+    try:
+        conn.execute(
+            """UPDATE premium_execution_gate_shadow
+               SET gate_tp1_hit_s=?,gate_tp2_hit_s=?,gate_stop_hit_s=?,gate_first_event=?,
+                   gate_mfe=?,gate_mae=?,completed_60m=COALESCE(?,completed_60m),updated_ts=?
+               WHERE signal_id=?""",
+            (p.gate_shadow_tp1_hit_s,p.gate_shadow_tp2_hit_s,p.gate_shadow_stop_hit_s,p.gate_shadow_first_event,
+             p.gate_shadow_mfe,p.gate_shadow_mae,completed_60m,int(time.time()),p.signal_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingOutcome, horizon_ms: int):
     if not LIQUIDITY_RESEARCH_ENABLED:
         return
@@ -1976,8 +2229,10 @@ async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingO
         conn.commit(); conn.close()
         if horizon_ms == 15000:
             save_post_premium_risk(p, 15000, observed, None)
+            maybe_finalize_execution_gate_shadow(p, observed)
         if horizon_ms == 30000:
             save_post_premium_risk(p, 30000, observed, None)
+            update_gate_recovery_30(p.signal_id)
             maybe_finalize_execution_composite(p.signal_id, observed, p)
             # If the 60s progress row already exists (e.g. depth request was delayed),
             # finalize failure-risk now instead of losing the sample.
@@ -3071,6 +3326,32 @@ def update_pending_tick(symbol: str, price: float, tick_ts: float):
                 p.first_event = p.first_event or "INVALIDATION"
                 path_changed = True
 
+        # V5.11: true post-gate path, measured from the 15s counterfactual gate price.
+        # This is what prevents us from mistaking pre-gate winners for evidence that delayed entry works.
+        if p.gate_shadow_finalized and p.gate_shadow_price and tick_ts >= p.gate_shadow_ts:
+            gate_age = max(0.0, tick_ts - p.gate_shadow_ts)
+            gate_ret = pct_change(price, p.gate_shadow_price)
+            p.gate_shadow_mfe = max(p.gate_shadow_mfe, gate_ret)
+            p.gate_shadow_mae = min(p.gate_shadow_mae, gate_ret)
+            gate_changed = False
+            if p.target1 and p.gate_shadow_tp1_hit_s is None and price >= p.target1:
+                p.gate_shadow_tp1_hit_s = gate_age
+                p.gate_shadow_first_event = p.gate_shadow_first_event or "TP1"
+                gate_changed = True
+            if p.target2 and p.gate_shadow_tp2_hit_s is None and price >= p.target2:
+                p.gate_shadow_tp2_hit_s = gate_age
+                gate_changed = True
+            if p.invalidation and p.gate_shadow_stop_hit_s is None and price <= p.invalidation:
+                p.gate_shadow_stop_hit_s = gate_age
+                p.gate_shadow_first_event = p.gate_shadow_first_event or "INVALIDATION"
+                gate_changed = True
+            for gh in GATE_COUNTERFACTUAL_HORIZONS_S:
+                if gate_age >= gh and gh not in p.gate_shadow_completed:
+                    save_gate_counterfactual_snapshot(p, gh, observed_ms, price)
+                    p.gate_shadow_completed.add(gh)
+            if gate_changed:
+                save_gate_shadow_path(p)
+
         # SKYAI-class shadow: stop first, then a genuine reclaim while momentum remains constructive.
         if (RECLAIM_SHADOW_ENABLED and p.invalidation_hit_s is not None and not p.reclaim_event_sent
                 and age <= RECLAIM_MAX_AGE_SECONDS):
@@ -3179,6 +3460,14 @@ def recover_pending_tracking():
             p.liq_risk_15_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='LIQ_RISK_15' LIMIT 1",(sid,)).fetchone())
             p.liq_risk_30_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='LIQ_RISK_30' LIMIT 1",(sid,)).fetchone())
             p.fail_risk_60_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='FAIL_RISK_60' LIMIT 1",(sid,)).fetchone())
+            gate=conn.execute("""SELECT decision,observed_ts_ms,gate_price,gate_tp1_hit_s,gate_tp2_hit_s,gate_stop_hit_s,gate_first_event,gate_mfe,gate_mae,sticky_early_hostile
+                                FROM premium_execution_gate_shadow WHERE signal_id=?""",(sid,)).fetchone()
+            if gate:
+                p.gate_shadow_finalized=True; p.gate_shadow_decision=str(gate[0] or "UNKNOWN")
+                p.gate_shadow_ts=float(gate[1] or p.signal_generated_ts_ms)/1000.0
+                p.gate_shadow_price=float(gate[2] or 0); p.gate_shadow_tp1_hit_s=gate[3]; p.gate_shadow_tp2_hit_s=gate[4]; p.gate_shadow_stop_hit_s=gate[5]
+                p.gate_shadow_first_event=gate[6]; p.gate_shadow_mfe=float(gate[7] or 0); p.gate_shadow_mae=float(gate[8] or 0); p.sticky_early_hostile=bool(gate[9])
+                p.gate_shadow_completed={int(x[0]) for x in conn.execute("SELECT post_gate_horizon_s FROM premium_gate_counterfactual WHERE signal_id=?",(sid,)).fetchall()}
             mm=conn.execute("SELECT MAX(mfe_pct),MIN(mae_pct) FROM signal_outcomes WHERE signal_id=?",(sid,)).fetchone()
             p.mfe=float(mm[0] or 0); p.mae=float(mm[1] or 0)
             p.completed={int(x[0]) for x in conn.execute("SELECT horizon_s FROM signal_outcomes WHERE signal_id=?",(sid,)).fetchall()}
@@ -4722,6 +5011,8 @@ async def outcome_loop(session):
                 finalize_entry_validation(p, observed_ms)
             if age_ms >= PROGRESS_VALIDATION_HORIZON_MS and not p.progress_finalized:
                 finalize_progress_validation(p, observed_ms)
+            if EXECUTION_GATE_SHADOW_ENABLED and age_ms >= EXECUTION_GATE_HORIZON_MS and not p.gate_shadow_finalized:
+                maybe_finalize_execution_gate_shadow(p, observed_ms)
 
             # Session peak is distinct from the first structural wave.
             wave_changed = bool(p.wave_dirty)
@@ -4873,6 +5164,8 @@ async def outcome_loop(session):
                     p.first_wave_end_reason = "NO_1PCT_PULLBACK_60M"
                 save_signal_path(p, completed_60m=True)
                 save_wave_tracking(p, max(0.0, -pct_change(price, p.peak_price or price)), completed_60m=True)
+                if p.gate_shadow_finalized:
+                    save_gate_shadow_path(p, completed_60m=1)
                 remove.append(p)
         for p in remove:
             if p in pending_outcomes:
@@ -5252,6 +5545,7 @@ async def telegram_command_loop(session):
                         f"🧱 Liquidity depth: {'açık' if LIQUIDITY_RESEARCH_ENABLED else 'kapalı'} | {LIQUIDITY_DEPTH_LIMIT} seviye | 0/5/15/30sn (Shadow)\n"
                         f"🌊 Dynamic liquidity V1: {'açık' if LIQUIDITY_EVOLUTION_ENABLED else 'kapalı'} | SUPPORT ≥{LIQ_EVOLUTION_SUPPORT_SCORE} / HOSTILE ≤{LIQ_EVOLUTION_HOSTILE_SCORE} (Shadow)\n"
                         f"🧠 Liquidity Regime V2: {'açık' if LIQUIDITY_V2_ENABLED else 'kapalı'} | SUPPORT ≥{LIQ_V2_SUPPORT_SCORE} / HOSTILE ≤{LIQ_V2_HOSTILE_SCORE} (Shadow)\n"
+                        f"🧪 15sn Execution Gate Simulator: {'açık' if EXECUTION_GATE_SHADOW_ENABLED else 'kapalı'} | PRODUCTION GATE KAPALI | pre-gate TP/stop bias guard açık\n"
                         f"🚦 Post-Premium Failure Risk: {'açık' if POST_PREMIUM_RISK_ENABLED else 'kapalı'} | 15/30sn liquidity + 60sn progress | PUBLIC ALERT YOK\n"
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
@@ -5482,7 +5776,7 @@ async def telegram_command_loop(session):
                     lines.append(f"🏃 TP2 sonrası runner-exit shadow: {int(runner or 0)}")
                     lines.append("\nAcceptance/phase/reclaim/runner sonuçları SHADOW araştırmasıdır; Premium detector eşiklerini değiştirmez.")
                     await telegram_send(session, "\n".join(lines))
-                elif text in ("/v58stats", "/v59stats", "/v510stats", "/riskstats"):
+                elif text in ("/v58stats", "/v59stats", "/v510stats", "/v511stats", "/riskstats"):
                     conn = db_connect()
                     ignition = conn.execute(
                         """SELECT r.event_type,COUNT(*),AVG(o.mfe_pct),AVG(o.mae_pct),
@@ -5644,7 +5938,61 @@ async def telegram_command_loop(session):
                     if discovery_eps and discovery_eps[0]:
                         total,runner,missed_ep,prem_ep,early_ep = discovery_eps
                         lines.append(f"\n🔭 Dedup discovery episodes: toplam {int(total or 0)} | runner≥2% {int(runner or 0)} | missed {int(missed_ep or 0)} | Premium captured {int(prem_ep or 0)} | Early-only {int(early_ep or 0)}")
-                    lines.append(f"\nTüm V{BOT_VERSION} yeni sınıfları SHADOW araştırmasıdır; Premium/TP/stop production kurallarını değiştirmez. V2 eşikleri donduruldu; CORE yeni cohortta test edilecek.")
+                    lines.append(f"\nTüm V{BOT_VERSION} yeni sınıfları SHADOW araştırmasıdır; Premium/TP/stop production kurallarını değiştirmez. 15sn gate yalnız counterfactual ölçer; pre-gate TP/stop look-ahead guard aktif.")
+                    await telegram_send(session, "\n".join(lines))
+                elif text == "/gatestats":
+                    conn = db_connect()
+                    decisions = conn.execute(
+                        """SELECT g.decision,COUNT(*),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.invalidation_hit_s IS NOT NULL AND (p.tp1_hit_s IS NULL OR p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END),
+                           AVG(g.signal_to_gate_pct),AVG(g.gate_mfe),AVG(g.gate_mae)
+                           FROM premium_execution_gate_shadow g LEFT JOIN signal_paths p ON p.signal_id=g.signal_id
+                           GROUP BY g.decision ORDER BY COUNT(*) DESC"""
+                    ).fetchall()
+                    gate_paths = conn.execute(
+                        """SELECT g.decision,COUNT(*),
+                           SUM(CASE WHEN g.gate_tp2_hit_s IS NOT NULL AND (g.gate_stop_hit_s IS NULL OR g.gate_tp2_hit_s<g.gate_stop_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN g.gate_stop_hit_s IS NOT NULL AND (g.gate_tp1_hit_s IS NULL OR g.gate_stop_hit_s<g.gate_tp1_hit_s) THEN 1 ELSE 0 END),
+                           AVG(g.gate_mfe),AVG(g.gate_mae)
+                           FROM premium_execution_gate_shadow g WHERE g.completed_60m=1
+                           GROUP BY g.decision ORDER BY COUNT(*) DESC"""
+                    ).fetchall()
+                    sticky = conn.execute(
+                        """SELECT COUNT(*),SUM(COALESCE(recovered_30,0)),SUM(COALESCE(persistent_hostile_30,0))
+                           FROM premium_execution_gate_shadow WHERE sticky_early_hostile=1"""
+                    ).fetchone()
+                    absorb = conn.execute(
+                        """SELECT COUNT(*),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.invalidation_hit_s IS NOT NULL AND (p.tp1_hit_s IS NULL OR p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END)
+                           FROM premium_execution_gate_shadow g JOIN signal_paths p ON p.signal_id=g.signal_id
+                           WHERE g.absorption_risk=1"""
+                    ).fetchone()
+                    cf = conn.execute(
+                        """SELECT post_gate_horizon_s,COUNT(*),AVG(return_pct),AVG(mfe_pct),AVG(mae_pct)
+                           FROM premium_gate_counterfactual GROUP BY post_gate_horizon_s ORDER BY post_gate_horizon_s"""
+                    ).fetchall()
+                    conn.close()
+                    lines=[f"🧪 V{BOT_VERSION} 15SN EXECUTION GATE — SHADOW", ""]
+                    lines.append("⚠️ Production Premium hâlâ anında gider. Bu ekran gecikmeli giriş filtresini gerçek post-gate fiyat yoluyla test eder.")
+                    if decisions:
+                        lines.append("\nOrijinal sinyal sonucuna göre gate cohortları:")
+                        for d,n,w,stp,dr,mfe,mae in decisions:
+                            lines.append(f"• {d}: n={n} | orig TP2-first %{100*(w or 0)/max(n,1):.1f} | stop-first %{100*(stp or 0)/max(n,1):.1f} | 15sn kayma {(dr or 0):+.2f}%")
+                    if gate_paths:
+                        lines.append("\nGerçek 15sn gate fiyatından SONRA (look-ahead temiz):")
+                        for d,n,w,stp,mfe,mae in gate_paths:
+                            lines.append(f"• {d}: n={n} | post-gate TP2-first %{100*(w or 0)/max(n,1):.1f} | stop-first %{100*(stp or 0)/max(n,1):.1f} | MFE {(mfe or 0):+.2f}% | MAE {(mae or 0):+.2f}%")
+                    if sticky and sticky[0]:
+                        lines.append(f"\n🧷 Early HOSTILE sticky: n={int(sticky[0] or 0)} | 30sn toparladı {int(sticky[1] or 0)} | 30sn hostile kaldı {int(sticky[2] or 0)}")
+                    if absorb and absorb[0]:
+                        lines.append(f"🧲 Absorption-risk SHADOW (flow≥{ABSORPTION_FLOW30_MIN:g}x & bid<{ABSORPTION_BID_MAX*100:.0f}%): n={int(absorb[0])} | TP2-first %{100*(absorb[1] or 0)/max(absorb[0],1):.1f} | stop-first %{100*(absorb[2] or 0)/max(absorb[0],1):.1f}")
+                    if cf:
+                        lines.append("\nGate fiyatından sonraki counterfactual yol:")
+                        for h,n,ret,mfe,mae in cf:
+                            lines.append(f"• +{h}s: n={n} | ret {(ret or 0):+.2f}% | MFE {(mfe or 0):+.2f}% | MAE {(mae or 0):+.2f}%")
+                    lines.append("\nKarar kriteri: gate ancak post-gate net expectancy'yi iyileştirirse production'a aday olacak; pre-gate hedef görenler başarı hanesine yazılmayacak.")
                     await telegram_send(session, "\n".join(lines))
                 elif text == "/discoverystats":
                     conn = db_connect()
@@ -5783,7 +6131,7 @@ async def telegram_command_loop(session):
                             m["execution"] = compute_execution_context(sym, m, plan)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v510stats, /riskstats, /discoverystats, /dbhealth, /backupdb, /joinstatus ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v511stats, /v510stats, /riskstats, /gatestats, /discoverystats, /dbhealth, /backupdb, /joinstatus ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
                         f"🤖 Momentum Scanner V{BOT_VERSION} — Execution Risk / Liquidity Regime Research\n\n"
@@ -5797,8 +6145,10 @@ async def telegram_command_loop(session):
                         "/entrystats — 15sn acceptance / micro execution özeti\n"
                         "/latencystats — Telegram send + 1–60sn execution latency özeti\n"
                         "/researchstats — genel research özeti\n"
-                        "/v510stats — liquidity V2/CORE / active failure-risk / conflict / reclaim özeti\n"
-                        "/riskstats — /v510stats kısa yolu\n"
+                        "/v511stats — liquidity V2/CORE / active failure-risk / conflict / reclaim özeti\n"
+                        "/v510stats — geriye dönük aynı özet aliası\n"
+                        "/riskstats — /v511stats kısa yolu\n"
+                        "/gatestats — 15sn delayed-entry gate / look-ahead temiz counterfactual\n"
                         "/discoverystats — dedup first-wave runner episode özeti\n"
                         "/dbhealth — SQLite quick_check + integrity_check\n"
                         "/backupdb — tutarlı DB snapshotını Telegrama gönder\n"
@@ -5806,7 +6156,7 @@ async def telegram_command_loop(session):
                         "/joinlink — yönetici onaylı davet linki oluştur\n"
                         "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
-                        f"Premium seçim eşikleri değişmedi. V{BOT_VERSION} liquidity V2/CORE, ignition V2, acceptance+progress, failure-risk ve reclaim/runner katmanlarını SHADOW olarak ölçer; bunlar işlem sinyali değildir."
+                        f"Premium seçim eşikleri değişmedi. V{BOT_VERSION} liquidity V2/CORE, sticky early-liquidity, gerçek post-gate counterfactual, ignition V2, failure-risk ve reclaim/runner katmanlarını SHADOW olarak ölçer; bunlar işlem sinyali değildir."
                     )
         except asyncio.CancelledError:
             raise
@@ -5851,7 +6201,7 @@ async def main():
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
                 f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
                 f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v510stats  /riskstats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /analiz COIN  /test"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v511stats  /v510stats  /riskstats  /gatestats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
