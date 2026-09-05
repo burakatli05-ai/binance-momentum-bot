@@ -5,6 +5,8 @@ import os
 import signal
 import sqlite3
 import time
+import tempfile
+import zipfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -20,6 +22,10 @@ REST = "https://fapi.binance.com"
 WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
+
+BOT_VERSION = "5.10.1"
+RESEARCH_LOGIC_VERSION = "v5101-forward-holdout"
+PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -125,7 +131,7 @@ SECOND_WAVE_MAX_GAP_SECONDS = int(os.getenv("SECOND_WAVE_MAX_GAP_SECONDS", "2160
 FLOW_STRUCTURE_COOLDOWN_SECONDS = int(os.getenv("FLOW_STRUCTURE_COOLDOWN_SECONDS", "900"))
 RESEARCH_HORIZONS = (60, 300, 900, 1800, 3600)
 GAINERS_OUTCOME_HORIZONS = (60, 300, 900, 1800, 3600)
-SHADOW_OUTCOME_HORIZONS = (30, 60, 300, 900)
+SHADOW_OUTCOME_HORIZONS = (15, 30, 60, 120, 300, 900)
 ANCHOR_MAX_AGE_SECONDS = int(os.getenv("ANCHOR_MAX_AGE_SECONDS", "21600"))
 
 # V5.7: execution-quality / phase measurement. Production Premium gates above remain unchanged.
@@ -183,10 +189,34 @@ IGNITION_V2_ENABLED = os.getenv("IGNITION_V2_ENABLED", "1").strip() not in ("0",
 IGNITION_V2_MIN_SCORE = int(os.getenv("IGNITION_V2_MIN_SCORE", "80"))
 FAST_EARLY_V2_SCORE = int(os.getenv("FAST_EARLY_V2_SCORE", "85"))
 
+# V5.10: SHADOW-only post-Premium execution-risk research.
+# Production Premium/Early/TP/stop rules stay byte-for-byte unchanged.
+POST_PREMIUM_RISK_ENABLED = os.getenv("POST_PREMIUM_RISK_ENABLED", "1").strip() not in ("0", "false", "False")
+LIQUIDITY_V2_ENABLED = os.getenv("LIQUIDITY_V2_ENABLED", "1").strip() not in ("0", "false", "False")
+LIQ_V2_SUPPORT_SCORE = int(os.getenv("LIQ_V2_SUPPORT_SCORE", "35"))
+LIQ_V2_HOSTILE_SCORE = int(os.getenv("LIQ_V2_HOSTILE_SCORE", "-35"))
+POST_RISK_BID_RATIO_MAX = float(os.getenv("POST_RISK_BID_RATIO_MAX", "0.25"))
+POST_RISK_BID_RETAIN_MAX = float(os.getenv("POST_RISK_BID_RETAIN_MAX", "0.50"))
+POST_RISK_WALL_REMAIN_MIN = float(os.getenv("POST_RISK_WALL_REMAIN_MIN", "0.90"))
+POST_RISK_ASK_GROWTH_MIN = float(os.getenv("POST_RISK_ASK_GROWTH_MIN", "1.05"))
+POST_RISK_CLEAR_S_MIN = float(os.getenv("POST_RISK_CLEAR_S_MIN", "15.0"))
+DB_BACKUP_ENABLED = os.getenv("DB_BACKUP_ENABLED", "1").strip() not in ("0", "false", "False")
+
+# V5.10.1: keep V5.10 Liquidity V2 frozen and add a clean ablation that uses only
+# the four forward-supported aggregate-book metrics. This is exploratory SHADOW only.
+LIQUIDITY_CORE_ENABLED = os.getenv("LIQUIDITY_CORE_ENABLED", "1").strip() not in ("0", "false", "False")
+LIQ_CORE_SUPPORT_SCORE = int(os.getenv("LIQ_CORE_SUPPORT_SCORE", str(LIQ_V2_SUPPORT_SCORE)))
+LIQ_CORE_HOSTILE_SCORE = int(os.getenv("LIQ_CORE_HOSTILE_SCORE", str(LIQ_V2_HOSTILE_SCORE)))
+
+# Event-level missed-runner counts can over-count the same move. Group research events into
+# symbol/time episodes for a more honest first-wave coverage metric.
+DISCOVERY_EPISODE_GAP_S = int(os.getenv("DISCOVERY_EPISODE_GAP_S", "600"))
+DISCOVERY_EPISODE_MAX_S = int(os.getenv("DISCOVERY_EPISODE_MAX_S", "1800"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.9")
+log = logging.getLogger("momentum-v5.10.1")
 
 
 @dataclass
@@ -353,6 +383,10 @@ class PendingOutcome:
     # V5.8 depth/progress tracking. Never gates Premium creation.
     liquidity_completed: set = field(default_factory=set)
     progress_finalized: bool = False
+    # V5.10 post-Premium risk research bookkeeping. SHADOW only.
+    liq_risk_15_saved: bool = False
+    liq_risk_30_saved: bool = False
+    fail_risk_60_saved: bool = False
 
 
 @dataclass
@@ -840,6 +874,59 @@ def init_db():
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS premium_failure_risk (
+            signal_id INTEGER NOT NULL,
+            horizon_ms INTEGER NOT NULL,
+            observed_ts_ms INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            risk_state TEXT NOT NULL,
+            raw_risk_state TEXT,
+            risk_score INTEGER,
+            price REAL, return_pct REAL,
+            progress_status TEXT,
+            liquidity_v1_state TEXT, liquidity_v1_score INTEGER,
+            liquidity_v2_state TEXT, liquidity_v2_score INTEGER,
+            liquidity_core_state TEXT, liquidity_core_score INTEGER,
+            bid_ratio_025 REAL, bid025_vs_initial REAL, ask025_vs_initial REAL,
+            wall_remaining_ratio REAL, ask025_clear_s REAL, tp1_clear_s REAL,
+            wall_distance_pct REAL, wall_ratio REAL,
+            trade_active INTEGER, terminal_event TEXT, terminal_age_s REAL,
+            entry_touched_before_horizon INTEGER, tp1_before_horizon INTEGER,
+            tp2_before_horizon INTEGER, stop_before_horizon INTEGER,
+            price_state TEXT, micro_mfe REAL, micro_mae REAL,
+            reason TEXT, updated_ts INTEGER NOT NULL,
+            PRIMARY KEY(signal_id, horizon_ms)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_conflict_events (
+            signal_id INTEGER NOT NULL,
+            event_code TEXT NOT NULL,
+            horizon_ms INTEGER NOT NULL,
+            observed_ts_ms INTEGER NOT NULL,
+            price REAL, return_pct REAL,
+            details TEXT, updated_ts INTEGER NOT NULL,
+            PRIMARY KEY(signal_id, event_code)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS failure_risk_reclaims (
+            signal_id INTEGER PRIMARY KEY,
+            risk_event_id INTEGER,
+            risk_event TEXT, risk_age_s REAL, risk_price REAL,
+            stop_s REAL, reclaim_age_s REAL, reclaim_after_risk_s REAL,
+            reclaim_price REAL, bucket TEXT, score INTEGER,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS missed_runner_audit (
             source_event_id INTEGER PRIMARY KEY,
             event_type TEXT NOT NULL,
@@ -851,6 +938,39 @@ def init_db():
             early_count INTEGER, premium_count INTEGER,
             classification TEXT NOT NULL,
             updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discovery_episode_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            start_ts INTEGER NOT NULL,
+            last_event_ts INTEGER NOT NULL,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            runner_event_count INTEGER NOT NULL DEFAULT 0,
+            missed_event_count INTEGER NOT NULL DEFAULT 0,
+            premium_captured INTEGER NOT NULL DEFAULT 0,
+            early_captured INTEGER NOT NULL DEFAULT 0,
+            max_runner_size INTEGER NOT NULL DEFAULT 0,
+            max_mfe_pct REAL, worst_mae_pct REAL,
+            first_event_id INTEGER, first_event_type TEXT,
+            first_premium_ts INTEGER, first_early_ts INTEGER,
+            blocker_counts_json TEXT,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_discovery_episode_symbol_last ON discovery_episode_audit(symbol,last_event_ts)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_deployments (
+            started_ts_ms INTEGER PRIMARY KEY,
+            bot_version TEXT NOT NULL,
+            research_logic_version TEXT NOT NULL,
+            db_path TEXT, note TEXT, updated_ts INTEGER NOT NULL
         )
         """
     )
@@ -940,6 +1060,35 @@ def init_db():
     ensure_column(conn, "premium_liquidity_snapshots", "dynamic_score", "INTEGER")
     ensure_column(conn, "premium_liquidity_snapshots", "dynamic_state", "TEXT")
     ensure_column(conn, "premium_liquidity_snapshots", "dynamic_reason", "TEXT")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_v2_score", "INTEGER")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_v2_state", "TEXT")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_v2_reason", "TEXT")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_core_score", "INTEGER")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_core_state", "TEXT")
+    ensure_column(conn, "premium_liquidity_snapshots", "liquidity_core_reason", "TEXT")
+    ensure_column(conn, "premium_failure_risk", "raw_risk_state", "TEXT")
+    ensure_column(conn, "premium_failure_risk", "liquidity_core_state", "TEXT")
+    ensure_column(conn, "premium_failure_risk", "liquidity_core_score", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "trade_active", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "terminal_event", "TEXT")
+    ensure_column(conn, "premium_failure_risk", "terminal_age_s", "REAL")
+    ensure_column(conn, "premium_failure_risk", "entry_touched_before_horizon", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "tp1_before_horizon", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "tp2_before_horizon", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "stop_before_horizon", "INTEGER")
+    ensure_column(conn, "premium_failure_risk", "price_state", "TEXT")
+    ensure_column(conn, "premium_failure_risk", "micro_mfe", "REAL")
+    ensure_column(conn, "premium_failure_risk", "micro_mae", "REAL")
+    ensure_column(conn, "premium_execution_composite", "trade_active", "INTEGER")
+    ensure_column(conn, "premium_execution_composite", "terminal_event", "TEXT")
+    ensure_column(conn, "premium_execution_composite", "terminal_age_s", "REAL")
+    conn.execute(
+        """INSERT OR IGNORE INTO bot_deployments
+           (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
+           VALUES (?,?,?,?,?,?)""",
+        (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
+         "V5.10.1 research-only holdout revision; production Premium/Early/TP/stop unchanged",int(time.time())),
+    )
     conn.commit()
     conn.close()
 
@@ -1269,8 +1418,415 @@ def classify_liquidity_evolution(feat: dict, initial: Optional[dict]) -> dict:
     }
 
 
-def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional[int] = None):
-    """Combine 30s liquidity evolution with 60s progress as a SHADOW state label."""
+def classify_liquidity_v2(feat: dict, initial: Optional[dict]) -> dict:
+    """V5.10 SHADOW classifier focused on the *local liquidity regime*.
+
+    Forward data weakened the idea that one displayed wall (or absorption flag) is
+    enough. V2 therefore gives most weight to aggregate ask clearance, bid survival,
+    and flow-adjusted clear time. The original V5.9 classifier is preserved in parallel
+    for honest forward comparison. This function never gates Premium creation.
+    """
+    if not LIQUIDITY_V2_ENABLED or not initial:
+        return {"liquidity_v2_score": None, "liquidity_v2_state": "BASELINE", "liquidity_v2_reason": "signal snapshot"}
+    ask_ratio = _safe_ratio(feat.get("ask_025"), initial.get("ask_025"))
+    bid_retain = _safe_ratio(feat.get("bid_025"), initial.get("bid_025"))
+    bid_ratio = feat.get("bid_ratio_025")
+    wall_remaining = feat.get("wall_remaining_ratio")
+    clear_s = feat.get("ask025_clear_s")
+    score = 0
+    reasons = []
+
+    # Current nearby bid/ask balance: strongest weight after forward validation.
+    if bid_ratio is not None:
+        if bid_ratio >= 0.65:
+            score += 30; reasons.append(f"bid25 güçlü %{bid_ratio*100:.0f}")
+        elif bid_ratio >= 0.50:
+            score += 20; reasons.append(f"bid25 %{bid_ratio*100:.0f}")
+        elif bid_ratio <= 0.15:
+            score -= 30; reasons.append(f"bid25 çöktü %{bid_ratio*100:.0f}")
+        elif bid_ratio <= 0.25:
+            score -= 20; reasons.append(f"bid25 zayıf %{bid_ratio*100:.0f}")
+
+    # Bid survival relative to the signal snapshot.
+    if bid_retain is not None:
+        if bid_retain >= 0.90:
+            score += 15; reasons.append("bid korunuyor")
+        elif bid_retain <= 0.45:
+            score -= 20; reasons.append(f"bid kaldı %{bid_retain*100:.0f}")
+        elif bid_retain <= 0.60:
+            score -= 10; reasons.append(f"bid zayıfladı %{bid_retain*100:.0f}")
+
+    # Aggregate asks near the signal are more important than one wall identity.
+    if ask_ratio is not None:
+        if ask_ratio <= 0.70:
+            score += 20; reasons.append(f"ask25 çözüldü %{ask_ratio*100:.0f}")
+        elif ask_ratio <= 0.85:
+            score += 10; reasons.append(f"ask25 azalıyor %{ask_ratio*100:.0f}")
+        elif ask_ratio >= 1.25:
+            score -= 25; reasons.append(f"ask25 büyüdü %{ask_ratio*100:.0f}")
+        elif ask_ratio >= 1.10:
+            score -= 15; reasons.append(f"ask25 arttı %{ask_ratio*100:.0f}")
+
+    # Flow-adjusted time to clear nearby asks.
+    if clear_s is not None:
+        if clear_s <= 8.0:
+            score += 15; reasons.append(f"clear {clear_s:.1f}s")
+        elif clear_s <= 15.0:
+            score += 8; reasons.append(f"clear {clear_s:.1f}s")
+        elif clear_s >= 25.0:
+            score -= 20; reasons.append(f"clear yavaş {clear_s:.1f}s")
+        elif clear_s >= 15.0:
+            score -= 10; reasons.append(f"clear {clear_s:.1f}s")
+
+    # Initial wall persistence stays context, but receives less weight than in V1.
+    if wall_remaining is not None:
+        if wall_remaining <= 0.25:
+            score += 10; reasons.append(f"ilk wall %{wall_remaining*100:.0f}")
+        elif wall_remaining >= 1.05:
+            score -= 10; reasons.append(f"ilk wall büyüyor %{wall_remaining*100:.0f}")
+    if feat.get("wall_cancelled"):
+        score += 5; reasons.append("wall çekildi")
+    if feat.get("wall_replenished"):
+        score -= 5; reasons.append("wall yenileniyor")
+    if feat.get("absorption_flag"):
+        # Forward winners also showed absorption; record it but do not punish it by itself.
+        reasons.append("absorption gözlendi")
+
+    score = max(-100, min(100, int(round(score))))
+    state = "SUPPORTIVE" if score >= LIQ_V2_SUPPORT_SCORE else "HOSTILE" if score <= LIQ_V2_HOSTILE_SCORE else "MIXED"
+    return {"liquidity_v2_score": score, "liquidity_v2_state": state, "liquidity_v2_reason": "; ".join(reasons[:9]) or "mixed local liquidity"}
+
+
+def classify_liquidity_core(feat: dict, initial: Optional[dict]) -> dict:
+    """V5.10.1 exploratory SHADOW ablation of Liquidity V2.
+
+    It intentionally uses ONLY the four aggregate-book features that survived the latest
+    chronological holdout: current bid ratio, bid survival, aggregate ask change and
+    flow-adjusted ask-clear time. Thresholds/weights are copied from V2 and are NOT retuned.
+    This makes the next live cohort a clean test of whether single-wall identity adds value.
+    """
+    if not LIQUIDITY_CORE_ENABLED or not initial:
+        return {"liquidity_core_score": None, "liquidity_core_state": "BASELINE", "liquidity_core_reason": "signal snapshot"}
+    ask_ratio = _safe_ratio(feat.get("ask_025"), initial.get("ask_025"))
+    bid_retain = _safe_ratio(feat.get("bid_025"), initial.get("bid_025"))
+    bid_ratio = feat.get("bid_ratio_025")
+    clear_s = feat.get("ask025_clear_s")
+    score = 0
+    reasons = []
+
+    if bid_ratio is not None:
+        if bid_ratio >= 0.65:
+            score += 30; reasons.append(f"bid25 güçlü %{bid_ratio*100:.0f}")
+        elif bid_ratio >= 0.50:
+            score += 20; reasons.append(f"bid25 %{bid_ratio*100:.0f}")
+        elif bid_ratio <= 0.15:
+            score -= 30; reasons.append(f"bid25 çöktü %{bid_ratio*100:.0f}")
+        elif bid_ratio <= 0.25:
+            score -= 20; reasons.append(f"bid25 zayıf %{bid_ratio*100:.0f}")
+
+    if bid_retain is not None:
+        if bid_retain >= 0.90:
+            score += 15; reasons.append("bid korunuyor")
+        elif bid_retain <= 0.45:
+            score -= 20; reasons.append(f"bid kaldı %{bid_retain*100:.0f}")
+        elif bid_retain <= 0.60:
+            score -= 10; reasons.append(f"bid zayıfladı %{bid_retain*100:.0f}")
+
+    if ask_ratio is not None:
+        if ask_ratio <= 0.70:
+            score += 20; reasons.append(f"ask25 çözüldü %{ask_ratio*100:.0f}")
+        elif ask_ratio <= 0.85:
+            score += 10; reasons.append(f"ask25 azalıyor %{ask_ratio*100:.0f}")
+        elif ask_ratio >= 1.25:
+            score -= 25; reasons.append(f"ask25 büyüdü %{ask_ratio*100:.0f}")
+        elif ask_ratio >= 1.10:
+            score -= 15; reasons.append(f"ask25 arttı %{ask_ratio*100:.0f}")
+
+    if clear_s is not None:
+        if clear_s <= 8.0:
+            score += 15; reasons.append(f"clear {clear_s:.1f}s")
+        elif clear_s <= 15.0:
+            score += 8; reasons.append(f"clear {clear_s:.1f}s")
+        elif clear_s >= 25.0:
+            score -= 20; reasons.append(f"clear yavaş {clear_s:.1f}s")
+        elif clear_s >= 15.0:
+            score -= 10; reasons.append(f"clear {clear_s:.1f}s")
+
+    score = max(-100, min(100, int(round(score))))
+    state = "SUPPORTIVE" if score >= LIQ_CORE_SUPPORT_SCORE else "HOSTILE" if score <= LIQ_CORE_HOSTILE_SCORE else "MIXED"
+    return {
+        "liquidity_core_score": score,
+        "liquidity_core_state": state,
+        "liquidity_core_reason": "; ".join(reasons[:8]) or "mixed aggregate liquidity",
+    }
+
+
+def _terminal_context(p: PendingOutcome, horizon_ms: int) -> dict:
+    """Return actionability context at a post-Premium horizon.
+
+    Failure-risk should only be interpreted while an executable trade is still live. A
+    TP1/TP2 already reached before the horizon must not later be called a failure simply
+    because price retraced (the AKE-type contamination seen in the holdout).
+    """
+    h = max(0.0, float(horizon_ms) / 1000.0)
+    entry_touched = p.entry_touch_s is not None and float(p.entry_touch_s) <= h
+    stop_s = float(p.invalidation_hit_s) if p.invalidation_hit_s is not None else None
+    tp1_s = float(p.tp1_hit_s) if p.tp1_hit_s is not None else None
+    tp2_s = float(p.tp2_hit_s) if p.tp2_hit_s is not None else None
+
+    stop_before = bool(entry_touched and stop_s is not None and stop_s <= h and (tp1_s is None or stop_s < tp1_s))
+    tp1_before = bool(entry_touched and tp1_s is not None and tp1_s <= h and (stop_s is None or tp1_s < stop_s))
+    tp2_before = bool(entry_touched and tp2_s is not None and tp2_s <= h and (stop_s is None or tp2_s < stop_s))
+
+    terminal_event = None
+    terminal_age_s = None
+    if not entry_touched:
+        terminal_event = "NO_ENTRY_YET"
+    elif tp2_before:
+        terminal_event, terminal_age_s = "TP2_REACHED", tp2_s
+    elif tp1_before:
+        terminal_event, terminal_age_s = "TP1_REACHED", tp1_s
+    elif stop_before:
+        terminal_event, terminal_age_s = "STOPPED", stop_s
+
+    trade_active = bool(entry_touched and not tp1_before and not stop_before)
+    return {
+        "trade_active": int(trade_active),
+        "terminal_event": terminal_event,
+        "terminal_age_s": terminal_age_s,
+        "entry_touched_before_horizon": int(entry_touched),
+        "tp1_before_horizon": int(tp1_before),
+        "tp2_before_horizon": int(tp2_before),
+        "stop_before_horizon": int(stop_before),
+    }
+
+
+def _save_conflict_event(signal_id: int, event_code: str, horizon_ms: int, observed_ts_ms: int,
+                         price: Optional[float], ret: Optional[float], details: str):
+    conn = db_connect()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO premium_conflict_events
+               (signal_id,event_code,horizon_ms,observed_ts_ms,price,return_pct,details,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (signal_id,event_code,horizon_ms,observed_ts_ms,price,ret,details[:500],int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _risk_event_exists(signal_id: int, event: str) -> bool:
+    conn = db_connect()
+    try:
+        return bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event=? LIMIT 1", (signal_id,event)).fetchone())
+    finally:
+        conn.close()
+
+
+def save_post_premium_risk(p: PendingOutcome, horizon_ms: int, observed_ts_ms: int,
+                           progress_status: Optional[str] = None) -> Optional[str]:
+    """Persist a SHADOW post-Premium state without contaminating resolved trades.
+
+    V5.10.1 keeps the V5.10 liquidity thresholds frozen, but separates *observation*
+    from *actionability*. A trade that already reached TP1/TP2, already stopped, or has
+    not even touched the entry band is still recorded, yet it cannot emit a failure-risk
+    shadow event. This prevents post-win retracements from being mislabeled as failures.
+    """
+    if not POST_PREMIUM_RISK_ENABLED:
+        return None
+
+    liq_horizon = 15000 if horizon_ms <= 15000 else 30000
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            """SELECT dynamic_state,dynamic_score,liquidity_v2_state,liquidity_v2_score,
+                      liquidity_core_state,liquidity_core_score,
+                      bid_ratio_025,bid025_vs_initial,ask025_vs_initial,wall_remaining_ratio,
+                      ask025_clear_s,tp1_clear_s,largest_ask_wall_distance_pct,largest_ask_wall_ratio
+               FROM premium_liquidity_snapshots WHERE signal_id=? AND horizon_ms=?""",
+            (p.signal_id,liq_horizon),
+        ).fetchone()
+        micro = conn.execute(
+            """SELECT last_price,return_pct,mfe_pct,mae_pct
+               FROM premium_micro_snapshots WHERE signal_id=? AND horizon_ms=?""",
+            (p.signal_id,horizon_ms),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+
+    (v1_state,v1_score,v2_state,v2_score,core_state,core_score,
+     bid_ratio,bid_retain,ask_ratio,wall_remaining,clear_s,tp1_clear_s,wall_dist,wall_ratio) = row
+
+    terminal = _terminal_context(p, horizon_ms)
+    trade_active = bool(terminal["trade_active"])
+
+    st = states[p.symbol]
+    price = (micro[0] if micro and micro[0] is not None else (st.last_price or p.entry_price))
+    ret = (micro[1] if micro and micro[1] is not None else pct_change(price, p.entry_price))
+    micro_mfe = micro[2] if micro else None
+    micro_mae = micro[3] if micro else None
+    if ret is None:
+        price_state = "UNKNOWN"
+    elif ret <= -0.10:
+        price_state = "NEGATIVE"
+    elif ret >= 0.10:
+        price_state = "POSITIVE"
+    else:
+        price_state = "FLAT"
+
+    # Keep V5.10 risk ingredients frozen. New price context is measured but not used
+    # to retune the classifier; the next live cohort should decide whether it adds edge.
+    bid_collapse = ((bid_ratio is not None and bid_ratio <= POST_RISK_BID_RATIO_MAX) or
+                    (bid_retain is not None and bid_retain <= POST_RISK_BID_RETAIN_MAX))
+    ask_pressure = ((wall_remaining is not None and wall_remaining >= POST_RISK_WALL_REMAIN_MIN) or
+                    (ask_ratio is not None and ask_ratio >= POST_RISK_ASK_GROWTH_MIN) or
+                    (clear_s is not None and clear_s >= POST_RISK_CLEAR_S_MIN))
+    support = ((bid_ratio is not None and bid_ratio >= 0.55) and
+               (ask_ratio is None or ask_ratio <= 0.85) and
+               (clear_s is None or clear_s <= 12.0))
+    blocking_mode = ((bid_ratio is not None and bid_ratio <= 0.25) and
+                     (wall_remaining is not None and wall_remaining >= 0.90) and
+                     (clear_s is not None and clear_s >= 15.0))
+    rotating_ask_mode = ((wall_remaining is not None and wall_remaining <= 0.25) and
+                         (bid_ratio is not None and bid_ratio <= 0.15) and
+                         (ask_ratio is not None and ask_ratio >= 1.05))
+
+    risk_score = 0
+    reasons = []
+    if bid_collapse:
+        risk_score += 2; reasons.append("bid collapse")
+    if ask_pressure:
+        risk_score += 2; reasons.append("ask pressure")
+    if wall_remaining is not None and wall_remaining >= 1.05:
+        risk_score += 1; reasons.append(f"wall %{wall_remaining*100:.0f}")
+    if ask_ratio is not None and ask_ratio >= 1.15:
+        risk_score += 1; reasons.append(f"ask25 %{ask_ratio*100:.0f}")
+    if support:
+        risk_score -= 2; reasons.append("book support")
+    reasons.append(f"price={price_state}")
+
+    if horizon_ms <= 30000:
+        stage = "LIQUIDITY_15S" if horizon_ms <= 15000 else "LIQUIDITY_30S"
+        if blocking_mode:
+            raw_state = "BLOCKING_LIQUIDITY"
+        elif rotating_ask_mode:
+            raw_state = "ROTATING_ASK_PRESSURE"
+        elif bid_collapse and ask_pressure:
+            raw_state = "HIGH_LIQ_RISK"
+        elif support:
+            raw_state = "LIQ_SUPPORT"
+        else:
+            raw_state = "WATCH"
+    else:
+        stage = "FAILURE_60S"
+        ps = progress_status or "UNKNOWN"
+        if ps in ("REJECTION", "STALL") and blocking_mode:
+            raw_state = "HIGH_FAILURE_RISK_BLOCKING"
+            risk_score += 4
+        elif ps in ("REJECTION", "STALL") and rotating_ask_mode:
+            raw_state = "HIGH_FAILURE_RISK_ROTATING"
+            risk_score += 4
+        elif ps in ("REJECTION", "STALL") and bid_collapse and ask_pressure:
+            raw_state = "HIGH_FAILURE_RISK"
+            risk_score += 3
+        elif ps == "PROGRESS" and support:
+            raw_state = "STRONG_CONTINUATION"
+            risk_score -= 2
+        elif ps == "PROGRESS" and (bid_collapse and ask_pressure):
+            raw_state = "CONFLICT_PROGRESS_VS_BOOK"
+        elif ps in ("REJECTION", "STALL") and support:
+            raw_state = "CONFLICT_PRICE_VS_BOOK"
+        elif ps in ("REJECTION", "STALL") or bid_collapse or ask_pressure:
+            raw_state = "CAUTION"
+        else:
+            raw_state = "NEUTRAL"
+        reasons.append(f"progress={ps}")
+
+    # Actionability guard: still store the observation, but do not call a resolved or
+    # never-entered trade a failure. Raw state remains in the reason for later analysis.
+    if not trade_active:
+        risk_state = terminal.get("terminal_event") or "NOT_ACTIVE"
+        reasons.append(f"raw_state={raw_state}")
+        reasons.append("actionability=resolved")
+    else:
+        risk_state = raw_state
+        reasons.append("actionability=live")
+
+    conn = db_connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO premium_failure_risk
+               (signal_id,horizon_ms,observed_ts_ms,stage,risk_state,raw_risk_state,risk_score,price,return_pct,progress_status,
+                liquidity_v1_state,liquidity_v1_score,liquidity_v2_state,liquidity_v2_score,
+                liquidity_core_state,liquidity_core_score,
+                bid_ratio_025,bid025_vs_initial,ask025_vs_initial,wall_remaining_ratio,ask025_clear_s,tp1_clear_s,
+                wall_distance_pct,wall_ratio,trade_active,terminal_event,terminal_age_s,
+                entry_touched_before_horizon,tp1_before_horizon,tp2_before_horizon,stop_before_horizon,
+                price_state,micro_mfe,micro_mae,reason,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (p.signal_id,horizon_ms,observed_ts_ms,stage,risk_state,raw_state,risk_score,price,ret,progress_status,
+             v1_state,v1_score,v2_state,v2_score,core_state,core_score,
+             bid_ratio,bid_retain,ask_ratio,wall_remaining,clear_s,tp1_clear_s,wall_dist,wall_ratio,
+             terminal["trade_active"],terminal["terminal_event"],terminal["terminal_age_s"],
+             terminal["entry_touched_before_horizon"],terminal["tp1_before_horizon"],terminal["tp2_before_horizon"],terminal["stop_before_horizon"],
+             price_state,micro_mfe,micro_mae,"; ".join(reasons)[:500],int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Conflict cohorts are actionable only while the trade is live. Resolved observations
+    # remain available in the raw liquidity tables without polluting failure statistics.
+    if trade_active:
+        if wall_remaining is not None and wall_remaining <= 0.25 and (
+                (bid_ratio is not None and bid_ratio <= 0.15) or (bid_retain is not None and bid_retain <= 0.25)) and (
+                ask_ratio is not None and ask_ratio >= 1.05):
+            _save_conflict_event(p.signal_id,"WALL_CLEARED_BID_COLLAPSE",horizon_ms,observed_ts_ms,price,ret,
+                                 f"wall={wall_remaining:.3f}; bid_ratio={bid_ratio}; bid_retain={bid_retain}; ask_ratio={ask_ratio}")
+        if horizon_ms >= 60000:
+            if progress_status == "PROGRESS" and v2_state == "HOSTILE":
+                _save_conflict_event(p.signal_id,"PROGRESS_HOSTILE_V2",horizon_ms,observed_ts_ms,price,ret,
+                                     f"v2={v2_score}; core={core_state}; risk={risk_state}")
+            if progress_status in ("REJECTION","STALL") and v2_state == "SUPPORTIVE":
+                _save_conflict_event(p.signal_id,"WEAK_PRICE_SUPPORTIVE_BOOK_V2",horizon_ms,observed_ts_ms,price,ret,
+                                     f"progress={progress_status}; v2={v2_score}; core={core_state}; risk={risk_state}")
+            if wall_remaining is not None and wall_remaining >= 0.90 and progress_status == "PROGRESS":
+                _save_conflict_event(p.signal_id,"WALL_PERSISTENT_STRONG_PROGRESS",horizon_ms,observed_ts_ms,price,ret,
+                                     f"wall={wall_remaining:.3f}; v2={v2_state}; core={core_state}; risk={risk_state}")
+
+    # Only live/executable trades can create actionability shadow events. No Telegram exit.
+    if trade_active and horizon_ms <= 30000 and risk_state in ("BLOCKING_LIQUIDITY","ROTATING_ASK_PRESSURE","HIGH_LIQ_RISK"):
+        event_name = "LIQ_RISK_15" if horizon_ms <= 15000 else "LIQ_RISK_30"
+        if not _risk_event_exists(p.signal_id,event_name):
+            m = compute_metrics(p.symbol)
+            sc = score_metrics(m) if m else None
+            save_shadow_event(p,event_name,max(0.0,(observed_ts_ms-(p.signal_generated_ts_ms or int(p.created_ts*1000)))/1000.0),
+                              price,ret,max(0.0,-pct_change(price,p.peak_price or price)),m,sc,
+                              f"V5.10.1 shadow; state={risk_state}; {'; '.join(reasons)}",None)
+            if horizon_ms <= 15000:
+                p.liq_risk_15_saved = True
+            else:
+                p.liq_risk_30_saved = True
+    if trade_active and horizon_ms >= 60000 and risk_state in ("HIGH_FAILURE_RISK","HIGH_FAILURE_RISK_BLOCKING","HIGH_FAILURE_RISK_ROTATING") and not _risk_event_exists(p.signal_id,"FAIL_RISK_60"):
+        m = compute_metrics(p.symbol)
+        sc = score_metrics(m) if m else None
+        save_shadow_event(p,"FAIL_RISK_60",max(0.0,(observed_ts_ms-(p.signal_generated_ts_ms or int(p.created_ts*1000)))/1000.0),
+                          price,ret,max(0.0,-pct_change(price,p.peak_price or price)),m,sc,
+                          f"V5.10.1 shadow; state={risk_state}; {'; '.join(reasons)}",None)
+        p.fail_risk_60_saved = True
+    return risk_state
+
+
+def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional[int] = None,
+                                       p: Optional[PendingOutcome] = None):
+    """Combine 30s liquidity with 60s progress, while separately storing actionability.
+
+    The raw composite remains comparable with V5.9/V5.10. V5.10.1 adds whether the
+    trade was still live at 60s so post-TP retracements are not mixed into exit research.
+    """
     conn = db_connect()
     try:
         prog = conn.execute(
@@ -1300,18 +1856,49 @@ def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional
             composite = "CAUTION"
         else:
             composite = "NEUTRAL"
-        reason = f"progress={progress}; liq30={liq30}"
+
+        if p is not None:
+            term = _terminal_context(p, 60000)
+        else:
+            path = conn.execute(
+                "SELECT entry_touch_s,tp1_hit_s,tp2_hit_s,invalidation_hit_s FROM signal_paths WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone()
+            if path:
+                entry_s,tp1_s,tp2_s,stop_s = path
+                h = 60.0
+                entry_touched = entry_s is not None and float(entry_s) <= h
+                stop_before = bool(entry_touched and stop_s is not None and float(stop_s) <= h and (tp1_s is None or float(stop_s) < float(tp1_s)))
+                tp1_before = bool(entry_touched and tp1_s is not None and float(tp1_s) <= h and (stop_s is None or float(tp1_s) < float(stop_s)))
+                tp2_before = bool(entry_touched and tp2_s is not None and float(tp2_s) <= h and (stop_s is None or float(tp2_s) < float(stop_s)))
+                if not entry_touched:
+                    terminal_event, terminal_age = "NO_ENTRY_YET", None
+                elif tp2_before:
+                    terminal_event, terminal_age = "TP2_REACHED", float(tp2_s)
+                elif tp1_before:
+                    terminal_event, terminal_age = "TP1_REACHED", float(tp1_s)
+                elif stop_before:
+                    terminal_event, terminal_age = "STOPPED", float(stop_s)
+                else:
+                    terminal_event, terminal_age = None, None
+                term = {"trade_active": int(entry_touched and not tp1_before and not stop_before),
+                        "terminal_event": terminal_event, "terminal_age_s": terminal_age}
+            else:
+                term = {"trade_active": None, "terminal_event": None, "terminal_age_s": None}
+
+        reason = f"progress={progress}; liq30={liq30}; active={term.get('trade_active')}; terminal={term.get('terminal_event') or 'none'}"
         conn.execute(
             """INSERT OR REPLACE INTO premium_execution_composite
             (signal_id,finalized_ts_ms,liq_state_5,liq_score_5,liq_state_15,liq_score_15,liq_state_30,liq_score_30,
-             progress_status,composite_state,reason,updated_ts)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+             progress_status,composite_state,reason,trade_active,terminal_event,terminal_age_s,updated_ts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 signal_id, int(finalized_ts_ms or now_ms()),
                 liq.get(5000,(None,None))[0], liq.get(5000,(None,None))[1],
                 liq.get(15000,(None,None))[0], liq.get(15000,(None,None))[1],
                 liq.get(30000,(None,None))[0], liq.get(30000,(None,None))[1],
-                progress, composite, reason, int(time.time()),
+                progress, composite, reason,
+                term.get("trade_active"), term.get("terminal_event"), term.get("terminal_age_s"), int(time.time()),
             ),
         )
         conn.commit()
@@ -1351,6 +1938,8 @@ async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingO
         if not feat:
             return
         evo = classify_liquidity_evolution(feat, initial)
+        evo_v2 = classify_liquidity_v2(feat, initial)
+        evo_core = classify_liquidity_core(feat, initial)
         conn = db_connect()
         conn.execute(
             """INSERT OR REPLACE INTO premium_liquidity_snapshots
@@ -1361,8 +1950,9 @@ async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingO
              aggressive_buy_speed_usdt_s,ask025_clear_s,tp1_clear_s,wall_persisted,wall_remaining_ratio,wall_replenished,wall_cancelled,
              barrier_label,absorption_flag,depth_levels,ask_coverage_pct,bid_coverage_pct,
              ask025_vs_initial,bid025_vs_initial,tp1_ask_vs_initial,bid_ratio_delta,ask025_clear_vs_initial,tp1_clear_vs_initial,
-             dynamic_score,dynamic_state,dynamic_reason,updated_ts)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             dynamic_score,dynamic_state,dynamic_reason,liquidity_v2_score,liquidity_v2_state,liquidity_v2_reason,
+             liquidity_core_score,liquidity_core_state,liquidity_core_reason,updated_ts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 p.signal_id,horizon_ms,observed,max(0,observed-started),p.entry_price,
                 feat.get("mid_price"),feat.get("best_bid"),feat.get("best_ask"),
@@ -1378,12 +1968,26 @@ async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingO
                 feat.get("barrier_label"),feat.get("absorption_flag"),feat.get("depth_levels"),feat.get("ask_coverage_pct"),feat.get("bid_coverage_pct"),
                 evo.get("ask025_vs_initial"),evo.get("bid025_vs_initial"),evo.get("tp1_ask_vs_initial"),evo.get("bid_ratio_delta"),
                 evo.get("ask025_clear_vs_initial"),evo.get("tp1_clear_vs_initial"),evo.get("dynamic_score"),evo.get("dynamic_state"),evo.get("dynamic_reason"),
+                evo_v2.get("liquidity_v2_score"),evo_v2.get("liquidity_v2_state"),evo_v2.get("liquidity_v2_reason"),
+                evo_core.get("liquidity_core_score"),evo_core.get("liquidity_core_state"),evo_core.get("liquidity_core_reason"),
                 int(time.time()),
             ),
         )
         conn.commit(); conn.close()
+        if horizon_ms == 15000:
+            save_post_premium_risk(p, 15000, observed, None)
         if horizon_ms == 30000:
-            maybe_finalize_execution_composite(p.signal_id, observed)
+            save_post_premium_risk(p, 30000, observed, None)
+            maybe_finalize_execution_composite(p.signal_id, observed, p)
+            # If the 60s progress row already exists (e.g. depth request was delayed),
+            # finalize failure-risk now instead of losing the sample.
+            conn_p = db_connect()
+            try:
+                prow = conn_p.execute("SELECT status,finalized_ts_ms FROM premium_progress_validation WHERE signal_id=?", (p.signal_id,)).fetchone()
+            finally:
+                conn_p.close()
+            if prow:
+                save_post_premium_risk(p, 60000, int(prow[1] or observed), prow[0])
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -1435,7 +2039,108 @@ def finalize_progress_validation(p: PendingOutcome, observed_ts_ms: int):
     finally:
         conn.close()
     if p.progress_finalized:
-        maybe_finalize_execution_composite(p.signal_id, observed_ts_ms)
+        maybe_finalize_execution_composite(p.signal_id, observed_ts_ms, p)
+        save_post_premium_risk(p, 60000, observed_ts_ms, status)
+
+
+def _update_discovery_episode_audit(conn: sqlite3.Connection, source_event_id: int, event_type: str,
+                                    event_ts: int, symbol: str, mfe: float, mae: float,
+                                    early_count: int, premium_count: int, classification: str,
+                                    gate_failures: Optional[str]):
+    """Deduplicate dense research events into coarse first-wave episodes.
+
+    Event-level missed-runner counts are useful for enrichment, but they can count the same
+    coin move many times. This episode layer is deliberately simple and frozen: same symbol,
+    gap <= DISCOVERY_EPISODE_GAP_S, total episode span <= DISCOVERY_EPISODE_MAX_S.
+    It is research-only and never gates alerts.
+    """
+    event_ts = int(event_ts)
+    latest = conn.execute(
+        """SELECT id,start_ts,last_event_ts,event_count,runner_event_count,missed_event_count,
+                  premium_captured,early_captured,max_runner_size,max_mfe_pct,worst_mae_pct,
+                  first_premium_ts,first_early_ts,blocker_counts_json
+           FROM discovery_episode_audit WHERE symbol=? ORDER BY last_event_ts DESC LIMIT 1""",
+        (symbol,),
+    ).fetchone()
+    use_existing = False
+    if latest:
+        ep_id,start_ts,last_ts,*_ = latest
+        use_existing = (event_ts - int(last_ts) <= DISCOVERY_EPISODE_GAP_S and
+                        event_ts - int(start_ts) <= DISCOVERY_EPISODE_MAX_S)
+    if not use_existing:
+        cur = conn.execute(
+            """INSERT INTO discovery_episode_audit
+               (symbol,start_ts,last_event_ts,event_count,runner_event_count,missed_event_count,
+                premium_captured,early_captured,max_runner_size,max_mfe_pct,worst_mae_pct,
+                first_event_id,first_event_type,first_premium_ts,first_early_ts,blocker_counts_json,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (symbol,event_ts,event_ts,0,0,0,0,0,0,None,None,
+             source_event_id,event_type,None,None,"{}",int(time.time())),
+        )
+        ep_id = int(cur.lastrowid)
+        latest = conn.execute(
+            """SELECT id,start_ts,last_event_ts,event_count,runner_event_count,missed_event_count,
+                      premium_captured,early_captured,max_runner_size,max_mfe_pct,worst_mae_pct,
+                      first_premium_ts,first_early_ts,blocker_counts_json
+               FROM discovery_episode_audit WHERE id=?""", (ep_id,)
+        ).fetchone()
+
+    (ep_id,start_ts,last_ts,event_count,runner_event_count,missed_event_count,
+     premium_captured,early_captured,max_runner_size,max_mfe,worst_mae,
+     first_premium_ts,first_early_ts,blocker_json) = latest
+
+    if mfe >= 5.0:
+        runner_size = 5
+    elif mfe >= 3.0:
+        runner_size = 3
+    elif mfe >= MISSED_RUNNER_MIN_MFE_PCT:
+        runner_size = 2
+    else:
+        runner_size = 0
+
+    end_ts = event_ts + MISSED_RUNNER_HORIZON_S
+    p_row = conn.execute(
+        "SELECT MIN(ts) FROM signals_v2 WHERE symbol=? AND ts BETWEEN ? AND ?",
+        (symbol,event_ts,end_ts),
+    ).fetchone()
+    e_row = conn.execute(
+        """SELECT MIN(COALESCE(notify_ts,ts)) FROM radar_signals
+           WHERE symbol=? AND notified=1 AND COALESCE(notify_ts,ts) BETWEEN ? AND ?""",
+        (symbol,event_ts,end_ts),
+    ).fetchone()
+    p_ts = p_row[0] if p_row and p_row[0] is not None else None
+    e_ts = e_row[0] if e_row and e_row[0] is not None else None
+
+    try:
+        blocker_counts = json.loads(blocker_json or "{}")
+        if not isinstance(blocker_counts, dict):
+            blocker_counts = {}
+    except Exception:
+        blocker_counts = {}
+    for token in (gate_failures or "").split(";"):
+        token = token.strip()
+        if token:
+            blocker_counts[token] = int(blocker_counts.get(token, 0)) + 1
+
+    conn.execute(
+        """UPDATE discovery_episode_audit SET
+           last_event_ts=?, event_count=?, runner_event_count=?, missed_event_count=?,
+           premium_captured=?, early_captured=?, max_runner_size=?, max_mfe_pct=?, worst_mae_pct=?,
+           first_premium_ts=?, first_early_ts=?, blocker_counts_json=?, updated_ts=?
+           WHERE id=?""",
+        (
+            max(int(last_ts),event_ts), int(event_count)+1,
+            int(runner_event_count)+(1 if runner_size else 0),
+            int(missed_event_count)+(1 if classification.startswith("MISSED_RUNNER_") else 0),
+            int(bool(premium_captured or premium_count)), int(bool(early_captured or early_count)),
+            max(int(max_runner_size or 0), runner_size),
+            max(float(max_mfe) if max_mfe is not None else float("-inf"), float(mfe)) if mfe is not None else max_mfe,
+            min(float(worst_mae) if worst_mae is not None else float("inf"), float(mae)) if mae is not None else worst_mae,
+            min([x for x in (first_premium_ts,p_ts) if x is not None], default=None),
+            min([x for x in (first_early_ts,e_ts) if x is not None], default=None),
+            json.dumps(blocker_counts, ensure_ascii=False, sort_keys=True), int(time.time()), int(ep_id),
+        ),
+    )
 
 
 def save_missed_runner_audit(source_event_id: int, ret: float, mfe: float, mae: float):
@@ -1443,11 +2148,11 @@ def save_missed_runner_audit(source_event_id: int, ret: float, mfe: float, mae: 
     conn = db_connect()
     try:
         row = conn.execute(
-            "SELECT ts,symbol,event_type,price FROM research_events WHERE id=?", (source_event_id,)
+            "SELECT ts,symbol,event_type,price,gate_failures FROM research_events WHERE id=?", (source_event_id,)
         ).fetchone()
         if not row:
             return
-        event_ts,symbol,event_type,start_price = row
+        event_ts,symbol,event_type,start_price,gate_failures = row
         if event_type not in {
             "NEAR_MISS_CANDIDATE","IGNITION_SHADOW","IGNITION_LOW_VOLUME","FAST_EARLY_SHADOW",
             "IGNITION_V2_SHADOW","IGNITION_V2_LOW_VOLUME","FAST_EARLY_V2_SHADOW",
@@ -1483,6 +2188,8 @@ def save_missed_runner_audit(source_event_id: int, ret: float, mfe: float, mae: 
             (source_event_id,event_type,event_ts,symbol,start_price,MISSED_RUNNER_HORIZON_S,ret,mfe,mae,
              int(early_count or 0),int(premium_count or 0),classification,int(time.time())),
         )
+        _update_discovery_episode_audit(conn, source_event_id, event_type, int(event_ts), symbol, mfe, mae,
+                                        int(early_count or 0), int(premium_count or 0), classification, gate_failures)
         conn.commit()
     finally:
         conn.close()
@@ -2383,6 +3090,25 @@ def update_pending_tick(symbol: str, price: float, tick_ts: float):
                             f"signal_ret={ret:+.3f}%; bucket={reclaim_bucket}", origin_signal_id=p.signal_id,
                             shadow_score=sc_reclaim, shadow_label=reclaim_bucket,
                         )
+                        # Link reclaim to the most recent V5.10 failure-risk event, if one existed.
+                        conn_r = db_connect()
+                        try:
+                            risk_row = conn_r.execute(
+                                """SELECT id,event,age_s,price FROM shadow_exit_events
+                                   WHERE signal_id=? AND event IN ('FAIL_RISK_60','LIQ_RISK_30','LIQ_RISK_15')
+                                   ORDER BY age_s DESC LIMIT 1""", (p.signal_id,)
+                            ).fetchone()
+                            if risk_row:
+                                conn_r.execute(
+                                    """INSERT OR REPLACE INTO failure_risk_reclaims
+                                       (signal_id,risk_event_id,risk_event,risk_age_s,risk_price,stop_s,reclaim_age_s,reclaim_after_risk_s,
+                                        reclaim_price,bucket,score,updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                    (p.signal_id,risk_row[0],risk_row[1],risk_row[2],risk_row[3],p.invalidation_hit_s,age,
+                                     max(0.0,age-float(risk_row[2] or 0)),price,reclaim_bucket,sc_reclaim,int(time.time())),
+                                )
+                                conn_r.commit()
+                        finally:
+                            conn_r.close()
 
         # Runner-only shadow exit: arm only after TP2, avoiding the known too-early legacy Shadow Exit problem.
         if RUNNER_SHADOW_ENABLED and p.tp2_hit_s is not None and not p.runner_exit_sent:
@@ -2450,6 +3176,9 @@ def recover_pending_tracking():
                 p.acceptance_finalized=True; p.acceptance_status=str(ev[0] or "UNKNOWN")
             p.reclaim_event_sent=bool(conn.execute("SELECT 1 FROM research_events WHERE origin_signal_id=? AND event_type='RECLAIM_AFTER_STOP' LIMIT 1",(sid,)).fetchone())
             p.runner_exit_sent=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='RUNNER_EXIT' LIMIT 1",(sid,)).fetchone())
+            p.liq_risk_15_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='LIQ_RISK_15' LIMIT 1",(sid,)).fetchone())
+            p.liq_risk_30_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='LIQ_RISK_30' LIMIT 1",(sid,)).fetchone())
+            p.fail_risk_60_saved=bool(conn.execute("SELECT 1 FROM shadow_exit_events WHERE signal_id=? AND event='FAIL_RISK_60' LIMIT 1",(sid,)).fetchone())
             mm=conn.execute("SELECT MAX(mfe_pct),MIN(mae_pct) FROM signal_outcomes WHERE signal_id=?",(sid,)).fetchone()
             p.mfe=float(mm[0] or 0); p.mae=float(mm[1] or 0)
             p.completed={int(x[0]) for x in conn.execute("SELECT horizon_s FROM signal_outcomes WHERE signal_id=?",(sid,)).fetchall()}
@@ -3496,7 +4225,7 @@ def build_message(m: dict):
         f"🎯 Kâr al 1: {fmt_price(plan['target1'])}  (R/R ~{plan['rr1']:.1f})\n"
         f"🎯 Kâr al 2: {fmt_price(plan['target2'])}  (R/R ~{plan['rr2']:.1f})\n"
         f"🛑 Geçersizlik: {fmt_price(plan['invalidation'])}\n\n"
-        "⚠️ Rise/Entry/Momentum değerleri olasılık değildir; kural tabanlı skorlardır. V5.9 ignition V2, dinamik liquidity evolution, 15/60 sn acceptance+progress ve reclaim davranışını SHADOW olarak ölçer.\n"
+        f"⚠️ Rise/Entry/Momentum değerleri olasılık değildir; kural tabanlı skorlardır. V{BOT_VERSION} liquidity V2/CORE, ignition V2, 15/60 sn acceptance+progress ve reclaim davranışını SHADOW olarak ölçer.\n"
         "Not: Seviyeler kural tabanlı tahminlerdir; kâr garantisi veya otomatik emir değildir.\n"
         f"⏰ {datetime.now(IST).strftime('%H:%M:%S')}"
     )
@@ -4393,6 +5122,71 @@ async def gainers_loop(session):
 
 
 
+def create_consistent_db_backup() -> Tuple[str, str]:
+    """Create a consistent SQLite backup, validate it, and include metadata in the zip."""
+    if not DB_BACKUP_ENABLED:
+        raise RuntimeError("DB backup disabled")
+    tmpdir = tempfile.mkdtemp(prefix="momentum_db_")
+    db_copy = os.path.join(tmpdir, "signals_backup.db")
+    zip_path = os.path.join(tmpdir, f"signals_backup_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.zip")
+    src = db_connect()
+    dst = sqlite3.connect(db_copy, timeout=30)
+    try:
+        # SQLite Backup API is safe against a live WAL database and avoids raw-file copies.
+        src.backup(dst)
+        dst.commit()
+    finally:
+        dst.close(); src.close()
+
+    chk = sqlite3.connect(db_copy, timeout=30)
+    try:
+        qrow = chk.execute("PRAGMA quick_check").fetchone()
+        quick = str(qrow[0]) if qrow else "unknown"
+        irows = chk.execute("PRAGMA integrity_check").fetchall()
+        integrity = "ok" if irows and all(str(r[0]).lower() == "ok" for r in irows) else "; ".join(str(r[0]) for r in irows[:5]) or "unknown"
+        table_count = chk.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+    finally:
+        chk.close()
+
+    health = f"quick={quick}; integrity={integrity}"
+    info = (
+        f"bot_version={BOT_VERSION}\n"
+        f"research_logic_version={RESEARCH_LOGIC_VERSION}\n"
+        f"created_ist={datetime.now(IST).isoformat()}\n"
+        f"source_db={DB_PATH}\n"
+        f"{health}\n"
+        f"table_count={table_count}\n"
+    )
+    info_path = os.path.join(tmpdir, "backup_info.txt")
+    with open(info_path, "w", encoding="utf-8") as f:
+        f.write(info)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.write(db_copy, arcname="signals.db")
+        zf.write(info_path, arcname="backup_info.txt")
+    return zip_path, health
+
+
+async def telegram_send_document(session: aiohttp.ClientSession, file_path: str, caption: str = "") -> bool:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(TELEGRAM_CHAT_ID))
+    if caption:
+        form.add_field("caption", caption[:1024])
+    with open(file_path, "rb") as f:
+        form.add_field("document", f, filename=os.path.basename(file_path), content_type="application/zip")
+        try:
+            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=180, connect=10, sock_read=170)) as r:
+                body = await r.text()
+                if r.status == 200:
+                    return True
+                log.warning("Telegram sendDocument HTTP %s body=%s", r.status, body[:1000])
+        except Exception as e:
+            log.warning("Telegram sendDocument failed: %r", e)
+    return False
+
+
 async def telegram_command_loop(session):
     global telegram_offset
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -4440,7 +5234,7 @@ async def telegram_command_loop(session):
                     expected_chunks = max(1, (len(symbols) + AGGTRADE_CHUNK - 1) // AGGTRADE_CHUNK)
                     healthy = age("ticker") < 90 and age("book") < 90 and len(agg_ages) >= expected_chunks and agg_stale == 0
                     await telegram_send(session,
-                        f"{'✅' if healthy else '⚠️'} Scanner durumu — V5.9\n\n"
+                        f"{'✅' if healthy else '⚠️'} Scanner durumu — V{BOT_VERSION}\n\n"
                         f"🪙 Kontrat: {len(symbols)}\n"
                         f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                         f"⚡ AggTrade olayları: {trade_event_count:,}\n"
@@ -4456,7 +5250,9 @@ async def telegram_command_loop(session):
                         f"🔁 Stop sonrası reclaim: {'açık' if RECLAIM_SHADOW_ENABLED else 'kapalı'} | gözlem ≤{RECLAIM_MAX_AGE_SECONDS//60}dk | TP2 runner: {'açık' if RUNNER_SHADOW_ENABLED else 'kapalı'} (Shadow)\n"
                         f"⚡ Ignition V2/Near-Miss audit: {'açık' if IGNITION_SHADOW_ENABLED and NEAR_MISS_ENABLED and IGNITION_V2_ENABLED else 'kısmi/kapalı'} | V2 eşik {IGNITION_V2_MIN_SCORE}/{FAST_EARLY_V2_SCORE} | audit hacim tabanı {fmt_money(NEAR_MISS_MIN_QV24)}\n"
                         f"🧱 Liquidity depth: {'açık' if LIQUIDITY_RESEARCH_ENABLED else 'kapalı'} | {LIQUIDITY_DEPTH_LIMIT} seviye | 0/5/15/30sn (Shadow)\n"
-                        f"🌊 Dynamic liquidity evolution: {'açık' if LIQUIDITY_EVOLUTION_ENABLED else 'kapalı'} | SUPPORT ≥{LIQ_EVOLUTION_SUPPORT_SCORE} / HOSTILE ≤{LIQ_EVOLUTION_HOSTILE_SCORE} (Shadow)\n"
+                        f"🌊 Dynamic liquidity V1: {'açık' if LIQUIDITY_EVOLUTION_ENABLED else 'kapalı'} | SUPPORT ≥{LIQ_EVOLUTION_SUPPORT_SCORE} / HOSTILE ≤{LIQ_EVOLUTION_HOSTILE_SCORE} (Shadow)\n"
+                        f"🧠 Liquidity Regime V2: {'açık' if LIQUIDITY_V2_ENABLED else 'kapalı'} | SUPPORT ≥{LIQ_V2_SUPPORT_SCORE} / HOSTILE ≤{LIQ_V2_HOSTILE_SCORE} (Shadow)\n"
+                        f"🚦 Post-Premium Failure Risk: {'açık' if POST_PREMIUM_RISK_ENABLED else 'kapalı'} | 15/30sn liquidity + 60sn progress | PUBLIC ALERT YOK\n"
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
                         f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
@@ -4524,7 +5320,7 @@ async def telegram_command_loop(session):
                         pn = path[0] or 0
                         total_paths = path[7] or 0
                         if total_paths:
-                            msg += f"\n\n🧭 V5.9 İŞLEM YOLU ({total_paths})\nAlım bölgesi temas etti: %{100*pn/total_paths:.1f}\nHedefe alım bölgesi gelmeden kaçtı: {int(path[6] or 0)}"
+                            msg += f"\n\n🧭 V{BOT_VERSION} İŞLEM YOLU ({total_paths})\nAlım bölgesi temas etti: %{100*pn/total_paths:.1f}\nHedefe alım bölgesi gelmeden kaçtı: {int(path[6] or 0)}"
                         if pn:
                             msg += (f"\nTP1, geçersizlikten önce: %{100*(path[1] or 0)/pn:.1f}\nGeçersizlik TP1'den önce: %{100*(path[2] or 0)/pn:.1f}\nTP2 herhangi zamanda: %{100*(path[3] or 0)/pn:.1f}\nTP2, geçersizlikten önce: %{100*(path[4] or 0)/pn:.1f}\nTP1'e kadar ort. ters hareket: {(path[5] or 0):+.2f}%")
                         msg += "\n\nNot: MFE tek başına başarı sayılmaz; asıl executable metrik TP/invalidasyon sırasıdır."
@@ -4559,7 +5355,7 @@ async def telegram_command_loop(session):
                     conn.close()
                     wn = wave[0] or 0
                     await telegram_send(session,
-                        f"🧪 V5.9 SHADOW / DALGA İSTATİSTİĞİ\n\n"
+                        f"🧪 V{BOT_VERSION} SHADOW / DALGA İSTATİSTİĞİ\n\n"
                         f"Shadow kâr-koruma adayı: {int(ev[0] or 0)}\n"
                         f"Shadow çıkış adayı: {int(ev[1] or 0)}\n"
                         f"Shadow event görülen Premium: {int(ev[2] or 0)}\n\n"
@@ -4588,14 +5384,14 @@ async def telegram_command_loop(session):
                     ).fetchall()
                     conn.close()
                     n = int((lat[0] if lat else 0) or 0)
-                    lines = ["⏱ V5.9 TELEGRAM / EXECUTION LATENCY", ""]
+                    lines = [f"⏱ V{BOT_VERSION} TELEGRAM / EXECUTION LATENCY", ""]
                     if n:
                         lines.append(f"Premium ölçümü: n={n}")
                         lines.append(f"Signal→send-start ort.: {((lat[1] or 0)/1000):.3f} sn")
                         lines.append(f"Telegram HTTP send ort.: {((lat[2] or 0)/1000):.3f} sn")
                         lines.append(f"Send-start ask drift ort.: {(lat[3] or 0):+.3f}% | max {(lat[4] or 0):+.3f}%")
                     else:
-                        lines.append("Henüz yeni V5.9 Premium delivery ölçümü yok.")
+                        lines.append(f"Henüz yeni V{BOT_VERSION} Premium delivery ölçümü yok.")
                     if snap:
                         lines.append("\nPremium sonrası micro path:")
                         for h,cnt,ret,mfe,mae in snap:
@@ -4653,7 +5449,7 @@ async def telegram_command_loop(session):
                            WHERE l.horizon_ms=0 GROUP BY l.barrier_label ORDER BY COUNT(*) DESC"""
                     ).fetchall()
                     conn.close()
-                    lines = ["🧭 V5.9 ENTRY / EXECUTION SHADOW", ""]
+                    lines = [f"🧭 V{BOT_VERSION} ENTRY / EXECUTION SHADOW", ""]
                     if rows:
                         lines.append("15sn acceptance:")
                         for status,n,wins,ratio,pb in rows:
@@ -4686,7 +5482,7 @@ async def telegram_command_loop(session):
                     lines.append(f"🏃 TP2 sonrası runner-exit shadow: {int(runner or 0)}")
                     lines.append("\nAcceptance/phase/reclaim/runner sonuçları SHADOW araştırmasıdır; Premium detector eşiklerini değiştirmez.")
                     await telegram_send(session, "\n".join(lines))
-                elif text in ("/v58stats", "/v59stats"):
+                elif text in ("/v58stats", "/v59stats", "/v510stats", "/riskstats"):
                     conn = db_connect()
                     ignition = conn.execute(
                         """SELECT r.event_type,COUNT(*),AVG(o.mfe_pct),AVG(o.mae_pct),
@@ -4734,6 +5530,7 @@ async def telegram_command_loop(session):
                         """SELECT c.composite_state,COUNT(*),
                            SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END)
                            FROM premium_execution_composite c JOIN signal_paths p ON p.signal_id=c.signal_id
+                           WHERE c.trade_active=1
                            GROUP BY c.composite_state ORDER BY COUNT(*) DESC"""
                     ).fetchall()
                     reclaim = conn.execute(
@@ -4741,14 +5538,61 @@ async def telegram_command_loop(session):
                            FROM research_events WHERE event_type='RECLAIM_AFTER_STOP'
                            GROUP BY COALESCE(shadow_label,'UNLABELED') ORDER BY COUNT(*) DESC"""
                     ).fetchall()
+                    liq_v2 = conn.execute(
+                        """SELECT l.horizon_ms,COALESCE(l.liquidity_v2_state,'UNKNOWN'),COUNT(*),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           AVG(l.liquidity_v2_score),AVG(l.bid_ratio_025),AVG(l.ask025_vs_initial)
+                           FROM premium_liquidity_snapshots l JOIN signal_paths p ON p.signal_id=l.signal_id
+                           WHERE l.horizon_ms IN (15000,30000)
+                           GROUP BY l.horizon_ms,COALESCE(l.liquidity_v2_state,'UNKNOWN')
+                           ORDER BY l.horizon_ms,l.liquidity_v2_state"""
+                    ).fetchall()
+                    liq_core = conn.execute(
+                        """SELECT l.horizon_ms,COALESCE(l.liquidity_core_state,'UNKNOWN'),COUNT(*),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           AVG(l.liquidity_core_score),AVG(l.bid_ratio_025),AVG(l.ask025_vs_initial)
+                           FROM premium_liquidity_snapshots l JOIN signal_paths p ON p.signal_id=l.signal_id
+                           WHERE l.horizon_ms IN (15000,30000) AND l.liquidity_core_state IS NOT NULL
+                           GROUP BY l.horizon_ms,COALESCE(l.liquidity_core_state,'UNKNOWN')
+                           ORDER BY l.horizon_ms,l.liquidity_core_state"""
+                    ).fetchall()
+                    risk = conn.execute(
+                        """SELECT r.risk_state,COUNT(*),
+                           SUM(CASE WHEN p.tp1_hit_s IS NULL OR (p.invalidation_hit_s IS NOT NULL AND p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END)
+                           FROM premium_failure_risk r JOIN signal_paths p ON p.signal_id=r.signal_id
+                           WHERE r.horizon_ms=60000 AND r.trade_active=1
+                           GROUP BY r.risk_state ORDER BY COUNT(*) DESC"""
+                    ).fetchall()
+                    resolved_risk = conn.execute(
+                        """SELECT COALESCE(r.terminal_event,'UNKNOWN'),COUNT(*)
+                           FROM premium_failure_risk r
+                           WHERE r.horizon_ms=60000 AND r.trade_active=0
+                           GROUP BY COALESCE(r.terminal_event,'UNKNOWN') ORDER BY COUNT(*) DESC"""
+                    ).fetchall()
+                    conflicts = conn.execute(
+                        """SELECT c.event_code,COUNT(*),
+                           SUM(CASE WHEN p.tp2_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp2_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END)
+                           FROM premium_conflict_events c JOIN signal_paths p ON p.signal_id=c.signal_id
+                           GROUP BY c.event_code ORDER BY COUNT(*) DESC"""
+                    ).fetchall()
+                    risk_reclaims = conn.execute("SELECT COUNT(*) FROM failure_risk_reclaims").fetchone()[0]
+                    discovery_eps = conn.execute(
+                        """SELECT COUNT(*),
+                           SUM(CASE WHEN max_runner_size>=2 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=0 AND early_captured=0 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=1 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=0 AND early_captured=1 THEN 1 ELSE 0 END)
+                           FROM discovery_episode_audit"""
+                    ).fetchone()
                     conn.close()
-                    lines=["🧪 V5.9 DYNAMIC LIQUIDITY / IGNITION V2", ""]
+                    lines=[f"🧪 V{BOT_VERSION} EXECUTION RISK / LIQUIDITY", ""]
                     if ignition:
                         lines.append("⚡ Ignition / near-miss 15dk (SHADOW):")
                         for t,n,mfe,mae,m2,m5 in ignition[:8]:
                             lines.append(f"• {t}: n={n} | MFE {(mfe or 0):+.2f}% | +2 %{100*(m2 or 0)/max(n,1):.1f} | +5 %{100*(m5 or 0)/max(n,1):.1f}")
                     else:
-                        lines.append("⚡ Henüz V5.9 ignition V2 forward kaydı yok.")
+                        lines.append(f"⚡ Henüz yeni V{BOT_VERSION} ignition V2 forward kaydı yok.")
                     if missed:
                         lines.append("\n🎯 Missed-runner audit:")
                         for c,n in missed[:7]:
@@ -4765,6 +5609,27 @@ async def telegram_command_loop(session):
                         lines.append("\n🌊 Dinamik liquidity evolution:")
                         for h,state,n,wins,score,remain,bidratio,clear_s in dyn_liq:
                             lines.append(f"• {h/1000:g}s {state}: n={n} | TP2-first %{100*(wins or 0)/max(n,1):.1f} | score {(score or 0):+.0f} | wall %{100*(remain or 0):.0f} | bid25 %{100*(bidratio or 0):.0f}")
+                    if liq_v2:
+                        lines.append("\n🌊 Liquidity Regime V2 (SHADOW):")
+                        for h,state,n,wins,score,bidratio,askratio in liq_v2:
+                            lines.append(f"• {h/1000:g}s {state}: n={n} | TP2-first %{100*(wins or 0)/max(n,1):.1f} | score {(score or 0):+.0f} | bid25 %{100*(bidratio or 0):.0f} | ask25× {(askratio or 0):.2f}")
+                    if liq_core:
+                        lines.append("\n🧬 Liquidity CORE (4-metric ablation, SHADOW):")
+                        for h,state,n,wins,score,bidratio,askratio in liq_core:
+                            lines.append(f"• {h/1000:g}s {state}: n={n} | TP2-first %{100*(wins or 0)/max(n,1):.1f} | score {(score or 0):+.0f} | bid25 %{100*(bidratio or 0):.0f} | ask25× {(askratio or 0):.2f}")
+                    if risk:
+                        lines.append("\n🚦 Post-Premium Failure Risk 60s — yalnız 60s'de hâlâ aktif işlemler:")
+                        for state,n,tp1fail,wins in risk:
+                            lines.append(f"• {state}: n={n} | TP1-fail %{100*(tp1fail or 0)/max(n,1):.1f} | TP2-first %{100*(wins or 0)/max(n,1):.1f}")
+                    if resolved_risk:
+                        lines.append("\n✅ 60s öncesi çözülmüş/entry olmayan gözlemler (failure-risk'e dahil değil):")
+                        lines.extend(f"• {state}: {n}" for state,n in resolved_risk)
+                    if conflicts:
+                        lines.append("\n⚔️ Conflict cohortları:")
+                        for code,n,wins in conflicts[:8]:
+                            lines.append(f"• {code}: n={n} | TP2-first %{100*(wins or 0)/max(n,1):.1f}")
+                    if risk_reclaims:
+                        lines.append(f"\n🔁 Failure-risk sonrası stop→reclaim bağlantısı: {int(risk_reclaims)}")
                     if progress:
                         lines.append("\n🧭 60sn Progress:")
                         for status,n,wins in progress:
@@ -4776,8 +5641,78 @@ async def telegram_command_loop(session):
                     if reclaim:
                         lines.append("\n🔁 Reclaim:")
                         lines.extend(f"• {label}: {n}" for label,n in reclaim)
-                    lines.append("\nTüm V5.9 sınıfları SHADOW araştırmasıdır; Premium/TP/stop production kurallarını değiştirmez.")
+                    if discovery_eps and discovery_eps[0]:
+                        total,runner,missed_ep,prem_ep,early_ep = discovery_eps
+                        lines.append(f"\n🔭 Dedup discovery episodes: toplam {int(total or 0)} | runner≥2% {int(runner or 0)} | missed {int(missed_ep or 0)} | Premium captured {int(prem_ep or 0)} | Early-only {int(early_ep or 0)}")
+                    lines.append(f"\nTüm V{BOT_VERSION} yeni sınıfları SHADOW araştırmasıdır; Premium/TP/stop production kurallarını değiştirmez. V2 eşikleri donduruldu; CORE yeni cohortta test edilecek.")
                     await telegram_send(session, "\n".join(lines))
+                elif text == "/discoverystats":
+                    conn = db_connect()
+                    summary = conn.execute(
+                        """SELECT COUNT(*),
+                           SUM(CASE WHEN max_runner_size>=2 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=0 AND early_captured=0 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=1 THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN max_runner_size>=2 AND premium_captured=0 AND early_captured=1 THEN 1 ELSE 0 END),
+                           AVG(CASE WHEN max_runner_size>=2 THEN max_mfe_pct END)
+                           FROM discovery_episode_audit"""
+                    ).fetchone()
+                    top_missed = conn.execute(
+                        """SELECT symbol,start_ts,max_runner_size,max_mfe_pct,event_count,blocker_counts_json
+                           FROM discovery_episode_audit
+                           WHERE max_runner_size>=2 AND premium_captured=0 AND early_captured=0
+                           ORDER BY COALESCE(max_mfe_pct,0) DESC LIMIT 8"""
+                    ).fetchall()
+                    conn.close()
+                    total,runner,missed_ep,prem_ep,early_ep,avg_mfe = summary or (0,0,0,0,0,0)
+                    lines=[f"🔭 V{BOT_VERSION} DISCOVERY EPISODE AUDIT", ""]
+                    lines.append(f"Toplam dedup episode: {int(total or 0)}")
+                    lines.append(f"Runner episode ≥+%2: {int(runner or 0)} | ort. max MFE {(avg_mfe or 0):+.2f}%")
+                    if runner:
+                        lines.append(f"Premium captured: {int(prem_ep or 0)} (%{100*(prem_ep or 0)/runner:.1f})")
+                        lines.append(f"Early-only: {int(early_ep or 0)} (%{100*(early_ep or 0)/runner:.1f})")
+                        lines.append(f"Missed: {int(missed_ep or 0)} (%{100*(missed_ep or 0)/runner:.1f})")
+                    if top_missed:
+                        lines.append("\nEn güçlü missed first-wave episodes:")
+                        for sym,ts,size,mfe,events,blockers_json in top_missed:
+                            try:
+                                bc=json.loads(blockers_json or "{}")
+                                topb=sorted(bc.items(), key=lambda x:x[1], reverse=True)[:2]
+                                blockers_txt=", ".join(f"{k}×{v}" for k,v in topb) or "—"
+                            except Exception:
+                                blockers_txt="—"
+                            dt=datetime.fromtimestamp(int(ts), IST).strftime("%d.%m %H:%M")
+                            lines.append(f"• {sym} {dt}: max +{(mfe or 0):.2f}% | size {int(size or 0)}P | event {int(events or 0)} | blocker {blockers_txt}")
+                    lines.append("\nBu ekran event sayısını değil, aynı coin/hareketi zaman bazlı tek episode altında toplar. Production AL filtresi değildir.")
+                    await telegram_send(session, "\n".join(lines))
+                elif text == "/dbhealth":
+                    try:
+                        def _check():
+                            c = db_connect()
+                            try:
+                                q = c.execute("PRAGMA quick_check").fetchone()
+                                i = c.execute("PRAGMA integrity_check").fetchall()
+                                quick = str(q[0]) if q else "unknown"
+                                integrity = "ok" if i and all(str(r[0]).lower()=="ok" for r in i) else "; ".join(str(r[0]) for r in i[:5]) or "unknown"
+                                return quick, integrity
+                            finally:
+                                c.close()
+                        quick, integrity = await asyncio.to_thread(_check)
+                        await telegram_send(session, f"🗄️ DB health | quick={quick} | integrity={integrity}\nBot: V{BOT_VERSION}\n\nCanlı DB dosyasını doğrudan kopyalama; /backupdb ile tutarlı snapshot al.")
+                    except Exception as e:
+                        await telegram_send(session, f"⚠️ DB health kontrolü başarısız: {type(e).__name__}: {e}")
+                elif text == "/backupdb":
+                    if not DB_BACKUP_ENABLED:
+                        await telegram_send(session, "⚪ DB backup özelliği kapalı.")
+                    else:
+                        await telegram_send(session, "🗄️ Tutarlı SQLite snapshot hazırlanıyor…")
+                        try:
+                            zip_path, health = await asyncio.to_thread(create_consistent_db_backup)
+                            ok = await telegram_send_document(session, zip_path, f"Momentum Scanner V{BOT_VERSION} DB backup | {health}")
+                            if not ok:
+                                await telegram_send(session, "⚠️ Backup hazırlandı ama Telegram dosya gönderimi başarısız oldu. Railway logunu kontrol et.")
+                        except Exception as e:
+                            await telegram_send(session, f"❌ DB backup başarısız: {type(e).__name__}: {e}")
                 elif text == "/joinstatus":
                     await telegram_send(
                         session,
@@ -4809,7 +5744,7 @@ async def telegram_command_loop(session):
                         FROM shadow_exit_events e JOIN shadow_event_outcomes o ON o.shadow_event_id=e.id AND o.horizon_s=900
                         WHERE e.event='EXIT'""").fetchone()
                     conn.close()
-                    lines=["🔬 V5.9 RESEARCH ÖZETİ", ""]
+                    lines=[f"🔬 V{BOT_VERSION} RESEARCH ÖZETİ", ""]
                     if types:
                         lines.append("Kayıtlar: " + " | ".join(f"{t}:{n}" for t,n in types[:8]))
                     if mature:
@@ -4820,7 +5755,7 @@ async def telegram_command_loop(session):
                         lines.append(f"\n🏆 Gainers 60dk: n={int(gout[0])} | MFE {(gout[1] or 0):+.2f}% | kapanış {(gout[2] or 0):+.2f}%")
                     if sh and sh[0]:
                         lines.append(f"🧪 Shadow EXIT sonrası 15dk: n={int(sh[0])} | getiri {(sh[1] or 0):+.2f}% | MFE {(sh[2] or 0):+.2f}% | MAE {(sh[3] or 0):+.2f}%")
-                    lines.append("\nBu veriler production filtresi değildir; V5.9 forward ölçüm katmanlarını doğrular.")
+                    lines.append(f"\nBu veriler production filtresi değildir; V{BOT_VERSION} forward ölçüm katmanlarını doğrular.")
                     await telegram_send(session, "\n".join(lines))
                 elif text.startswith("/analiz ") or (not text.startswith("/") and text not in ("test",) and 1 <= len(raw_text) <= 20):
                     token = raw_text.split(maxsplit=1)[1] if text.startswith("/analiz ") else raw_text
@@ -4848,10 +5783,10 @@ async def telegram_command_loop(session):
                             m["execution"] = compute_execution_context(sym, m, plan)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v59stats, /joinstatus ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v510stats, /riskstats, /discoverystats, /dbhealth, /backupdb, /joinstatus ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
-                        "🤖 Momentum Scanner V5.9 — Dynamic Liquidity / Ignition V2 Research\n\n"
+                        f"🤖 Momentum Scanner V{BOT_VERSION} — Execution Risk / Liquidity Regime Research\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
@@ -4861,12 +5796,17 @@ async def telegram_command_loop(session):
                         "/shadowstats — Shadow Exit + ilk dalga + erken→Premium özeti\n"
                         "/entrystats — 15sn acceptance / micro execution özeti\n"
                         "/latencystats — Telegram send + 1–60sn execution latency özeti\n"
-                        "/researchstats — genel research özeti\n/v59stats — ignition V2 / dinamik liquidity / missed-runner / reclaim özeti\n"
+                        "/researchstats — genel research özeti\n"
+                        "/v510stats — liquidity V2/CORE / active failure-risk / conflict / reclaim özeti\n"
+                        "/riskstats — /v510stats kısa yolu\n"
+                        "/discoverystats — dedup first-wave runner episode özeti\n"
+                        "/dbhealth — SQLite quick_check + integrity_check\n"
+                        "/backupdb — tutarlı DB snapshotını Telegrama gönder\n"
                         "/joinstatus — kanal katılım onayı durumu\n"
                         "/joinlink — yönetici onaylı davet linki oluştur\n"
                         "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
-                        "Premium seçim eşikleri değişmedi. V5.9 ignition V2, dinamik liquidity evolution, acceptance+progress ve reclaim/runner katmanlarını SHADOW olarak ölçer; bunlar işlem sinyali değildir."
+                        f"Premium seçim eşikleri değişmedi. V{BOT_VERSION} liquidity V2/CORE, ignition V2, acceptance+progress, failure-risk ve reclaim/runner katmanlarını SHADOW olarak ölçer; bunlar işlem sinyali değildir."
                     )
         except asyncio.CancelledError:
             raise
@@ -4893,7 +5833,7 @@ async def main():
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             await telegram_send(session,
-                f"✅ Momentum Scanner V5.9 başladı — DYNAMIC LIQUIDITY / IGNITION V2 RESEARCH\n\n"
+                f"✅ Momentum Scanner V{BOT_VERSION} başladı — EXECUTION RISK / LIQUIDITY REGIME RESEARCH\n\n"
                 f"🪙 İzlenen kontrat: {len(symbols)}\n"
                 f"⚡ 100ms aggTrade + event-level Premium path + 1–60sn micro execution takibi\n"
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
@@ -4903,13 +5843,15 @@ async def main():
                 f"🧪 Shadow Exit + first-wave/session-peak + post-shadow outcome: AÇIK; işlem sinyali değil\n"
                 f"🔬 Second-wave / Pre-Breakout / reject outcome araştırması: {'AÇIK' if RESEARCH_ENABLED else 'KAPALI'}\n"
                 f"🧭 15sn breakout acceptance + 60sn Progress + stop sonrası reclaim + TP2 runner: SHADOW\n"
-                f"🌊 Dynamic liquidity evolution 5/15/30sn: SHADOW | static wall tek başına production filtresi değil\n"
+                f"🌊 Liquidity V1 + frozen Regime V2 + CORE ablation 5/15/30sn: SHADOW | tek wall hard filter değil\n"
+                f"🚦 Post-Premium Failure Risk 15/30/60sn: yalnız aktif/executable trade actionability | public alert yok\n"
+                f"🔭 Discovery episode audit: event tekrarlarını dedup eder | gap {DISCOVERY_EPISODE_GAP_S}s\n"
                 f"⚡ Ignition V2: SHADOW | price acceleration + BTC-relative + flow efficiency odaklı\n"
                 f"💸 Funding/mark stream: AÇIK | OI 5m + OI ivmesi: kayıt AÇIK\n"
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
                 f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
                 f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v59stats  /joinstatus  /analiz COIN  /test"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v510stats  /riskstats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
