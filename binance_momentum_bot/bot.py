@@ -23,8 +23,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.11"
-RESEARCH_LOGIC_VERSION = "v511-gate-bias-guard"
+BOT_VERSION = "5.12"
+RESEARCH_LOGIC_VERSION = "v512-execution-quality-shadow"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -224,6 +224,12 @@ GATE_COUNTERFACTUAL_HORIZONS_S = (15, 30, 60, 120, 300, 900)
 ABSORPTION_RISK_SHADOW_ENABLED = os.getenv("ABSORPTION_RISK_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
 ABSORPTION_FLOW30_MIN = float(os.getenv("ABSORPTION_FLOW30_MIN", "8.0"))
 ABSORPTION_BID_MAX = float(os.getenv("ABSORPTION_BID_MAX", "0.30"))
+
+# V5.12: execution-quality classifier. SHADOW ONLY; production Premium remains unchanged.
+EXECUTION_GATE_V2_SHADOW_ENABLED = os.getenv("EXECUTION_GATE_V2_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
+OVEREXTENDED_60_PCT = float(os.getenv("OVEREXTENDED_60_PCT", "2.0"))
+LOCAL_TOP_MFE15_MAX = float(os.getenv("LOCAL_TOP_MFE15_MAX", "0.25"))
+LOCAL_TOP_MAE30_MIN = float(os.getenv("LOCAL_TOP_MAE30_MIN", "-0.35"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -974,6 +980,25 @@ def init_db():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS premium_execution_gate_v2_shadow (
+            signal_id INTEGER PRIMARY KEY,
+            finalized_ts_ms INTEGER NOT NULL,
+            decision TEXT NOT NULL, reason TEXT,
+            progress_status TEXT, composite_state TEXT,
+            gate_v1_decision TEXT, sticky_early_hostile INTEGER,
+            chg30_signal REAL, chg60_signal REAL, overextended_60 INTEGER,
+            phase_risk TEXT, live_rr1 REAL,
+            mfe15 REAL, mae15 REAL, mfe30 REAL, mae30 REAL, mfe60 REAL, mae60 REAL,
+            local_top_proxy INTEGER,
+            trade_active_60 INTEGER, terminal_event_60 TEXT, terminal_age_s REAL,
+            production_gate INTEGER NOT NULL DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS premium_gate_counterfactual (
             signal_id INTEGER NOT NULL, post_gate_horizon_s INTEGER NOT NULL,
             observed_ts_ms INTEGER NOT NULL, return_pct REAL, mfe_pct REAL, mae_pct REAL,
@@ -1154,7 +1179,7 @@ def init_db():
            (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
            VALUES (?,?,?,?,?,?)""",
         (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
-         "V5.11 gate-bias guard + sticky early-liquidity research; production Premium/Early/TP/stop unchanged",int(time.time())),
+         "V5.12 execution-quality V2 shadow: progress+composite+sticky+overextension; production Premium/Early/TP/stop unchanged",int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -1968,6 +1993,68 @@ def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional
                 term.get("trade_active"), term.get("terminal_event"), term.get("terminal_age_s"), int(time.time()),
             ),
         )
+        conn.commit()
+    finally:
+        conn.close()
+    maybe_finalize_execution_gate_v2(signal_id, finalized_ts_ms)
+
+
+def maybe_finalize_execution_gate_v2(signal_id: int, finalized_ts_ms: Optional[int] = None):
+    """V5.12 SHADOW execution-quality classifier; production alerts are untouched."""
+    if not EXECUTION_GATE_V2_SHADOW_ENABLED:
+        return
+    conn = db_connect()
+    try:
+        comp = conn.execute(
+            """SELECT progress_status,composite_state,trade_active,terminal_event,terminal_age_s
+               FROM premium_execution_composite WHERE signal_id=?""", (signal_id,)
+        ).fetchone()
+        if not comp:
+            return
+        progress, composite, trade_active, terminal_event, terminal_age = comp
+        sig = conn.execute("SELECT chg30,chg60 FROM signals_v2 WHERE id=?", (signal_id,)).fetchone()
+        ctx = conn.execute("SELECT phase_risk,live_rr1 FROM premium_context WHERE signal_id=?", (signal_id,)).fetchone()
+        gate = conn.execute("SELECT decision,sticky_early_hostile FROM premium_execution_gate_shadow WHERE signal_id=?", (signal_id,)).fetchone()
+        micros = conn.execute("""SELECT horizon_ms,mfe_pct,mae_pct FROM premium_micro_snapshots
+                                 WHERE signal_id=? AND horizon_ms IN (15000,30000,60000)""", (signal_id,)).fetchall()
+        md = {int(h):(mfe,mae) for h,mfe,mae in micros}
+        chg30 = sig[0] if sig else None
+        chg60 = sig[1] if sig else None
+        phase = ctx[0] if ctx else None
+        live_rr1 = ctx[1] if ctx else None
+        gate_v1 = gate[0] if gate else None
+        sticky = int(bool(gate[1])) if gate else 0
+        mfe15,mae15 = md.get(15000,(None,None)); mfe30,mae30 = md.get(30000,(None,None)); mfe60,mae60 = md.get(60000,(None,None))
+        over60 = int(chg60 is not None and float(chg60) >= OVEREXTENDED_60_PCT)
+        local_top = int(mfe15 is not None and mae30 is not None and float(mfe15) <= LOCAL_TOP_MFE15_MAX and float(mae30) <= LOCAL_TOP_MAE30_MIN)
+        reasons=[]
+        if gate_v1 == "FAST_TARGET_BEFORE_GATE":
+            decision = "FAST_WIN_BEFORE_GATE"; reasons.append("target before 15s gate")
+        elif gate_v1 == "STOP_BEFORE_GATE" or terminal_event == "STOPPED":
+            decision = "BLOCK_STOP_FIRST"; reasons.append("stop/invalidation before V2 horizon")
+        elif composite == "STRONG_CONTINUATION":
+            decision = "ALLOW_STRONG_CONTINUATION"; reasons.append("PROGRESS + SUPPORTIVE")
+        elif progress == "REJECTION" and composite == "FAIL_RISK":
+            decision = "BLOCK_REJECTION_FAIL_RISK"; reasons.append("REJECTION + FAIL_RISK")
+        elif sticky and progress == "REJECTION":
+            decision = "BLOCK_HOSTILE_REJECTION_CANDIDATE"; reasons.append("sticky hostile + REJECTION")
+        elif over60 and progress in ("REJECTION","STALL","MIXED"):
+            decision = "HOLD_OVEREXTENDED_60"; reasons.append(f"chg60>={OVEREXTENDED_60_PCT:g}% + {progress}")
+        elif progress == "PROGRESS" and composite in ("NEUTRAL","CONFLICT_PROGRESS_VS_BOOK"):
+            decision = "ALLOW_PROGRESS_CANDIDATE"; reasons.append(f"PROGRESS + {composite}")
+        else:
+            decision = "HOLD_RESEARCH"; reasons.append(f"progress={progress}; composite={composite}")
+        if local_top: reasons.append("local_top_proxy")
+        if over60: reasons.append("OVEREXTENDED_60")
+        if sticky: reasons.append("sticky_hostile")
+        reasons.append("PRODUCTION_GATE=OFF")
+        conn.execute("""INSERT OR REPLACE INTO premium_execution_gate_v2_shadow
+            (signal_id,finalized_ts_ms,decision,reason,progress_status,composite_state,gate_v1_decision,sticky_early_hostile,
+             chg30_signal,chg60_signal,overextended_60,phase_risk,live_rr1,mfe15,mae15,mfe30,mae30,mfe60,mae60,local_top_proxy,
+             trade_active_60,terminal_event_60,terminal_age_s,production_gate,updated_ts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (signal_id,int(finalized_ts_ms or now_ms()),decision,"; ".join(reasons)[:600],progress,composite,gate_v1,sticky,
+             chg30,chg60,over60,phase,live_rr1,mfe15,mae15,mfe30,mae30,mfe60,mae60,local_top,trade_active,terminal_event,terminal_age,0,int(time.time())))
         conn.commit()
     finally:
         conn.close()
@@ -5548,6 +5635,7 @@ async def telegram_command_loop(session):
                         f"🧪 15sn Execution Gate Simulator: {'açık' if EXECUTION_GATE_SHADOW_ENABLED else 'kapalı'} | PRODUCTION GATE KAPALI | pre-gate TP/stop bias guard açık\n"
                         f"🚦 Post-Premium Failure Risk: {'açık' if POST_PREMIUM_RISK_ENABLED else 'kapalı'} | 15/30sn liquidity + 60sn progress | PUBLIC ALERT YOK\n"
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
+                        f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
                         f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
                         f"🏆 Gainers: arka plan kayıt AÇIK | Telegram push: {'açık' if GAINERS_NOTIFY else 'kapalı'} | TOP {GAINERS_TOP_N}"
@@ -5939,6 +6027,47 @@ async def telegram_command_loop(session):
                         total,runner,missed_ep,prem_ep,early_ep = discovery_eps
                         lines.append(f"\n🔭 Dedup discovery episodes: toplam {int(total or 0)} | runner≥2% {int(runner or 0)} | missed {int(missed_ep or 0)} | Premium captured {int(prem_ep or 0)} | Early-only {int(early_ep or 0)}")
                     lines.append(f"\nTüm V{BOT_VERSION} yeni sınıfları SHADOW araştırmasıdır; Premium/TP/stop production kurallarını değiştirmez. 15sn gate yalnız counterfactual ölçer; pre-gate TP/stop look-ahead guard aktif.")
+                    await telegram_send(session, "\n".join(lines))
+                elif text == "/gatev2stats":
+                    conn = db_connect()
+                    rows = conn.execute("""SELECT v.decision,COUNT(*),
+                           SUM(CASE WHEN p.tp1_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp1_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.invalidation_hit_s IS NOT NULL AND (p.tp1_hit_s IS NULL OR p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END),
+                           AVG(CASE WHEN p.mae_before_tp1 IS NOT NULL THEN p.mae_before_tp1 END)
+                           FROM premium_execution_gate_v2_shadow v LEFT JOIN signal_paths p ON p.signal_id=v.signal_id
+                           GROUP BY v.decision ORDER BY COUNT(*) DESC""").fetchall()
+                    over = conn.execute("""SELECT COUNT(*),
+                           SUM(CASE WHEN p.tp1_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp1_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.invalidation_hit_s IS NOT NULL AND (p.tp1_hit_s IS NULL OR p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END)
+                           FROM premium_execution_gate_v2_shadow v LEFT JOIN signal_paths p ON p.signal_id=v.signal_id WHERE v.overextended_60=1""").fetchone()
+                    localtop = conn.execute("""SELECT COUNT(*),
+                           SUM(CASE WHEN p.tp1_hit_s IS NOT NULL AND (p.invalidation_hit_s IS NULL OR p.tp1_hit_s<p.invalidation_hit_s) THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN p.invalidation_hit_s IS NOT NULL AND (p.tp1_hit_s IS NULL OR p.invalidation_hit_s<p.tp1_hit_s) THEN 1 ELSE 0 END)
+                           FROM premium_execution_gate_v2_shadow v LEFT JOIN signal_paths p ON p.signal_id=v.signal_id WHERE v.local_top_proxy=1""").fetchone()
+                    conn.close()
+                    lines=[f"🧪 V{BOT_VERSION} EXECUTION GATE V2 — SHADOW", "", "⚠️ Production Premium değişmedi; V2 yalnız araştırmadır."]
+                    for d,n,w,l,mae in rows:
+                        resolved=(w or 0)+(l or 0)
+                        lines.append(f"• {d}: n={n} | TP1-first {int(w or 0)} | stop-first {int(l or 0)} | win %{100*(w or 0)/max(resolved,1):.1f} | MAE {(mae or 0):+.2f}%")
+                    if over and over[0]:
+                        resolved=(over[1] or 0)+(over[2] or 0); lines.append(f"\n🔥 OVEREXTENDED_60 ≥{OVEREXTENDED_60_PCT:g}%: n={over[0]} | TP1-first {int(over[1] or 0)} | stop-first {int(over[2] or 0)} | win %{100*(over[1] or 0)/max(resolved,1):.1f}")
+                    if localtop and localtop[0]:
+                        resolved=(localtop[1] or 0)+(localtop[2] or 0); lines.append(f"⛰️ Local-top proxy: n={localtop[0]} | TP1-first {int(localtop[1] or 0)} | stop-first {int(localtop[2] or 0)} | win %{100*(localtop[1] or 0)/max(resolved,1):.1f}")
+                    await telegram_send(session, "\n".join(lines))
+                elif text == "/lateentrystats":
+                    conn = db_connect()
+                    rows = conn.execute("""SELECT s.symbol,s.ts,s.price,v.chg30_signal,v.chg60_signal,v.live_rr1,v.progress_status,v.composite_state,v.decision,p.tp1_hit_s,p.tp2_hit_s,p.invalidation_hit_s
+                           FROM premium_execution_gate_v2_shadow v JOIN signals_v2 s ON s.id=v.signal_id LEFT JOIN signal_paths p ON p.signal_id=v.signal_id
+                           WHERE v.overextended_60=1 OR v.local_top_proxy=1 OR v.decision IN ('BLOCK_REJECTION_FAIL_RISK','BLOCK_HOSTILE_REJECTION_CANDIDATE','BLOCK_STOP_FIRST')
+                           ORDER BY s.ts DESC LIMIT 15""").fetchall()
+                    conn.close()
+                    lines=[f"⛰️ V{BOT_VERSION} LATE-ENTRY / EXECUTION AUDIT", ""]
+                    if not rows: lines.append("Henüz V2 adayı yok.")
+                    for sym,ts,px,c30,c60,rr,prog,comp,dec,tp1,tp2,stop in rows:
+                        dt=datetime.fromtimestamp(int(ts), IST).strftime("%d.%m %H:%M")
+                        path=("STOP→" + ("TP1" if tp1 is not None else "—")) if stop is not None and (tp1 is None or stop < tp1) else ("TP1-first" if tp1 is not None else "unresolved")
+                        lines.append(f"• {sym} {dt} @{px:.10g} | 30s {(c30 or 0):+.2f}% 60s {(c60 or 0):+.2f}% | RR {(rr or 0):.2f} | {prog}/{comp} | {dec} | {path}")
+                    lines.append("\nAmaç: sonradan yükseleni değil, stop görmeden TP'ye giden executable entry'yi seçmek.")
                     await telegram_send(session, "\n".join(lines))
                 elif text == "/gatestats":
                     conn = db_connect()
