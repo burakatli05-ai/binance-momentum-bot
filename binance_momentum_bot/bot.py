@@ -7,6 +7,12 @@ import sqlite3
 import time
 import tempfile
 import zipfile
+import hashlib
+import hmac
+import math
+import secrets
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from urllib.parse import urlencode
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -23,8 +29,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.12"
-RESEARCH_LOGIC_VERSION = "v512-execution-quality-shadow"
+BOT_VERSION = "5.13.1"
+RESEARCH_LOGIC_VERSION = "v5131-cleanbackup-gate21-cooldown"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -230,11 +236,37 @@ EXECUTION_GATE_V2_SHADOW_ENABLED = os.getenv("EXECUTION_GATE_V2_SHADOW_ENABLED",
 OVEREXTENDED_60_PCT = float(os.getenv("OVEREXTENDED_60_PCT", "2.0"))
 LOCAL_TOP_MFE15_MAX = float(os.getenv("LOCAL_TOP_MFE15_MAX", "0.25"))
 LOCAL_TOP_MAE30_MIN = float(os.getenv("LOCAL_TOP_MAE30_MIN", "-0.35"))
+EXECUTION_GATE_V21_SHADOW_ENABLED = os.getenv("EXECUTION_GATE_V21_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
+
+# V5.13: AutoTrade execution infrastructure. SAFE BY DEFAULT.
+# LIVE can never start automatically after a deploy/restart. The default path is OFF -> DRY -> explicit LIVE confirmation.
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "").strip()
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "").strip()
+AUTO_TRADE_LIVE_ALLOWED = os.getenv("AUTO_TRADE_LIVE_ALLOWED", "0").strip().lower() in ("1", "true", "yes", "on")
+AUTO_TRADE_BOOT_MODE = os.getenv("AUTO_TRADE_BOOT_MODE", "OFF").strip().upper()
+if AUTO_TRADE_BOOT_MODE not in ("OFF", "DRY"):
+    AUTO_TRADE_BOOT_MODE = "OFF"  # never boot LIVE
+AUTO_TRADE_MARGIN_USDT_DEFAULT = float(os.getenv("AUTO_TRADE_MARGIN_USDT", "200"))
+AUTO_TRADE_LEVERAGE_DEFAULT = int(os.getenv("AUTO_TRADE_LEVERAGE", "10"))
+AUTO_TRADE_MAX_OPEN_POSITIONS_DEFAULT = int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "3"))
+AUTO_TRADE_DAILY_MAX_LOSS_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_DAILY_MAX_LOSS_PCT", "3.0"))
+AUTO_TRADE_MAX_CONSECUTIVE_STOPS_DEFAULT = int(os.getenv("AUTO_TRADE_MAX_CONSECUTIVE_STOPS", "4"))
+AUTO_TRADE_STOP_COOLDOWN_MINUTES_DEFAULT = int(os.getenv("AUTO_TRADE_STOP_COOLDOWN_MINUTES", "60"))
+AUTO_TRADE_SIM_BALANCE_USDT = float(os.getenv("AUTO_TRADE_SIM_BALANCE_USDT", "2000"))
+AUTO_TRADE_MARGIN_TYPE_DEFAULT = os.getenv("AUTO_TRADE_MARGIN_TYPE", "ISOLATED").strip().upper()
+AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT", "0.30"))
+AUTO_TRADE_RECONCILE_SECONDS = max(2, int(os.getenv("AUTO_TRADE_RECONCILE_SECONDS", "5")))
+AUTO_TRADE_EXIT_PROFILE_DEFAULT = os.getenv("AUTO_TRADE_EXIT_PROFILE", "CURRENT_TP2").strip().upper()
+if AUTO_TRADE_EXIT_PROFILE_DEFAULT not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
+    AUTO_TRADE_EXIT_PROFILE_DEFAULT = "CURRENT_TP2"
+AUTO_TRADE_RUNNER_FRACTION_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_FRACTION", "0.50"))
+AUTO_TRADE_RUNNER_TARGET_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_TARGET_PCT", "5.0"))
+AUTO_TRADE_CLIENT_PREFIX = os.getenv("AUTO_TRADE_CLIENT_PREFIX", "MBOT").strip()[:8] or "MBOT"
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.11")
+log = logging.getLogger("momentum-v5.13")
 
 
 @dataclass
@@ -483,6 +515,35 @@ agg_stream_health: Dict[int, float] = {}
 stream_reconnects = defaultdict(int)
 trade_event_count = 0
 telegram_offset = 0
+
+# V5.13 AutoTrade runtime state. Settings are persisted in SQLite; LIVE is forced OFF on every process start.
+autotrade_cfg = {
+    "mode": AUTO_TRADE_BOOT_MODE,
+    "trade_margin_usdt": AUTO_TRADE_MARGIN_USDT_DEFAULT,
+    "leverage": AUTO_TRADE_LEVERAGE_DEFAULT,
+    "max_open_positions": AUTO_TRADE_MAX_OPEN_POSITIONS_DEFAULT,
+    "daily_max_loss_pct": AUTO_TRADE_DAILY_MAX_LOSS_PCT_DEFAULT,
+    "max_consecutive_stops": AUTO_TRADE_MAX_CONSECUTIVE_STOPS_DEFAULT,
+    "stop_cooldown_minutes": AUTO_TRADE_STOP_COOLDOWN_MINUTES_DEFAULT,
+    "margin_type": AUTO_TRADE_MARGIN_TYPE_DEFAULT,
+    "max_entry_slippage_pct": AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT_DEFAULT,
+    "exit_profile": AUTO_TRADE_EXIT_PROFILE_DEFAULT,
+    "runner_fraction": AUTO_TRADE_RUNNER_FRACTION_DEFAULT,
+    "runner_target_pct": AUTO_TRADE_RUNNER_TARGET_PCT_DEFAULT,
+}
+autotrade_active: Dict[int, dict] = {}
+autotrade_active_by_symbol: Dict[str, Set[int]] = defaultdict(set)
+autotrade_live_confirm: Dict[str, Tuple[str, float]] = {}
+autotrade_pending_setting: Dict[str, Tuple[str, str, float]] = {}
+# Cached Binance Futures balance for the Telegram control panel. This is informational only;
+# risk-lock calculations continue to use the frozen daily start balance in autotrade_daily.
+autotrade_account_cache = {
+    "wallet_balance": None,
+    "available_balance": None,
+    "updated_ts": 0.0,
+    "error": "",
+}
+exchange_filters: Dict[str, dict] = {}
 
 # Diagnostic funnel counters for the current deployment/session.
 funnel_started_ts = time.time()
@@ -1126,6 +1187,57 @@ def init_db():
     ensure_column(conn, "notification_log", "signal_id", "INTEGER")
     ensure_column(conn, "notification_log", "send_start_ts_ms", "INTEGER")
     ensure_column(conn, "notification_log", "send_done_ts_ms", "INTEGER")
+    # V5.13.1 actionable 15/30s execution-quality cohort. SHADOW ONLY.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS premium_execution_gate_v21_shadow (
+               signal_id INTEGER PRIMARY KEY,
+               decision_15 TEXT, reason_15 TEXT, trade_active_15 INTEGER,
+               decision_30 TEXT, reason_30 TEXT, trade_active_30 INTEGER,
+               final_decision TEXT, actionable_horizon_ms INTEGER,
+               overextended_60 INTEGER DEFAULT 0, production_gate INTEGER DEFAULT 0,
+               updated_ts INTEGER NOT NULL
+           )"""
+    )
+
+    # V5.13 AutoTrade persistence. These tables are independent from scanner/research tables.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS autotrade_settings (
+               key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ts INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS autotrade_trades (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               signal_id INTEGER UNIQUE, symbol TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL,
+               side TEXT NOT NULL DEFAULT 'LONG', position_side TEXT,
+               margin_usdt REAL NOT NULL, leverage INTEGER NOT NULL, notional_usdt REAL NOT NULL,
+               entry_signal_price REAL, entry_price REAL, qty REAL, expected_qty REAL,
+               stop_price REAL, tp1_price REAL, tp2_price REAL, runner_price REAL,
+               exit_profile TEXT, runner_fraction REAL, runner_target_pct REAL,
+               tp1_hit INTEGER DEFAULT 0, partial_realized_pnl REAL DEFAULT 0,
+               entry_order_id TEXT, entry_client_id TEXT,
+               tp1_algo_id TEXT, tp1_client_id TEXT,
+               tp2_algo_id TEXT, tp2_client_id TEXT,
+               stop_algo_id TEXT, stop_client_id TEXT,
+               opened_ts_ms INTEGER, closed_ts_ms INTEGER, close_reason TEXT, exit_price REAL,
+               realized_pnl REAL DEFAULT 0, commission REAL DEFAULT 0, net_pnl REAL DEFAULT 0,
+               manual_intervention INTEGER DEFAULT 0, last_error TEXT, updated_ts INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS autotrade_events (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL, trade_id INTEGER,
+               signal_id INTEGER, symbol TEXT, event TEXT NOT NULL, detail TEXT
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS autotrade_daily (
+               local_date TEXT NOT NULL, scope TEXT NOT NULL, start_balance REAL NOT NULL, realized_net_pnl REAL DEFAULT 0,
+               consecutive_stops INTEGER DEFAULT 0, locked INTEGER DEFAULT 0, lock_reason TEXT, cooldown_until_ts INTEGER DEFAULT 0,
+               updated_ts INTEGER NOT NULL, PRIMARY KEY(local_date, scope)
+           )"""
+    )
+
     ensure_column(conn, "notification_log", "telegram_message_id", "INTEGER")
     ensure_column(conn, "notification_log", "live_bid", "REAL")
     ensure_column(conn, "notification_log", "live_ask", "REAL")
@@ -1161,6 +1273,7 @@ def init_db():
     ensure_column(conn, "premium_failure_risk", "price_state", "TEXT")
     ensure_column(conn, "premium_failure_risk", "micro_mfe", "REAL")
     ensure_column(conn, "premium_failure_risk", "micro_mae", "REAL")
+    ensure_column(conn, "autotrade_daily", "cooldown_until_ts", "INTEGER DEFAULT 0")
     ensure_column(conn, "premium_execution_composite", "trade_active", "INTEGER")
     ensure_column(conn, "premium_execution_composite", "terminal_event", "TEXT")
     ensure_column(conn, "premium_execution_composite", "terminal_age_s", "REAL")
@@ -1179,7 +1292,7 @@ def init_db():
            (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
            VALUES (?,?,?,?,?,?)""",
         (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
-         "V5.12 execution-quality V2 shadow: progress+composite+sticky+overextension; production Premium/Early/TP/stop unchanged",int(time.time())),
+         "V5.13 safe AutoTrade infra: OFF/DRY/LIVE, Telegram controls, risk locks, manual-position isolation; scanner + V5.12 research logic unchanged",int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -1909,7 +2022,65 @@ def save_post_premium_risk(p: PendingOutcome, horizon_ms: int, observed_ts_ms: i
                           price,ret,max(0.0,-pct_change(price,p.peak_price or price)),m,sc,
                           f"V5.11 shadow; state={risk_state}; {'; '.join(reasons)}",None)
         p.fail_risk_60_saved = True
+    if horizon_ms in (15000, 30000):
+        maybe_finalize_execution_gate_v21(p.signal_id)
     return risk_state
+
+
+def maybe_finalize_execution_gate_v21(signal_id: int):
+    """V5.13.1 actionable 15/30s cohort logger. SHADOW ONLY.
+
+    Uses only information available by each horizon. It deliberately does not
+    suppress Premiums or place/delay AutoTrade orders; that requires another
+    forward cohort with delayed-entry P/L.
+    """
+    if not EXECUTION_GATE_V21_SHADOW_ENABLED:
+        return
+    conn = db_connect()
+    try:
+        ev = conn.execute("SELECT status FROM premium_entry_validation WHERE signal_id=?", (signal_id,)).fetchone()
+        entry_status = ev[0] if ev else None
+        sig = conn.execute("SELECT chg60 FROM signals_v2 WHERE id=?", (signal_id,)).fetchone()
+        over60 = int(bool(sig and sig[0] is not None and float(sig[0]) >= OVEREXTENDED_60_PCT))
+        rows = conn.execute(
+            """SELECT horizon_ms,price_state,liquidity_core_state,trade_active,terminal_event
+               FROM premium_failure_risk WHERE signal_id=? AND horizon_ms IN (15000,30000)""", (signal_id,)
+        ).fetchall()
+        byh={int(r[0]):r for r in rows}
+        def classify(h):
+            r=byh.get(h)
+            if not r: return None, None, None
+            _,price_state,liq_state,active,terminal=r
+            if not int(active or 0):
+                return f"RESOLVED_BEFORE_{h//1000}", f"terminal={terminal or 'not_active'}", int(active or 0)
+            if entry_status == "PASS" and price_state == "POSITIVE" and liq_state == "SUPPORTIVE":
+                return ("EARLY_ALLOW_15" if h==15000 else "ALLOW_30"), f"entry=PASS; price=POSITIVE; liq=SUPPORTIVE; over60={over60}", 1
+            if h==30000 and price_state == "NEGATIVE" and liq_state == "HOSTILE":
+                return "BLOCK_30", f"price=NEGATIVE; liq=HOSTILE; entry={entry_status}; over60={over60}", 1
+            if h==15000 and price_state == "NEGATIVE" and liq_state == "HOSTILE":
+                return "WATCH_NEG_HOSTILE_15", f"price=NEGATIVE; liq=HOSTILE; entry={entry_status}; over60={over60}", 1
+            return ("HOLD_15" if h==15000 else "HOLD_30"), f"entry={entry_status}; price={price_state}; liq={liq_state}; over60={over60}", 1
+        d15,r15,a15=classify(15000); d30,r30,a30=classify(30000)
+        final=None; ah=None
+        if d15 == "EARLY_ALLOW_15": final,ah=d15,15000
+        elif d30 in ("ALLOW_30","BLOCK_30"): final,ah=d30,30000
+        elif d30: final,ah=d30,30000
+        elif d15: final,ah=d15,15000
+        conn.execute(
+            """INSERT INTO premium_execution_gate_v21_shadow
+               (signal_id,decision_15,reason_15,trade_active_15,decision_30,reason_30,trade_active_30,
+                final_decision,actionable_horizon_ms,overextended_60,production_gate,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
+               ON CONFLICT(signal_id) DO UPDATE SET
+                 decision_15=excluded.decision_15,reason_15=excluded.reason_15,trade_active_15=excluded.trade_active_15,
+                 decision_30=excluded.decision_30,reason_30=excluded.reason_30,trade_active_30=excluded.trade_active_30,
+                 final_decision=excluded.final_decision,actionable_horizon_ms=excluded.actionable_horizon_ms,
+                 overextended_60=excluded.overextended_60,production_gate=0,updated_ts=excluded.updated_ts""",
+            (signal_id,d15,r15,a15,d30,r30,a30,final,ah,over60,int(time.time()))
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional[int] = None,
@@ -3847,9 +4018,21 @@ async def fetch_json(session, path, params=None):
 async def load_symbols(session):
     info = await fetch_json(session, "/fapi/v1/exchangeInfo")
     out = []
+    exchange_filters.clear()
     for s in info.get("symbols", []):
         if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING":
-            out.append(s["symbol"])
+            sym = s["symbol"]
+            out.append(sym)
+            filt = {x.get("filterType"): x for x in s.get("filters", [])}
+            exchange_filters[sym] = {
+                "price_precision": int(s.get("pricePrecision", 8) or 8),
+                "qty_precision": int(s.get("quantityPrecision", 8) or 8),
+                "tick_size": float((filt.get("PRICE_FILTER") or {}).get("tickSize", 0) or 0),
+                "step_size": float((filt.get("MARKET_LOT_SIZE") or filt.get("LOT_SIZE") or {}).get("stepSize", 0) or 0),
+                "min_qty": float((filt.get("MARKET_LOT_SIZE") or filt.get("LOT_SIZE") or {}).get("minQty", 0) or 0),
+                "max_qty": float((filt.get("MARKET_LOT_SIZE") or filt.get("LOT_SIZE") or {}).get("maxQty", 0) or 0),
+                "min_notional": float((filt.get("MIN_NOTIONAL") or filt.get("NOTIONAL") or {}).get("notional", 0) or 0),
+            }
     return sorted(out)
 
 
@@ -4444,6 +4627,7 @@ def estimate_trade_plan(symbol: str, m: dict) -> dict:
     return {
         "entry_low": entry_low,
         "entry_high": entry_high,
+        "entry_mid": entry_mid,
         "invalidation": invalidation,
         "target1": target1,
         "target2": target2,
@@ -4851,6 +5035,14 @@ async def evaluate(session, symbol: str):
             asyncio.create_task(capture_liquidity_snapshot(session, po, 0))
         log.info("PREMIUM CONFIRMED %s momentum=%d rise=%d quality=%d runup=%.2f oi=%s exec=%s episode=%s",
                  symbol, score, rise_score, quality, runup, m.get("oi_regime"), m["execution"]["status"], st.episode_id)
+        # AutoTrade is a separate execution layer. OFF does nothing; DRY records/simulates; LIVE is triple-locked.
+        try:
+            await autotrade_handle_premium(session, signal_id, symbol, m, plan)
+        except Exception as e:
+            _at_log_event("ENTRY_ERROR",signal_id=signal_id,symbol=symbol,detail=repr(e))
+            log.error("AutoTrade premium handler %s: %r",symbol,e)
+            if str(autotrade_cfg.get("mode")) == "LIVE":
+                await telegram_send(session,f"🚨 AutoTrade {symbol} giriş hatası: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
         await telegram_public_alert(
             session, build_message(m), symbol=symbol, notification_kind="PREMIUM", notification_ordinal=m.get("daily_notice_no"),
             signal_id=signal_id, signal_price=m["price"], entry_status=m["execution"]["status"]
@@ -5055,6 +5247,7 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                     if not st.episode_id and st.prev_meaningful_ts:
                         st.prev_meaningful_low_price = min(st.prev_meaningful_low_price or price, price)
                     update_pending_tick(sym, price, ts / 1000.0)
+                    autotrade_on_tick(sym, price, ts / 1000.0)
                     if st.quote_volume24 >= min(MIN_24H_QUOTE_VOLUME, NEAR_MISS_MIN_QV24):
                         asyncio.create_task(evaluate(session, sym))
         except asyncio.CancelledError:
@@ -5567,6 +5760,780 @@ async def telegram_send_document(session: aiohttp.ClientSession, file_path: str,
     return False
 
 
+
+# ============================== V5.13 AUTOTRADE SAFE EXECUTION ==============================
+
+def _at_local_date() -> str:
+    return datetime.now(IST).date().isoformat()
+
+
+def _at_admin_allowed(chat_id: str, user_id: str, *, require_user_id: bool = False) -> bool:
+    if str(chat_id) != str(TELEGRAM_ADMIN_CHAT_ID):
+        return False
+    if TELEGRAM_ADMIN_USER_ID:
+        return str(user_id) == str(TELEGRAM_ADMIN_USER_ID)
+    return not require_user_id
+
+
+def _at_bool(v) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _at_log_event(event: str, *, trade_id=None, signal_id=None, symbol=None, detail=""):
+    conn = db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO autotrade_events(ts_ms,trade_id,signal_id,symbol,event,detail) VALUES (?,?,?,?,?,?)",
+            (now_ms(), trade_id, signal_id, symbol, event, str(detail)[:2000]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _at_save_setting(key: str, value):
+    conn = db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO autotrade_settings(key,value,updated_ts) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_ts=excluded.updated_ts",
+            (key, str(value), int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_autotrade_settings():
+    defaults = dict(autotrade_cfg)
+    conn = db_connect()
+    try:
+        rows = dict(conn.execute("SELECT key,value FROM autotrade_settings").fetchall())
+    finally:
+        conn.close()
+    converters = {
+        "trade_margin_usdt": float, "leverage": int, "max_open_positions": int,
+        "daily_max_loss_pct": float, "max_consecutive_stops": int, "stop_cooldown_minutes": int,
+        "max_entry_slippage_pct": float, "runner_fraction": float, "runner_target_pct": float,
+        "mode": str, "margin_type": str, "exit_profile": str,
+    }
+    for k, conv in converters.items():
+        if k in rows:
+            try: autotrade_cfg[k] = conv(rows[k])
+            except Exception: autotrade_cfg[k] = defaults[k]
+    autotrade_cfg["trade_margin_usdt"] = max(5.0, float(autotrade_cfg["trade_margin_usdt"]))
+    autotrade_cfg["leverage"] = max(1, min(125, int(autotrade_cfg["leverage"])))
+    autotrade_cfg["max_open_positions"] = max(1, min(20, int(autotrade_cfg["max_open_positions"])))
+    autotrade_cfg["daily_max_loss_pct"] = max(0.25, min(25.0, float(autotrade_cfg["daily_max_loss_pct"])))
+    autotrade_cfg["max_consecutive_stops"] = max(1, min(20, int(autotrade_cfg["max_consecutive_stops"])))
+    autotrade_cfg["stop_cooldown_minutes"] = max(5, min(720, int(autotrade_cfg["stop_cooldown_minutes"])))
+    autotrade_cfg["runner_fraction"] = max(0.05, min(0.95, float(autotrade_cfg["runner_fraction"])))
+    autotrade_cfg["runner_target_pct"] = max(0.25, min(25.0, float(autotrade_cfg["runner_target_pct"])))
+    autotrade_cfg["exit_profile"] = str(autotrade_cfg["exit_profile"]).upper()
+    if autotrade_cfg["exit_profile"] not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
+        autotrade_cfg["exit_profile"] = "CURRENT_TP2"
+    # Never resume LIVE after a deploy/restart. Existing live positions are still reconciled/managed.
+    persisted_mode = str(autotrade_cfg.get("mode", "OFF")).upper()
+    autotrade_cfg["mode"] = "DRY" if persisted_mode == "DRY" and AUTO_TRADE_BOOT_MODE == "DRY" else "OFF"
+    _at_save_setting("mode", autotrade_cfg["mode"])
+    recover_autotrade_active()
+
+
+def recover_autotrade_active():
+    autotrade_active.clear(); autotrade_active_by_symbol.clear()
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM autotrade_trades WHERE status IN ('OPEN','PARTIAL','PROTECTIVE_PARTIAL') ORDER BY id"""
+        ).fetchall()
+        cols = [d[0] for d in conn.execute("SELECT * FROM autotrade_trades LIMIT 0").description]
+    finally:
+        conn.close()
+    for row in rows:
+        tr = dict(zip(cols, row))
+        autotrade_active[int(tr["id"])] = tr
+        autotrade_active_by_symbol[str(tr["symbol"])].add(int(tr["id"]))
+
+
+def _at_scope(scope: Optional[str] = None) -> str:
+    if scope:
+        return "LIVE" if str(scope).upper() == "LIVE" else "DRY"
+    return "LIVE" if str(autotrade_cfg.get("mode", "OFF")).upper() == "LIVE" else "DRY"
+
+
+def _at_daily_row(start_balance: Optional[float] = None, scope: Optional[str] = None) -> dict:
+    d = _at_local_date(); sc = _at_scope(scope)
+    conn = db_connect()
+    try:
+        row = conn.execute("SELECT local_date,scope,start_balance,realized_net_pnl,consecutive_stops,locked,lock_reason,cooldown_until_ts FROM autotrade_daily WHERE local_date=? AND scope=?", (d,sc)).fetchone()
+        if row is None:
+            sb = float(start_balance if start_balance is not None else AUTO_TRADE_SIM_BALANCE_USDT)
+            conn.execute("INSERT INTO autotrade_daily(local_date,scope,start_balance,realized_net_pnl,consecutive_stops,locked,lock_reason,cooldown_until_ts,updated_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                         (d, sc, sb, 0.0, 0, 0, None, 0, int(time.time())))
+            conn.commit(); row = (d, sc, sb, 0.0, 0, 0, None, 0)
+        elif start_balance is not None and float(row[3] or 0)==0 and int(row[4] or 0)==0 and not bool(row[5]):
+            conn.execute("UPDATE autotrade_daily SET start_balance=?,updated_ts=? WHERE local_date=? AND scope=?",(float(start_balance),int(time.time()),d,sc)); conn.commit()
+            row = (row[0],row[1],float(start_balance),row[3],row[4],row[5],row[6],row[7])
+        return {"local_date":row[0],"scope":row[1],"start_balance":float(row[2]),"realized_net_pnl":float(row[3] or 0),"consecutive_stops":int(row[4] or 0),"locked":bool(row[5]),"lock_reason":row[6] or "","cooldown_until_ts":int(row[7] or 0)}
+    finally:
+        conn.close()
+
+
+def _at_update_daily(net_pnl: float, close_reason: str, scope: Optional[str] = None):
+    sc=_at_scope(scope); r = _at_daily_row(scope=sc)
+    pnl = float(r["realized_net_pnl"]) + float(net_pnl or 0)
+    streak = int(r["consecutive_stops"])
+    reason = str(close_reason or "").upper()
+    if reason == "STOP": streak += 1
+    elif float(net_pnl or 0) > 0: streak = 0
+    limit = float(r["start_balance"]) * float(autotrade_cfg["daily_max_loss_pct"]) / 100.0
+    locked = bool(r["locked"]); lock_reason = str(r["lock_reason"] or "")
+    cooldown_until = int(r.get("cooldown_until_ts") or 0)
+    if pnl <= -limit:
+        locked = True; lock_reason = f"DAILY_LOSS_{autotrade_cfg['daily_max_loss_pct']:.2f}PCT"
+    # Clean-backup forward test showed a 4-stop streak can happen during an otherwise profitable day.
+    # Therefore the streak is a temporary circuit-breaker; only the daily loss limit is a hard day lock.
+    if (not locked) and streak >= int(autotrade_cfg["max_consecutive_stops"]):
+        cooldown_until = max(cooldown_until, int(time.time()) + int(autotrade_cfg["stop_cooldown_minutes"])*60)
+        streak = 0
+        lock_reason = ""
+    conn = db_connect()
+    try:
+        conn.execute("UPDATE autotrade_daily SET realized_net_pnl=?,consecutive_stops=?,locked=?,lock_reason=?,cooldown_until_ts=?,updated_ts=? WHERE local_date=? AND scope=?",
+                     (pnl, streak, int(locked), lock_reason or None, cooldown_until, int(time.time()), r["local_date"],sc))
+        conn.commit()
+    finally: conn.close()
+    return _at_daily_row(scope=sc)
+
+def _at_open_count(mode: Optional[str] = None) -> int:
+    if mode:
+        return sum(1 for x in autotrade_active.values() if str(x.get("mode")).upper() == str(mode).upper())
+    return len(autotrade_active)
+
+
+def _at_risk_allowed(scope: Optional[str] = None) -> Tuple[bool, str]:
+    sc=_at_scope(scope); r = _at_daily_row(scope=sc)
+    if r["locked"]:
+        return False, r["lock_reason"] or "RISK_LOCK"
+    cooldown_until=int(r.get("cooldown_until_ts") or 0)
+    if cooldown_until > int(time.time()):
+        mins=max(1, math.ceil((cooldown_until-time.time())/60.0))
+        return False, f"STOP_COOLDOWN_{mins}MIN"
+    if _at_open_count(sc) >= int(autotrade_cfg["max_open_positions"]):
+        return False, "MAX_OPEN_POSITIONS"
+    return True, "OK"
+
+def _at_quantize(value: float, step: float, rounding=ROUND_DOWN) -> float:
+    if not step or step <= 0:
+        return float(value)
+    dv, ds = Decimal(str(value)), Decimal(str(step))
+    return float((dv / ds).to_integral_value(rounding=rounding) * ds)
+
+
+def _at_qty(symbol: str, notional: float, price: float) -> float:
+    f = exchange_filters.get(symbol, {})
+    q = float(notional) / max(float(price), 1e-12)
+    q = _at_quantize(q, float(f.get("step_size") or 0), ROUND_DOWN)
+    if f.get("min_qty") and q < float(f["min_qty"]):
+        q = float(f["min_qty"])
+    if f.get("max_qty") and q > float(f["max_qty"]):
+        q = float(f["max_qty"])
+    return q
+
+
+def _at_price(symbol: str, price: float) -> float:
+    return _at_quantize(float(price), float(exchange_filters.get(symbol, {}).get("tick_size") or 0), ROUND_HALF_UP)
+
+
+def _at_levels_from_fill(symbol: str, fill: float, plan: dict) -> dict:
+    base = float(plan.get("entry_mid") or ((float(plan["entry_low"])+float(plan["entry_high"]))/2.0))
+    stop_pct = max(0.05, abs((float(plan["invalidation"])/base - 1.0)*100.0))
+    tp1_pct = max(0.05, (float(plan["target1"])/base - 1.0)*100.0)
+    tp2_pct = max(tp1_pct, (float(plan["target2"])/base - 1.0)*100.0)
+    return {
+        "stop": _at_price(symbol, fill*(1-stop_pct/100.0)),
+        "tp1": _at_price(symbol, fill*(1+tp1_pct/100.0)),
+        "tp2": _at_price(symbol, fill*(1+tp2_pct/100.0)),
+        "runner": _at_price(symbol, max(fill*(1+float(autotrade_cfg["runner_target_pct"])/100.0), fill*(1+tp1_pct/100.0)*1.001)),
+    }
+
+
+def _at_client(tag: str, signal_id: int) -> str:
+    raw = f"{AUTO_TRADE_CLIENT_PREFIX}-{tag}-{signal_id}-{int(time.time())%1000000}"
+    return raw[:36]
+
+
+async def binance_signed_request(session: aiohttp.ClientSession, method: str, path: str, params: Optional[dict] = None, *, timeout_s: int = 15):
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET eksik")
+    data = dict(params or {})
+    data.setdefault("recvWindow", 5000)
+    data["timestamp"] = now_ms()
+    # Binance signs the URL-encoded query/body exactly.
+    qs = urlencode([(k, str(v).lower() if isinstance(v, bool) else str(v)) for k,v in data.items() if v is not None])
+    sig = hmac.new(BINANCE_API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    signed = qs + "&signature=" + sig
+    headers = {"X-MBX-APIKEY": BINANCE_API_KEY, "Content-Type":"application/x-www-form-urlencoded"}
+    url = REST + path
+    try:
+        if method.upper() == "GET":
+            req = session.get(url + "?" + signed, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s))
+        elif method.upper() == "DELETE":
+            req = session.delete(url + "?" + signed, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s))
+        else:
+            req = session.request(method.upper(), url, data=signed, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s))
+        async with req as r:
+            body = await r.text()
+            try: payload = json.loads(body)
+            except Exception: payload = {"code": r.status, "msg": body[:500]}
+            if r.status >= 400 or (isinstance(payload, dict) and int(payload.get("code", 0) or 0) < 0):
+                raise RuntimeError(f"Binance {method} {path}: {r.status} {payload}")
+            return payload
+    except asyncio.CancelledError:
+        raise
+
+
+async def _at_account_snapshot(session):
+    cfg = await binance_signed_request(session, "GET", "/fapi/v1/accountConfig")
+    bal = await binance_signed_request(session, "GET", "/fapi/v3/balance")
+    usdt = next((x for x in bal if x.get("asset") == "USDT"), None) or {}
+    positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk")
+    return cfg, usdt, positions
+
+
+def _at_cache_account_balance(usdt: Optional[dict] = None, error: str = ""):
+    if usdt is not None:
+        try:
+            autotrade_account_cache["wallet_balance"] = float(usdt.get("balance", 0) or 0)
+            autotrade_account_cache["available_balance"] = float(usdt.get("availableBalance", 0) or 0)
+            autotrade_account_cache["updated_ts"] = time.time()
+            autotrade_account_cache["error"] = ""
+        except Exception as e:
+            autotrade_account_cache["error"] = str(e)[:250]
+    elif error:
+        autotrade_account_cache["error"] = str(error)[:250]
+
+
+async def _at_query_order_by_client(session, symbol: str, client_id: str):
+    try:
+        return await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"origClientOrderId":client_id})
+    except Exception:
+        return None
+
+
+async def _at_place_market_entry(session, symbol: str, qty: float, position_side: str, client_id: str):
+    params = {"symbol":symbol,"side":"BUY","type":"MARKET","quantity":qty,"newClientOrderId":client_id,"newOrderRespType":"RESULT"}
+    if position_side != "BOTH": params["positionSide"] = position_side
+    try:
+        return await binance_signed_request(session, "POST", "/fapi/v1/order", params, timeout_s=20)
+    except Exception as e:
+        # Never blind-retry an uncertain order. Query the unique client id first.
+        q = await _at_query_order_by_client(session, symbol, client_id)
+        if q and str(q.get("status")) in ("NEW","PARTIALLY_FILLED","FILLED"):
+            return q
+        raise e
+
+
+async def _at_place_algo(session, *, symbol: str, order_type: str, trigger_price: float, position_side: str,
+                         client_id: str, quantity: Optional[float] = None, close_position: bool = False):
+    params = {"algoType":"CONDITIONAL","symbol":symbol,"side":"SELL","type":order_type,
+              "triggerPrice":trigger_price,"workingType":"CONTRACT_PRICE","clientAlgoId":client_id,"newOrderRespType":"RESULT"}
+    if position_side != "BOTH": params["positionSide"] = position_side
+    if close_position:
+        params["closePosition"] = "true"
+    elif quantity is not None:
+        params["quantity"] = quantity
+        if position_side == "BOTH": params["reduceOnly"] = "true"
+    return await binance_signed_request(session, "POST", "/fapi/v1/algoOrder", params)
+
+
+async def _at_cancel_algo(session, algo_id):
+    if not algo_id: return
+    try:
+        await binance_signed_request(session, "DELETE", "/fapi/v1/algoOrder", {"algoId":algo_id})
+    except Exception as e:
+        log.debug("AutoTrade cancel algo %s: %r", algo_id, e)
+
+
+async def _at_cancel_trade_algos(session, tr: dict):
+    for k in ("tp1_algo_id","tp2_algo_id","stop_algo_id"):
+        await _at_cancel_algo(session, tr.get(k))
+
+
+async def _at_emergency_close(session, symbol: str, qty: float, position_side: str, signal_id: int):
+    params={"symbol":symbol,"side":"SELL","type":"MARKET","quantity":qty,"newClientOrderId":_at_client("EMG",signal_id),"newOrderRespType":"RESULT"}
+    if position_side == "BOTH": params["reduceOnly"]="true"
+    else: params["positionSide"] = position_side
+    return await binance_signed_request(session,"POST","/fapi/v1/order",params,timeout_s=20)
+
+
+def _at_insert_trade(signal_id: int, symbol: str, mode: str, signal_price: float, entry_price: float, qty: float, levels: dict, plan: dict,
+                     *, position_side="BOTH", entry_order_id=None, entry_client_id=None) -> int:
+    margin=float(autotrade_cfg["trade_margin_usdt"]); lev=int(autotrade_cfg["leverage"]); notional=margin*lev
+    conn=db_connect()
+    try:
+        cur=conn.execute("""INSERT OR IGNORE INTO autotrade_trades
+            (signal_id,symbol,mode,status,side,position_side,margin_usdt,leverage,notional_usdt,entry_signal_price,entry_price,qty,expected_qty,
+             stop_price,tp1_price,tp2_price,runner_price,exit_profile,runner_fraction,runner_target_pct,entry_order_id,entry_client_id,opened_ts_ms,updated_ts)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (signal_id,symbol,mode,"OPEN","LONG",position_side,margin,lev,notional,signal_price,entry_price,qty,qty,levels["stop"],levels["tp1"],levels["tp2"],levels["runner"],
+             autotrade_cfg["exit_profile"],autotrade_cfg["runner_fraction"],autotrade_cfg["runner_target_pct"],str(entry_order_id or ""),entry_client_id or "",now_ms(),int(time.time())))
+        if cur.rowcount == 0:
+            row=conn.execute("SELECT id FROM autotrade_trades WHERE signal_id=?",(signal_id,)).fetchone(); trade_id=int(row[0])
+        else: trade_id=int(cur.lastrowid)
+        conn.commit()
+    finally: conn.close()
+    recover_autotrade_active()
+    return trade_id
+
+
+def _at_update_trade(trade_id: int, **fields):
+    if not fields: return
+    fields["updated_ts"] = int(time.time())
+    keys=list(fields); vals=[fields[k] for k in keys]
+    conn=db_connect()
+    try:
+        conn.execute("UPDATE autotrade_trades SET "+",".join(f"{k}=?" for k in keys)+" WHERE id=?", vals+[trade_id])
+        conn.commit()
+    finally: conn.close()
+    recover_autotrade_active()
+
+
+def _at_close_trade(trade_id: int, reason: str, exit_price: float, realized_pnl: float, commission: float = 0.0):
+    tr=autotrade_active.get(trade_id) or {}
+    mode=str(tr.get("mode") or "DRY")
+    net=float(realized_pnl or 0)-float(commission or 0)
+    _at_update_trade(trade_id,status="CLOSED",closed_ts_ms=now_ms(),close_reason=reason,exit_price=exit_price,realized_pnl=realized_pnl,commission=commission,net_pnl=net)
+    daily=_at_update_daily(net,reason,scope=mode)
+    _at_log_event("CLOSE",trade_id=trade_id,detail=f"reason={reason}; net={net:.4f}; daily={daily['realized_net_pnl']:.4f}")
+    return daily
+
+
+async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict, plan: dict):
+    mode=str(autotrade_cfg.get("mode","OFF")).upper()
+    if mode == "OFF": return
+    allowed, why = _at_risk_allowed(mode)
+    if not allowed:
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why)
+        return
+    if autotrade_active_by_symbol.get(symbol):
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="BOT_POSITION_ALREADY_ACTIVE")
+        return
+    signal_price=float(m.get("price") or 0)
+    live_ask=float(states[symbol].ask_price or signal_price)
+    if signal_price and live_ask and pct_change(live_ask,signal_price) > float(autotrade_cfg["max_entry_slippage_pct"]):
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=f"SLIPPAGE {pct_change(live_ask,signal_price):.3f}%")
+        return
+    margin=float(autotrade_cfg["trade_margin_usdt"]); lev=int(autotrade_cfg["leverage"]); notional=margin*lev
+    entry_ref=live_ask or signal_price
+    if mode == "DRY":
+        qty=_at_qty(symbol,notional,entry_ref)
+        levels=_at_levels_from_fill(symbol,entry_ref,plan)
+        tid=_at_insert_trade(signal_id,symbol,"DRY",signal_price,entry_ref,qty,levels,plan)
+        _at_log_event("DRY_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"entry={entry_ref}; qty={qty}; profile={autotrade_cfg['exit_profile']}")
+        await telegram_send(session, f"🟡 DRY RUN — {symbol}\n{margin:.0f} USDT × {lev}x | giriş ~{fmt_price(entry_ref)}\nStop {fmt_price(levels['stop'])} | TP2 {fmt_price(levels['tp2'])}\nGerçek emir gönderilmedi.", chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        return
+    if mode != "LIVE": return
+    if not AUTO_TRADE_LIVE_ALLOWED:
+        _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="AUTO_TRADE_LIVE_ALLOWED=0")
+        return
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="API_KEY_MISSING")
+        return
+    cfg, usdt, positions = await _at_account_snapshot(session)
+    _at_cache_account_balance(usdt)
+    if not cfg.get("canTrade", False):
+        raise RuntimeError("Binance Futures API canTrade=false")
+    # Initialize today's risk base from actual wallet balance if this is the first live interaction of the day.
+    _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
+    available=float(usdt.get("availableBalance",0) or 0)
+    if available < margin * 1.05:
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=f"AVAILABLE_BALANCE {available:.2f}")
+        return
+    # Manual position isolation: do not enter a symbol that already has any non-zero position not owned by this bot.
+    existing=[x for x in positions if x.get("symbol")==symbol and abs(float(x.get("positionAmt",0) or 0))>1e-12]
+    if existing:
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="MANUAL_OR_EXISTING_POSITION")
+        await telegram_send(session,f"⚠️ AutoTrade {symbol} girişini atladı: Binance'ta bu sembolde zaten açık pozisyon var. Manuel pozisyona dokunulmadı.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        return
+    hedge=bool(cfg.get("dualSidePosition")); position_side="LONG" if hedge else "BOTH"
+    # Configure only an empty symbol; manual/open symbols were blocked above.
+    try:
+        await binance_signed_request(session,"POST","/fapi/v1/leverage",{"symbol":symbol,"leverage":lev})
+    except Exception as e:
+        raise RuntimeError(f"Leverage ayarlanamadı: {e}")
+    if str(autotrade_cfg["margin_type"]).upper() in ("ISOLATED","CROSSED"):
+        try:
+            await binance_signed_request(session,"POST","/fapi/v1/marginType",{"symbol":symbol,"marginType":str(autotrade_cfg['margin_type']).upper()})
+        except Exception as e:
+            # Binance -4046: no need to change margin type. Treat as benign.
+            if "-4046" not in str(e): log.warning("AutoTrade marginType %s: %r",symbol,e)
+    qty=_at_qty(symbol,notional,entry_ref)
+    f=exchange_filters.get(symbol,{})
+    if qty<=0 or (f.get("min_notional") and qty*entry_ref < float(f["min_notional"])):
+        raise RuntimeError(f"Quantity/minNotional geçersiz: qty={qty}")
+    entry_client=_at_client("E",signal_id)
+    order=await _at_place_market_entry(session,symbol,qty,position_side,entry_client)
+    exec_qty=float(order.get("executedQty") or order.get("cumQty") or qty)
+    fill=float(order.get("avgPrice") or 0)
+    if fill<=0:
+        cq=float(order.get("cumQuote") or 0); fill=(cq/exec_qty) if cq and exec_qty else entry_ref
+    levels=_at_levels_from_fill(symbol,fill,plan)
+    tid=_at_insert_trade(signal_id,symbol,"LIVE",signal_price,fill,exec_qty,levels,plan,position_side=position_side,entry_order_id=order.get("orderId"),entry_client_id=entry_client)
+    try:
+        # Protective STOP first. If it cannot be created, flatten immediately.
+        stop_client=_at_client("S",signal_id)
+        stop=await _at_place_algo(session,symbol=symbol,order_type="STOP_MARKET",trigger_price=levels["stop"],position_side=position_side,client_id=stop_client,close_position=True)
+        _at_update_trade(tid,stop_algo_id=str(stop.get("algoId") or ""),stop_client_id=stop_client)
+    except Exception as e:
+        _at_update_trade(tid,last_error=f"STOP_CREATE_FAILED {e}")
+        try: await _at_emergency_close(session,symbol,exec_qty,position_side,signal_id)
+        finally:
+            _at_close_trade(tid,"EMERGENCY_CLOSE",fill,0,0)
+        await telegram_send(session,f"🚨 {symbol} koruyucu STOP kurulamadı; pozisyon acil market emirle kapatılmaya çalışıldı. Hata: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        return
+    try:
+        profile=str(autotrade_cfg["exit_profile"])
+        if profile == "PARTIAL_RUNNER":
+            runner_frac=float(autotrade_cfg["runner_fraction"])
+            runner_qty=_at_quantize(exec_qty*runner_frac,float(f.get("step_size") or 0),ROUND_DOWN)
+            tp1_qty=_at_quantize(exec_qty-runner_qty,float(f.get("step_size") or 0),ROUND_DOWN)
+            if tp1_qty>0:
+                c1=_at_client("T1",signal_id); o1=await _at_place_algo(session,symbol=symbol,order_type="TAKE_PROFIT_MARKET",trigger_price=levels["tp1"],position_side=position_side,client_id=c1,quantity=tp1_qty)
+                _at_update_trade(tid,tp1_algo_id=str(o1.get("algoId") or ""),tp1_client_id=c1)
+            if runner_qty>0:
+                c2=_at_client("R",signal_id); o2=await _at_place_algo(session,symbol=symbol,order_type="TAKE_PROFIT_MARKET",trigger_price=levels["runner"],position_side=position_side,client_id=c2,quantity=runner_qty)
+                _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
+        else:
+            c2=_at_client("T2",signal_id); o2=await _at_place_algo(session,symbol=symbol,order_type="TAKE_PROFIT_MARKET",trigger_price=levels["tp2"],position_side=position_side,client_id=c2,close_position=True)
+            _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
+    except Exception as e:
+        _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=f"TP_CREATE_FAILED {e}")
+        await telegram_send(session,f"⚠️ {symbol} pozisyonu açık ve STOP korumalı; TP emri kurulamadı. Manuel kontrol gerekli. {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+    _at_log_event("LIVE_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"fill={fill}; qty={exec_qty}; lev={lev}")
+    await telegram_send(session,f"🟢 LIVE AÇILDI — {symbol}\n{margin:.0f} USDT × {lev}x | fill {fmt_price(fill)}\nStop {fmt_price(levels['stop'])} | profil {autotrade_cfg['exit_profile']}\nTrade ID #{tid}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+
+
+def autotrade_on_tick(symbol: str, price: float, tick_ts: float):
+    ids=list(autotrade_active_by_symbol.get(symbol) or [])
+    if not ids: return
+    for tid in ids:
+        tr=autotrade_active.get(tid)
+        if not tr or tr.get("mode") != "DRY" or tr.get("status") not in ("OPEN","PARTIAL"): continue
+        entry=float(tr.get("entry_price") or 0); qty=float(tr.get("qty") or 0); expected=float(tr.get("expected_qty") or qty)
+        stop=float(tr.get("stop_price") or 0); tp1=float(tr.get("tp1_price") or 0); tp2=float(tr.get("tp2_price") or 0); runner=float(tr.get("runner_price") or 0)
+        profile=str(tr.get("exit_profile") or "CURRENT_TP2")
+        if stop and price <= stop:
+            partial=float(tr.get("partial_realized_pnl") or 0)
+            pnl=partial + expected*(price-entry)
+            daily=_at_close_trade(tid,"STOP",price,pnl,0)
+            continue
+        if profile == "PARTIAL_RUNNER":
+            if not int(tr.get("tp1_hit") or 0) and tp1 and price >= tp1:
+                frac=1-float(tr.get("runner_fraction") or 0.5)
+                close_qty=qty*frac; part=close_qty*(price-entry); remain=max(0.0,qty-close_qty)
+                _at_update_trade(tid,status="PARTIAL",tp1_hit=1,partial_realized_pnl=part,expected_qty=remain)
+                tr=autotrade_active.get(tid) or tr; expected=remain
+            if runner and price >= runner and int((autotrade_active.get(tid) or tr).get("tp1_hit") or 0):
+                tr2=autotrade_active.get(tid) or tr; part=float(tr2.get("partial_realized_pnl") or 0); remain=float(tr2.get("expected_qty") or 0)
+                _at_close_trade(tid,"RUNNER",price,part+remain*(price-entry),0)
+        elif tp2 and price >= tp2:
+            _at_close_trade(tid,"TP2",price,qty*(price-entry),0)
+
+
+async def _at_algo_state(session, algo_id):
+    if not algo_id: return None
+    try: return await binance_signed_request(session,"GET","/fapi/v1/algoOrder",{"algoId":algo_id})
+    except Exception: return None
+
+
+async def _at_order_net_pnl(session, symbol: str, order_id) -> Tuple[float,float,float]:
+    if not order_id: return 0.0,0.0,0.0
+    try:
+        trades=await binance_signed_request(session,"GET","/fapi/v1/userTrades",{"symbol":symbol,"orderId":order_id})
+        realized=sum(float(x.get("realizedPnl",0) or 0) for x in trades)
+        commission=sum(float(x.get("commission",0) or 0) for x in trades if x.get("commissionAsset") in (None,"USDT"))
+        q=sum(float(x.get("qty",0) or 0) for x in trades); quote=sum(float(x.get("quoteQty",0) or 0) for x in trades)
+        avg=(quote/q) if q else 0.0
+        return realized,commission,avg
+    except Exception:
+        return 0.0,0.0,0.0
+
+
+async def _at_window_net_pnl(session, symbol: str, opened_ts_ms: int) -> Tuple[float,float,float]:
+    try:
+        trades=await binance_signed_request(session,"GET","/fapi/v1/userTrades",{"symbol":symbol,"startTime":max(0,int(opened_ts_ms)-1000),"limit":1000})
+        realized=sum(float(x.get("realizedPnl",0) or 0) for x in trades)
+        commission=sum(float(x.get("commission",0) or 0) for x in trades if x.get("commissionAsset") in (None,"USDT"))
+        sells=[x for x in trades if str(x.get("side"))=="SELL"]
+        q=sum(float(x.get("qty",0) or 0) for x in sells); quote=sum(float(x.get("quoteQty",0) or 0) for x in sells)
+        return realized,commission,(quote/q if q else 0.0)
+    except Exception:
+        return 0.0,0.0,0.0
+
+
+async def autotrade_reconcile_loop(session):
+    last_daily = ""
+    while not stop_event.is_set():
+        try:
+            # Daily risk row exists even in DRY mode. Existing LIVE trades are managed regardless of current mode.
+            if _at_local_date() != last_daily:
+                _at_daily_row(scope="DRY"); last_daily=_at_local_date()
+            live=[x for x in autotrade_active.values() if x.get("mode")=="LIVE" and x.get("status") in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL")]
+            # Keep a fresh informational Futures-balance snapshot for /settings even while AutoTrade is OFF/DRY.
+            # This does not enable trading and does not alter the LIVE daily risk base.
+            if BINANCE_API_KEY and BINANCE_API_SECRET and not live and (time.time()-float(autotrade_account_cache.get("updated_ts") or 0) >= 30):
+                try:
+                    _, usdt_cache, _ = await _at_account_snapshot(session)
+                    _at_cache_account_balance(usdt_cache)
+                except Exception as e:
+                    _at_cache_account_balance(error=str(e))
+            if live and BINANCE_API_KEY and BINANCE_API_SECRET:
+                cfg, usdt, positions = await _at_account_snapshot(session)
+                _at_cache_account_balance(usdt)
+                posmap=defaultdict(float)
+                for p in positions:
+                    sym=str(p.get("symbol") or ""); ps=str(p.get("positionSide") or "BOTH"); amt=float(p.get("positionAmt",0) or 0)
+                    if abs(amt)>1e-12: posmap[(sym,ps)] += amt
+                for tr in list(live):
+                    tid=int(tr["id"]); sym=str(tr["symbol"]); ps=str(tr.get("position_side") or "BOTH")
+                    actual=abs(float(posmap.get((sym,ps),0.0)))
+                    expected=abs(float(tr.get("expected_qty") or tr.get("qty") or 0))
+                    if actual <= 1e-12:
+                        stopst=await _at_algo_state(session,tr.get("stop_algo_id")); tp2st=await _at_algo_state(session,tr.get("tp2_algo_id")); tp1st=await _at_algo_state(session,tr.get("tp1_algo_id"))
+                        reason="MANUAL_CLOSE"; exit_order=None
+                        for name,st in (("STOP",stopst),("RUNNER" if tr.get("exit_profile")=="PARTIAL_RUNNER" else "TP2",tp2st),("TP1",tp1st)):
+                            if st and int(st.get("triggerTime",0) or 0)>0 and st.get("actualOrderId"):
+                                reason=name; exit_order=st.get("actualOrderId")
+                                if name != "TP1": break
+                        if reason=="MANUAL_CLOSE":
+                            realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
+                        else:
+                            realized,comm,exit_px=await _at_order_net_pnl(session,sym,exit_order)
+                            _,entry_comm,_=await _at_order_net_pnl(session,sym,tr.get("entry_order_id")); comm += entry_comm
+                            realized += float(tr.get("partial_realized_pnl") or 0); comm += float(tr.get("commission") or 0)
+                        await _at_cancel_trade_algos(session,tr)
+                        daily=_at_close_trade(tid,reason,exit_px,realized,comm)
+                        await telegram_send(session,f"{'🛑' if reason=='STOP' else '✅'} AutoTrade kapandı — {sym} | {reason}\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT | stop serisi {daily['consecutive_stops']}/{autotrade_cfg['max_consecutive_stops']}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                        continue
+                    tol=max(float(exchange_filters.get(sym,{}).get("step_size") or 0)*1.5, expected*0.01)
+                    if expected and abs(actual-expected)>tol:
+                        # First see if the bot's TP1 explains the quantity change.
+                        tp1st=await _at_algo_state(session,tr.get("tp1_algo_id")) if tr.get("tp1_algo_id") and not int(tr.get("tp1_hit") or 0) else None
+                        if tp1st and int(tp1st.get("triggerTime",0) or 0)>0 and actual < expected:
+                            part_pnl,part_comm,_=await _at_order_net_pnl(session,sym,tp1st.get("actualOrderId"))
+                            _at_update_trade(tid,status="PARTIAL",tp1_hit=1,expected_qty=actual,partial_realized_pnl=part_pnl,commission=part_comm)
+                        else:
+                            # Same-symbol manual edits cannot be safely separated in One-Way mode. Stop managing and cancel only BOT-owned algos.
+                            await _at_cancel_trade_algos(session,tr)
+                            _at_update_trade(tid,status="MANUAL_INTERVENTION",manual_intervention=1,expected_qty=actual,last_error=f"qty expected={expected} actual={actual}")
+                            _at_log_event("MANUAL_INTERVENTION",trade_id=tid,symbol=sym,detail=f"expected={expected}; actual={actual}")
+                            await telegram_send(session,f"🚨 MANUAL INTERVENTION — {sym}\nPozisyon miktarı bot kaydından farklı. Bot kendi TP/SL emirlerini iptal etti ve bu birleşmiş pozisyonu artık yönetmeyecek. Binance'tan manuel yönetmen gerekiyor.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+            await asyncio.sleep(AUTO_TRADE_RECONCILE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("AutoTrade reconcile: %r",e)
+            await asyncio.sleep(max(5,AUTO_TRADE_RECONCILE_SECONDS))
+
+
+def _at_panel_text() -> str:
+    scope="LIVE" if str(autotrade_cfg.get("mode"))=="LIVE" else "DRY"
+    r=_at_daily_row(scope=scope)
+    lim=r["start_balance"]*float(autotrade_cfg["daily_max_loss_pct"])/100
+    # Distance from current realized P/L to the daily lock threshold (-limit).
+    # Example: limit 60 and P/L -14.20 => 45.80 USDT remaining.
+    remaining=max(0.0, lim + float(r["realized_net_pnl"])) if not r["locked"] else 0.0
+    live_ready=bool(AUTO_TRADE_LIVE_ALLOWED and BINANCE_API_KEY and BINANCE_API_SECRET and TELEGRAM_ADMIN_USER_ID)
+    wallet=autotrade_account_cache.get("wallet_balance")
+    available=autotrade_account_cache.get("available_balance")
+    if wallet is None:
+        balance_line = "💵 Futures bakiye: API bağlı değil" if not (BINANCE_API_KEY and BINANCE_API_SECRET) else "💵 Futures bakiye: bağlantı bekleniyor"
+    else:
+        age=max(0,int(time.time()-float(autotrade_account_cache.get("updated_ts") or time.time())))
+        balance_line = f"💵 Futures bakiye: {float(wallet):,.2f} USDT"
+        if available is not None:
+            balance_line += f" | serbest {float(available):,.2f}"
+        balance_line += f" ({age} sn)"
+    return (
+        "⚙️ AUTOTRADE KONTROL PANELİ\n\n"
+        f"Mod: {autotrade_cfg['mode']}\n"
+        f"{balance_line}\n"
+        f"İşlem: {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x = {float(autotrade_cfg['trade_margin_usdt'])*int(autotrade_cfg['leverage']):,.0f} USDT notional\n"
+        f"Max açık pozisyon: {int(autotrade_cfg['max_open_positions'])}\n"
+        f"Günlük zarar: %{float(autotrade_cfg['daily_max_loss_pct']):.2f} (~{lim:.2f} USDT)\n"
+        f"📉 Günlük P/L ({r['scope']}): {r['realized_net_pnl']:+.2f} USDT\n"
+        f"🛡 Günlük limite kalan: {remaining:.2f} USDT\n"
+        f"Ardışık stop: {r['consecutive_stops']}/{int(autotrade_cfg['max_consecutive_stops'])} → {int(autotrade_cfg['stop_cooldown_minutes'])} dk cooldown\n"
+        f"Risk kilidi: {'AÇIK — '+r['lock_reason'] if r['locked'] else 'kapalı'}\n"
+        f"Cooldown: {max(0, math.ceil((int(r.get('cooldown_until_ts') or 0)-time.time())/60))} dk\n"
+        f"Çıkış profili: {autotrade_cfg['exit_profile']}\n"
+        f"LIVE altyapı kilidi: {'hazır' if live_ready else 'kilitli'}\n\n"
+        "Ayar değişiklikleri yalnız yeni işlemleri etkiler. Deploy/restart sonrası LIVE otomatik olarak OFF olur."
+    )
+
+
+def _at_panel_markup():
+    return {"inline_keyboard":[
+        [{"text":f"💰 {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT","callback_data":"at:size"},{"text":f"⚡ {int(autotrade_cfg['leverage'])}x","callback_data":"at:lev"}],
+        [{"text":f"📊 Max {int(autotrade_cfg['max_open_positions'])}","callback_data":"at:maxpos"},{"text":f"🛡 Günlük %{float(autotrade_cfg['daily_max_loss_pct']):g}","callback_data":"at:dloss"}],
+        [{"text":f"🧱 Stop serisi {int(autotrade_cfg['max_consecutive_stops'])}","callback_data":"at:streak"},{"text":"📈 Pozisyonlar","callback_data":"at:positions"}],
+        [{"text":"⚪ OFF","callback_data":"at:mode:OFF"},{"text":"🟡 DRY RUN","callback_data":"at:mode:DRY"},{"text":"🔴 LIVE","callback_data":"at:mode:LIVE"}],
+        [{"text":"🔄 Yenile","callback_data":"at:panel"}],
+    ]}
+
+
+def _at_choice_markup(kind: str, values: list):
+    rows=[]
+    for i in range(0,len(values),3):
+        rows.append([{"text":str(v),"callback_data":f"at:set:{kind}:{v}"} for v in values[i:i+3]])
+    rows.append([{"text":"⬅️ Geri","callback_data":"at:panel"}])
+    return {"inline_keyboard":rows}
+
+
+async def _at_show_positions(session, chat_id: str):
+    rows=list(autotrade_active.values())
+    if not rows:
+        await telegram_send(session,"📈 Botun yönettiği açık pozisyon yok. Manuel Binance pozisyonları bu listeye dahil edilmez.",chat_id=chat_id); return
+    lines=["📈 BOT POZİSYONLARI\n"]
+    for tr in rows:
+        lines.append(f"#{tr['id']} {tr['symbol']} | {tr['mode']} {tr['status']} | {float(tr['margin_usdt']):.0f}×{int(tr['leverage'])} | entry {fmt_price(float(tr.get('entry_price') or 0))}")
+    await telegram_send(session,"\n".join(lines),chat_id=chat_id)
+
+
+async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
+    data=str(cb.get("data") or "")
+    if not data.startswith("at:"): return False
+    callback_id=cb.get("id"); actor=cb.get("from") or {}; uid=str(actor.get("id", "")); msg=cb.get("message") or {}; chat_id=str((msg.get("chat") or {}).get("id", ""))
+    if not _at_admin_allowed(chat_id,uid):
+        if callback_id: await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id,"text":"Bu işlem için yetkin yok.","show_alert":True})
+        return True
+    parts=data.split(":")
+    action=parts[1] if len(parts)>1 else ""
+    if action=="panel":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":_at_panel_text(),"reply_markup":_at_panel_markup()})
+    elif action=="size":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"💰 Yeni işlem başına marjin seç:","reply_markup":_at_choice_markup("trade_margin_usdt",[100,150,200,250,300,400,500])})
+    elif action=="lev":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"⚡ Yeni kaldıraç seç:","reply_markup":_at_choice_markup("leverage",[3,5,7,10,15,20])})
+    elif action=="maxpos":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"📊 Maksimum açık bot pozisyonu:","reply_markup":_at_choice_markup("max_open_positions",[1,2,3,4,5,6])})
+    elif action=="dloss":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"🛡 Günlük maksimum net zarar (%):","reply_markup":_at_choice_markup("daily_max_loss_pct",[1,2,2.5,3,4,5])})
+    elif action=="streak":
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"🧱 Ardışık stop limiti:","reply_markup":_at_choice_markup("max_consecutive_stops",[2,3,4,5,6])})
+    elif action=="positions":
+        await _at_show_positions(session,chat_id)
+    elif action=="mode" and len(parts)>=3:
+        target=parts[2].upper()
+        if target=="LIVE":
+            if not _at_admin_allowed(chat_id,uid,require_user_id=True):
+                await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id,"text":"LIVE için TELEGRAM_ADMIN_USER_ID gerekli.","show_alert":True}); return True
+            code=f"{secrets.randbelow(1000000):06d}"; autotrade_live_confirm[uid]=(code,time.time()+120)
+            await telegram_send(session,f"🔴 LIVE aktivasyon isteği\n\nKod: {code}\n120 saniye içinde şu komutu yaz:\n/autotrade confirm {code}\n\nRailway'de AUTO_TRADE_LIVE_ALLOWED=1 ve Binance API anahtarları yoksa LIVE yine açılmaz.",chat_id=chat_id)
+        else:
+            autotrade_cfg["mode"] = target if target in ("OFF","DRY") else "OFF"; _at_save_setting("mode",autotrade_cfg["mode"])
+            await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":_at_panel_text(),"reply_markup":_at_panel_markup()})
+    elif action=="set" and len(parts)>=4:
+        key,val=parts[2],parts[3]
+        token=secrets.token_hex(3); autotrade_pending_setting[token]=(key,val,time.time()+120)
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":f"⚠️ Ayar değişikliği\n{key}: {autotrade_cfg.get(key)} → {val}\n\nYalnız yeni işlemler etkilenecek.","reply_markup":{"inline_keyboard":[[{"text":"✅ Onayla","callback_data":f"at:confirm:{token}"},{"text":"❌ Vazgeç","callback_data":"at:panel"}]]}})
+    elif action=="confirm" and len(parts)>=3:
+        token=parts[2]; pending=autotrade_pending_setting.pop(token,None)
+        if pending and pending[2]>=time.time():
+            key,val,_=pending
+            conv=float if key in ("trade_margin_usdt","daily_max_loss_pct") else int
+            autotrade_cfg[key]=conv(val); _at_save_setting(key,autotrade_cfg[key])
+        await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":_at_panel_text(),"reply_markup":_at_panel_markup()})
+    if callback_id:
+        await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id})
+    return True
+
+
+async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) -> str:
+    if not _at_admin_allowed(chat_id,user_id,require_user_id=True): return "❌ LIVE için yetkili kullanıcı ID'si eşleşmiyor."
+    p=autotrade_live_confirm.pop(user_id,None)
+    if not p or p[1]<time.time() or p[0]!=code: return "❌ LIVE onay kodu geçersiz veya süresi dolmuş."
+    if not AUTO_TRADE_LIVE_ALLOWED: return "❌ Railway'de AUTO_TRADE_LIVE_ALLOWED=1 değil. LIVE kilitli."
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET: return "❌ Binance API Key/Secret Railway Variables içinde yok."
+    allowed,why=_at_risk_allowed("LIVE")
+    if not allowed: return f"❌ Risk kilidi nedeniyle LIVE açılamadı: {why}"
+    try:
+        cfg,usdt,positions=await _at_account_snapshot(session)
+        _at_cache_account_balance(usdt)
+        if not cfg.get("canTrade",False): return "❌ Binance API canTrade=false. Futures trading izni açık değil."
+        _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
+    except Exception as e: return f"❌ Binance bağlantı testi başarısız: {e}"
+    autotrade_cfg["mode"]="LIVE"; _at_save_setting("mode","LIVE")
+    return "🔴 AUTOTRADE LIVE AÇILDI. Yeni uygun Premiumlar gerçek Futures emrine dönüşebilir. Deploy/restart olursa tekrar OFF'a döner."
+
+
+async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
+    text=raw_text.strip(); low=text.lower()
+    if low in ("/settings","/tradesettings"):
+        if not _at_admin_allowed(chat_id,user_id): return True
+        await telegram_send(session,_at_panel_text(),chat_id=chat_id,reply_markup=_at_panel_markup()); return True
+    if low=="/riskstatus":
+        if not _at_admin_allowed(chat_id,user_id): return True
+        await telegram_send(session,_at_panel_text(),chat_id=chat_id); return True
+    if low=="/positions":
+        if not _at_admin_allowed(chat_id,user_id): return True
+        await _at_show_positions(session,chat_id); return True
+    if low.startswith("/autotrade"):
+        if not _at_admin_allowed(chat_id,user_id): return True
+        parts=text.split()
+        if len(parts)==1:
+            await telegram_send(session,_at_panel_text(),chat_id=chat_id,reply_markup=_at_panel_markup()); return True
+        cmd=parts[1].lower()
+        if cmd in ("off","dry"):
+            autotrade_cfg["mode"]="OFF" if cmd=="off" else "DRY"; _at_save_setting("mode",autotrade_cfg["mode"])
+            await telegram_send(session,f"✅ AutoTrade modu: {autotrade_cfg['mode']}. Açık LIVE pozisyonların koruma/yönetimi varsa devam eder.",chat_id=chat_id); return True
+        if cmd=="live":
+            if not _at_admin_allowed(chat_id,user_id,require_user_id=True):
+                await telegram_send(session,"❌ LIVE aktivasyonu için Railway'de TELEGRAM_ADMIN_USER_ID tanımlı olmalı.",chat_id=chat_id); return True
+            code=f"{secrets.randbelow(1000000):06d}"; autotrade_live_confirm[user_id]=(code,time.time()+120)
+            await telegram_send(session,f"🔴 LIVE onay kodu: {code}\n120 sn içinde /autotrade confirm {code}",chat_id=chat_id); return True
+        if cmd=="confirm" and len(parts)>=3:
+            await telegram_send(session,await _at_try_live_enable(session,chat_id,user_id,parts[2]),chat_id=chat_id); return True
+        return True
+    mapping={"/tradesize":"trade_margin_usdt","/leverage":"leverage","/maxpositions":"max_open_positions","/dailyloss":"daily_max_loss_pct","/stopstreak":"max_consecutive_stops"}
+    first=low.split()[0] if low else ""
+    if first in mapping:
+        if not _at_admin_allowed(chat_id,user_id): return True
+        parts=text.split()
+        if len(parts)<2:
+            await telegram_send(session,f"Kullanım: {first} DEĞER",chat_id=chat_id); return True
+        key=mapping[first]
+        try: val=float(parts[1]) if key in ("trade_margin_usdt","daily_max_loss_pct") else int(parts[1])
+        except Exception:
+            await telegram_send(session,"❌ Geçersiz değer.",chat_id=chat_id); return True
+        bounds={"trade_margin_usdt":(5,100000),"leverage":(1,125),"max_open_positions":(1,20),"daily_max_loss_pct":(0.25,25),"max_consecutive_stops":(1,20)}
+        lo,hi=bounds[key]
+        if not (lo<=val<=hi):
+            await telegram_send(session,f"❌ Değer {lo}–{hi} aralığında olmalı.",chat_id=chat_id); return True
+        token=secrets.token_hex(3); autotrade_pending_setting[token]=(key,str(val),time.time()+120)
+        markup={"inline_keyboard":[[{"text":"✅ Onayla","callback_data":f"at:confirm:{token}"},{"text":"❌ Vazgeç","callback_data":"at:panel"}]]}
+        await telegram_send(session,f"⚠️ {key}: {autotrade_cfg.get(key)} → {val}\nYalnız yeni işlemler etkilenecek.",chat_id=chat_id,reply_markup=markup); return True
+    if low.startswith("/runner"):
+        if not _at_admin_allowed(chat_id,user_id): return True
+        parts=text.split()
+        if len(parts)>=2 and parts[1].lower() in ("off","current"):
+            autotrade_cfg["exit_profile"]="CURRENT_TP2"; _at_save_setting("exit_profile","CURRENT_TP2")
+            await telegram_send(session,"✅ Çıkış profili CURRENT_TP2. Yalnız yeni işlemler etkilenir.",chat_id=chat_id); return True
+        if len(parts)>=3:
+            try: tp1_pct=float(parts[1]); target=float(parts[2])
+            except Exception:
+                await telegram_send(session,"Kullanım: /runner 50 5  (TP1'de %50 kapat, kalan +%5 runner) veya /runner off",chat_id=chat_id); return True
+            if not (5<=tp1_pct<=95 and 0.25<=target<=25):
+                await telegram_send(session,"❌ TP1 payı %5–95, runner hedefi %0.25–25 olmalı.",chat_id=chat_id); return True
+            autotrade_cfg["exit_profile"]="PARTIAL_RUNNER"; autotrade_cfg["runner_fraction"]=(100-tp1_pct)/100.0; autotrade_cfg["runner_target_pct"]=target
+            for k in ("exit_profile","runner_fraction","runner_target_pct"): _at_save_setting(k,autotrade_cfg[k])
+            await telegram_send(session,f"✅ Yeni işlemler: TP1'de %{tp1_pct:g} kapat + kalan %{100-tp1_pct:g} runner → +%{target:g}.",chat_id=chat_id); return True
+        await telegram_send(session,f"Runner profili: {autotrade_cfg['exit_profile']} | kalan pay %{float(autotrade_cfg['runner_fraction'])*100:.0f} | hedef +%{float(autotrade_cfg['runner_target_pct']):g}",chat_id=chat_id); return True
+    return False
+
+# ============================ END V5.13 AUTOTRADE SAFE EXECUTION ============================
+
+
 async def telegram_command_loop(session):
     global telegram_offset
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -5598,14 +6565,19 @@ async def telegram_command_loop(session):
                     continue
                 if upd.get("callback_query"):
                     handled = await handle_join_callback(session, upd["callback_query"])
+                    if not handled:
+                        handled = await handle_autotrade_callback(session, upd["callback_query"])
                     if handled:
                         continue
                 msg = upd.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
-                if chat_id != str(TELEGRAM_CHAT_ID):
+                if chat_id not in {str(TELEGRAM_CHAT_ID), str(TELEGRAM_ADMIN_CHAT_ID)}:
                     continue
+                user_id = str((msg.get("from") or {}).get("id", ""))
                 raw_text = str(msg.get("text", "")).strip()
                 text = raw_text.lower()
+                if await _at_command(session, raw_text, chat_id, user_id):
+                    continue
                 if text == "/status":
                     age = lambda k: (time.time() - stream_health[k]) if stream_health[k] else 9999
                     agg_ages = [(time.time() - t) for t in agg_stream_health.values() if t]
@@ -5635,7 +6607,9 @@ async def telegram_command_loop(session):
                         f"🧪 15sn Execution Gate Simulator: {'açık' if EXECUTION_GATE_SHADOW_ENABLED else 'kapalı'} | PRODUCTION GATE KAPALI | pre-gate TP/stop bias guard açık\n"
                         f"🚦 Post-Premium Failure Risk: {'açık' if POST_PREMIUM_RISK_ENABLED else 'kapalı'} | 15/30sn liquidity + 60sn progress | PUBLIC ALERT YOK\n"
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
-                        f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"
+                        f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"                        f"🧪 Gate V2.1 15/30sn: {'açık' if EXECUTION_GATE_V21_SHADOW_ENABLED else 'kapalı'} | PASS+POSITIVE+SUPPORTIVE / NEGATIVE+HOSTILE | SHADOW\n"
+
+                        f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | LIVE kilidi {'AÇIK' if AUTO_TRADE_LIVE_ALLOWED else 'KAPALI'}\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
                         f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
                         f"🏆 Gainers: arka plan kayıt AÇIK | Telegram push: {'açık' if GAINERS_NOTIFY else 'kapalı'} | TOP {GAINERS_TOP_N}"
@@ -6260,7 +7234,7 @@ async def telegram_command_loop(session):
                             m["execution"] = compute_execution_context(sym, m, plan)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v511stats, /v510stats, /riskstats, /gatestats, /discoverystats, /dbhealth, /backupdb, /joinstatus ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v511stats, /v510stats, /riskstats, /gatestats, /discoverystats, /dbhealth, /backupdb, /joinstatus, /settings, /riskstatus, /positions ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
                         f"🤖 Momentum Scanner V{BOT_VERSION} — Execution Risk / Liquidity Regime Research\n\n"
@@ -6283,6 +7257,12 @@ async def telegram_command_loop(session):
                         "/backupdb — tutarlı DB snapshotını Telegrama gönder\n"
                         "/joinstatus — kanal katılım onayı durumu\n"
                         "/joinlink — yönetici onaylı davet linki oluştur\n"
+                        "/settings — AutoTrade butonlu kontrol paneli\n"
+                        "/autotrade off|dry|live — execution modu (LIVE ikinci onaylı)\n"
+                        "/tradesize N — işlem başına marjin; /leverage N; /maxpositions N\n"
+                        "/dailyloss N — günlük yüzde zarar limiti; /stopstreak N — ardışık stop kilidi\n"
+                        "/riskstatus — günlük P/L/risk kilidi; /positions — yalnız botun yönettiği pozisyonlar\n"
+                        "/runner 50 5 — yeni işlemlerde %50 TP1 + %50 +%5 runner; /runner off — mevcut TP2\n"
                         "/analiz COIN — bir coini anlık analiz et\n"
                         "/test — Telegram testi\n\n"
                         f"Premium seçim eşikleri değişmedi. V{BOT_VERSION} liquidity V2/CORE, sticky early-liquidity, gerçek post-gate counterfactual, ignition V2, failure-risk ve reclaim/runner katmanlarını SHADOW olarak ölçer; bunlar işlem sinyali değildir."
@@ -6297,6 +7277,7 @@ async def telegram_command_loop(session):
 async def main():
     global symbols
     init_db()
+    load_autotrade_settings()
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -6329,14 +7310,15 @@ async def main():
                 f"💸 Funding/mark stream: AÇIK | OI 5m + OI ivmesi: kayıt AÇIK\n"
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
                 f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
-                f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n\n"
-                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v511stats  /v510stats  /riskstats  /gatestats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /analiz COIN  /test"
+                f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n"
+                f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} | 4-stop koruması {int(autotrade_cfg['max_consecutive_stops'])} | LIVE varsayılan KAPALI\n\n"
+                f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v511stats  /v510stats  /riskstats  /gatestats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /settings  /autotrade  /riskstatus  /positions  /analiz COIN  /test"
             )
 
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
         tasks = [
             ticker_ws(session), book_ws(session), mark_price_ws(session), liquidation_ws(session),
-            outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session),
+            outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session), autotrade_reconcile_loop(session),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         await asyncio.gather(*tasks)
