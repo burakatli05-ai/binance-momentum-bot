@@ -6576,6 +6576,13 @@ async def telegram_command_loop(session):
                 user_id = str((msg.get("from") or {}).get("id", ""))
                 raw_text = str(msg.get("text", "")).strip()
                 text = raw_text.lower()
+                if text == "/myid":
+                    await telegram_send(
+                        session,
+                        f"🆔 Telegram User ID: {user_id}\n💬 Chat ID: {chat_id}",
+                        chat_id=chat_id,
+                    )
+                    continue
                 if await _at_command(session, raw_text, chat_id, user_id):
                     continue
                 if text == "/status":
@@ -7234,11 +7241,12 @@ async def telegram_command_loop(session):
                             m["execution"] = compute_execution_context(sym, m, plan)
                             await telegram_send(session, build_manual_analysis(sym, m, sc, q, rscore, plan), symbol=sym)
                 elif text in ("/test", "test"):
-                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v511stats, /v510stats, /riskstats, /gatestats, /discoverystats, /dbhealth, /backupdb, /joinstatus, /settings, /riskstatus, /positions ve /analiz COIN kullanabilirsin.")
+                    await telegram_send(session, "✅ Bot çalışıyor. /status, /top, /gainers, /funnel, /stats, /radarstats, /shadowstats, /entrystats, /latencystats, /researchstats, /v511stats, /v510stats, /riskstats, /gatestats, /discoverystats, /dbhealth, /backupdb, /joinstatus, /settings, /riskstatus, /positions, /myid ve /analiz COIN kullanabilirsin.")
                 elif text in ("/help", "/start"):
                     await telegram_send(session,
                         f"🤖 Momentum Scanner V{BOT_VERSION} — Execution Risk / Liquidity Regime Research\n\n"
                         "/status — bağlantı ve sinyal durumu\n"
+                        "/myid — Telegram kullanıcı ve sohbet ID bilgisi\n"
                         "/top — şu an ısınan ilk 10 coin\n"
                         "/gainers — güncel Futures gainers\n"
                         "/funnel — adayların hangi filtrelerde elendiği\n"
