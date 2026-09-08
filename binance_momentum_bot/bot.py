@@ -29,8 +29,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.13.1"
-RESEARCH_LOGIC_VERSION = "v5131-cleanbackup-gate21-cooldown"
+BOT_VERSION = "5.13.2"
+RESEARCH_LOGIC_VERSION = "v5132-forward-exit-delayed-entry-shadow"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -238,6 +238,14 @@ LOCAL_TOP_MFE15_MAX = float(os.getenv("LOCAL_TOP_MFE15_MAX", "0.25"))
 LOCAL_TOP_MAE30_MIN = float(os.getenv("LOCAL_TOP_MAE30_MIN", "-0.35"))
 EXECUTION_GATE_V21_SHADOW_ENABLED = os.getenv("EXECUTION_GATE_V21_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
 
+# V5.13.2: forward-only exit/delayed-entry audit. SHADOW ONLY.
+# These counters never suppress Premiums, never alter public TP/stop levels and never place orders.
+FORWARD_STRATEGY_SHADOW_ENABLED = os.getenv("FORWARD_STRATEGY_SHADOW_ENABLED", "1").strip() not in ("0", "false", "False")
+FORWARD_RUNNER_TARGET_PCT = float(os.getenv("FORWARD_RUNNER_TARGET_PCT", "5.0"))
+WAIT_RECLAIM_FORWARD_ENABLED = os.getenv("WAIT_RECLAIM_FORWARD_ENABLED", "1").strip() not in ("0", "false", "False")
+WAIT_RECLAIM_MAX_DELAY_S = int(os.getenv("WAIT_RECLAIM_MAX_DELAY_S", "180"))
+FORWARD_STRATEGY_HORIZON_S = int(os.getenv("FORWARD_STRATEGY_HORIZON_S", "3600"))
+
 # V5.13: AutoTrade execution infrastructure. SAFE BY DEFAULT.
 # LIVE can never start automatically after a deploy/restart. The default path is OFF -> DRY -> explicit LIVE confirmation.
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "").strip()
@@ -266,7 +274,7 @@ AUTO_TRADE_CLIENT_PREFIX = os.getenv("AUTO_TRADE_CLIENT_PREFIX", "MBOT").strip()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.13")
+log = logging.getLogger("momentum-v5.13.2")
 
 
 @dataclass
@@ -450,6 +458,15 @@ class PendingOutcome:
     gate_shadow_first_event: Optional[str] = None
     gate_shadow_completed: set = field(default_factory=set)
     sticky_early_hostile: bool = False
+    # V5.13.2 forward strategy audit. SHADOW only.
+    execution_status_at_signal: str = "UNKNOWN"
+    forward_be_hit_s: Optional[float] = None
+    forward_runner5_hit_s: Optional[float] = None
+    forward_mfe_after_tp1: float = 0.0
+    forward_mae_after_tp1: float = 0.0
+    forward_mfe_after_tp2: float = 0.0
+    forward_mae_after_tp2: float = 0.0
+    delayed_shadows: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1196,6 +1213,36 @@ def init_db():
                final_decision TEXT, actionable_horizon_ms INTEGER,
                overextended_60 INTEGER DEFAULT 0, production_gate INTEGER DEFAULT 0,
                updated_ts INTEGER NOT NULL
+           )"""
+    )
+
+    # V5.13.2 forward exit/delayed-entry strategy audit. SHADOW ONLY.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS premium_exit_forward_shadow (
+               signal_id INTEGER PRIMARY KEY,
+               entry_price REAL, tp1_price REAL, tp2_price REAL, stop_price REAL,
+               be_hit_s REAL, runner5_hit_s REAL, runner_target_pct REAL,
+               mfe_after_tp1 REAL DEFAULT 0, mae_after_tp1 REAL DEFAULT 0,
+               mfe_after_tp2 REAL DEFAULT 0, mae_after_tp2 REAL DEFAULT 0,
+               close60_price REAL, completed_60m INTEGER DEFAULT 0,
+               current_outcome TEXT, current_return_pct REAL,
+               full_be_outcome TEXT, full_be_return_pct REAL,
+               partial50_be_outcome TEXT, partial50_be_return_pct REAL,
+               tp2_runner50_outcome TEXT, tp2_runner50_return_pct REAL,
+               updated_ts INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS premium_delayed_entry_shadow (
+               signal_id INTEGER NOT NULL, strategy TEXT NOT NULL,
+               source_status TEXT, decision TEXT, horizon_ms INTEGER, pullback_s REAL,
+               entry_age_s REAL, entry_price REAL, stop_price REAL, tp1_price REAL, tp2_price REAL,
+               tp1_hit_s REAL, tp2_hit_s REAL, stop_hit_s REAL, be_hit_s REAL,
+               mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+               close60_price REAL, completed_60m INTEGER DEFAULT 0,
+               current_outcome TEXT, current_return_pct REAL,
+               be_outcome TEXT, be_return_pct REAL, no_entry_reason TEXT,
+               updated_ts INTEGER NOT NULL, PRIMARY KEY(signal_id,strategy)
            )"""
     )
 
@@ -2081,6 +2128,7 @@ def maybe_finalize_execution_gate_v21(signal_id: int):
         conn.commit()
     finally:
         conn.close()
+    _arm_gate_v21_forward_shadow(signal_id,final,ah)
 
 
 def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional[int] = None,
@@ -2831,6 +2879,297 @@ def init_signal_path(signal_id: int, entry_low: float, entry_high: float, target
     )
     conn.commit()
     conn.close()
+
+
+def _forward_translated_levels(p: PendingOutcome, fill: float) -> dict:
+    """Translate original TP/stop geometry to a counterfactual delayed fill. Research only."""
+    base = ((float(p.entry_low) + float(p.entry_high)) / 2.0) if p.entry_low and p.entry_high else float(p.entry_price or fill)
+    base = max(base, 1e-12)
+    stop_pct = max(0.05, abs((float(p.invalidation) / base - 1.0) * 100.0)) if p.invalidation else 0.65
+    tp1_pct = max(0.05, (float(p.target1) / base - 1.0) * 100.0) if p.target1 else 0.65
+    tp2_pct = max(tp1_pct, (float(p.target2) / base - 1.0) * 100.0) if p.target2 else max(1.20, tp1_pct)
+    return {
+        "stop": float(fill) * (1.0 - stop_pct / 100.0),
+        "tp1": float(fill) * (1.0 + tp1_pct / 100.0),
+        "tp2": float(fill) * (1.0 + tp2_pct / 100.0),
+    }
+
+
+def _forward_first(a: Optional[float], b: Optional[float]) -> Optional[str]:
+    if a is None and b is None:
+        return None
+    if a is None:
+        return "B"
+    if b is None:
+        return "A"
+    return "A" if float(a) <= float(b) else "B"
+
+
+def _forward_exit_results(p: PendingOutcome, close_price: Optional[float] = None) -> dict:
+    """Compute four exit policies from event order. Fees/slippage are deliberately excluded."""
+    if p.entry_touch_s is None:
+        return {}
+    entry = float(p.path_entry_price or p.entry_price or 0)
+    if entry <= 0:
+        return {}
+    tp1_ret = pct_change(float(p.target1), entry) if p.target1 else 0.0
+    tp2_ret = pct_change(float(p.target2), entry) if p.target2 else 0.0
+    stop_ret = pct_change(float(p.invalidation), entry) if p.invalidation else 0.0
+    runner_price = entry * (1.0 + float(FORWARD_RUNNER_TARGET_PCT) / 100.0)
+    runner_ret = pct_change(runner_price, entry)
+    mark_ret = pct_change(float(close_price), entry) if close_price else None
+    tp1_s, tp2_s, stop_s = p.tp1_hit_s, p.tp2_hit_s, p.invalidation_hit_s
+    be_s, runner_s = p.forward_be_hit_s, p.forward_runner5_hit_s
+
+    def unresolved():
+        return ("M2M60", mark_ret) if mark_ret is not None else ("OPEN", None)
+
+    if tp2_s is not None and (stop_s is None or float(tp2_s) < float(stop_s)):
+        current = ("TP2", tp2_ret)
+    elif stop_s is not None:
+        current = ("STOP", stop_ret)
+    else:
+        current = unresolved()
+
+    if stop_s is not None and (tp1_s is None or float(stop_s) < float(tp1_s)):
+        full_be = ("STOP", stop_ret)
+        partial = ("STOP", stop_ret)
+        runner = ("STOP", stop_ret)
+    elif tp1_s is not None:
+        next_be = be_s if be_s is not None and float(be_s) >= float(tp1_s) else None
+        next_tp2 = tp2_s if tp2_s is not None and float(tp2_s) >= float(tp1_s) else None
+        first = _forward_first(next_be, next_tp2)
+        if first == "B":
+            full_be = ("TP2", tp2_ret)
+            partial = ("TP1+TP2", 0.5 * tp1_ret + 0.5 * tp2_ret)
+            after_be = next_be if next_be is not None and float(next_be) >= float(next_tp2) else None
+            after_runner = runner_s if runner_s is not None and float(runner_s) >= float(next_tp2) else None
+            rfirst = _forward_first(after_be, after_runner)
+            if rfirst == "B":
+                runner = ("TP2+RUNNER5", 0.5 * tp2_ret + 0.5 * runner_ret)
+            elif rfirst == "A":
+                runner = ("TP2+BE", 0.5 * tp2_ret)
+            elif mark_ret is not None:
+                runner = ("TP2+M2M60", 0.5 * tp2_ret + 0.5 * mark_ret)
+            else:
+                runner = ("OPEN_AFTER_TP2", None)
+        elif first == "A":
+            full_be = ("BE", 0.0)
+            partial = ("TP1+BE", 0.5 * tp1_ret)
+            runner = ("BE_BEFORE_TP2", 0.0)
+        else:
+            if mark_ret is not None:
+                full_be = ("M2M60_AFTER_TP1", mark_ret)
+                partial = ("TP1+M2M60", 0.5 * tp1_ret + 0.5 * mark_ret)
+                runner = ("M2M60_BEFORE_TP2", mark_ret)
+            else:
+                full_be = partial = runner = ("OPEN_AFTER_TP1", None)
+    else:
+        full_be = unresolved()
+        partial = unresolved()
+        runner = unresolved()
+
+    return {
+        "entry": entry,
+        "current_outcome": current[0], "current_return_pct": current[1],
+        "full_be_outcome": full_be[0], "full_be_return_pct": full_be[1],
+        "partial50_be_outcome": partial[0], "partial50_be_return_pct": partial[1],
+        "tp2_runner50_outcome": runner[0], "tp2_runner50_return_pct": runner[1],
+    }
+
+
+def _save_forward_exit_shadow(p: PendingOutcome, close_price: Optional[float] = None, completed_60m: bool = False):
+    if not FORWARD_STRATEGY_SHADOW_ENABLED or p.entry_touch_s is None:
+        return
+    res = _forward_exit_results(p, close_price if completed_60m else None)
+    if not res:
+        return
+    conn = db_connect()
+    try:
+        conn.execute(
+            """INSERT INTO premium_exit_forward_shadow
+               (signal_id,entry_price,tp1_price,tp2_price,stop_price,be_hit_s,runner5_hit_s,runner_target_pct,
+                mfe_after_tp1,mae_after_tp1,mfe_after_tp2,mae_after_tp2,close60_price,completed_60m,
+                current_outcome,current_return_pct,full_be_outcome,full_be_return_pct,
+                partial50_be_outcome,partial50_be_return_pct,tp2_runner50_outcome,tp2_runner50_return_pct,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(signal_id) DO UPDATE SET
+                 entry_price=excluded.entry_price,tp1_price=excluded.tp1_price,tp2_price=excluded.tp2_price,stop_price=excluded.stop_price,
+                 be_hit_s=excluded.be_hit_s,runner5_hit_s=excluded.runner5_hit_s,runner_target_pct=excluded.runner_target_pct,
+                 mfe_after_tp1=excluded.mfe_after_tp1,mae_after_tp1=excluded.mae_after_tp1,
+                 mfe_after_tp2=excluded.mfe_after_tp2,mae_after_tp2=excluded.mae_after_tp2,
+                 close60_price=COALESCE(excluded.close60_price,premium_exit_forward_shadow.close60_price),
+                 completed_60m=MAX(premium_exit_forward_shadow.completed_60m,excluded.completed_60m),
+                 current_outcome=excluded.current_outcome,current_return_pct=excluded.current_return_pct,
+                 full_be_outcome=excluded.full_be_outcome,full_be_return_pct=excluded.full_be_return_pct,
+                 partial50_be_outcome=excluded.partial50_be_outcome,partial50_be_return_pct=excluded.partial50_be_return_pct,
+                 tp2_runner50_outcome=excluded.tp2_runner50_outcome,tp2_runner50_return_pct=excluded.tp2_runner50_return_pct,
+                 updated_ts=excluded.updated_ts""",
+            (p.signal_id,res["entry"],p.target1,p.target2,p.invalidation,p.forward_be_hit_s,p.forward_runner5_hit_s,
+             FORWARD_RUNNER_TARGET_PCT,p.forward_mfe_after_tp1,p.forward_mae_after_tp1,p.forward_mfe_after_tp2,p.forward_mae_after_tp2,
+             float(close_price) if completed_60m and close_price else None,int(bool(completed_60m)),
+             res["current_outcome"],res["current_return_pct"],res["full_be_outcome"],res["full_be_return_pct"],
+             res["partial50_be_outcome"],res["partial50_be_return_pct"],res["tp2_runner50_outcome"],res["tp2_runner50_return_pct"],int(time.time()))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _save_delayed_shadow(p: PendingOutcome, strategy: str, sh: dict, close_price: Optional[float] = None, completed_60m: bool = False):
+    if not FORWARD_STRATEGY_SHADOW_ENABLED:
+        return
+    entry = float(sh.get("entry_price") or 0)
+    current_outcome = be_outcome = None
+    current_ret = be_ret = None
+    if entry > 0:
+        tp2_ret = pct_change(float(sh.get("tp2") or 0), entry) if sh.get("tp2") else 0.0
+        stop_ret = pct_change(float(sh.get("stop") or 0), entry) if sh.get("stop") else 0.0
+        mark_ret = pct_change(float(close_price), entry) if completed_60m and close_price else None
+        tp1_s,tp2_s,stop_s,be_s = sh.get("tp1_hit_s"),sh.get("tp2_hit_s"),sh.get("stop_hit_s"),sh.get("be_hit_s")
+        if tp2_s is not None and (stop_s is None or float(tp2_s) < float(stop_s)):
+            current_outcome,current_ret="TP2",tp2_ret
+        elif stop_s is not None:
+            current_outcome,current_ret="STOP",stop_ret
+        elif mark_ret is not None:
+            current_outcome,current_ret="M2M60",mark_ret
+        else:
+            current_outcome="OPEN"
+        if stop_s is not None and (tp1_s is None or float(stop_s) < float(tp1_s)):
+            be_outcome,be_ret="STOP",stop_ret
+        elif tp1_s is not None:
+            b = be_s if be_s is not None and float(be_s) >= float(tp1_s) else None
+            t = tp2_s if tp2_s is not None and float(tp2_s) >= float(tp1_s) else None
+            first=_forward_first(b,t)
+            if first=="B": be_outcome,be_ret="TP2",tp2_ret
+            elif first=="A": be_outcome,be_ret="BE",0.0
+            elif mark_ret is not None: be_outcome,be_ret="M2M60_AFTER_TP1",mark_ret
+            else: be_outcome="OPEN_AFTER_TP1"
+        elif mark_ret is not None:
+            be_outcome,be_ret="M2M60",mark_ret
+        else:
+            be_outcome="OPEN"
+    conn=db_connect()
+    try:
+        conn.execute(
+            """INSERT INTO premium_delayed_entry_shadow
+               (signal_id,strategy,source_status,decision,horizon_ms,pullback_s,entry_age_s,entry_price,stop_price,tp1_price,tp2_price,
+                tp1_hit_s,tp2_hit_s,stop_hit_s,be_hit_s,mfe_pct,mae_pct,close60_price,completed_60m,
+                current_outcome,current_return_pct,be_outcome,be_return_pct,no_entry_reason,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(signal_id,strategy) DO UPDATE SET
+                 source_status=excluded.source_status,decision=excluded.decision,horizon_ms=excluded.horizon_ms,
+                 pullback_s=excluded.pullback_s,entry_age_s=excluded.entry_age_s,entry_price=excluded.entry_price,
+                 stop_price=excluded.stop_price,tp1_price=excluded.tp1_price,tp2_price=excluded.tp2_price,
+                 tp1_hit_s=excluded.tp1_hit_s,tp2_hit_s=excluded.tp2_hit_s,stop_hit_s=excluded.stop_hit_s,be_hit_s=excluded.be_hit_s,
+                 mfe_pct=excluded.mfe_pct,mae_pct=excluded.mae_pct,
+                 close60_price=COALESCE(excluded.close60_price,premium_delayed_entry_shadow.close60_price),
+                 completed_60m=MAX(premium_delayed_entry_shadow.completed_60m,excluded.completed_60m),
+                 current_outcome=excluded.current_outcome,current_return_pct=excluded.current_return_pct,
+                 be_outcome=excluded.be_outcome,be_return_pct=excluded.be_return_pct,
+                 no_entry_reason=excluded.no_entry_reason,updated_ts=excluded.updated_ts""",
+            (p.signal_id,strategy,p.execution_status_at_signal,sh.get("decision"),sh.get("horizon_ms"),sh.get("pullback_s"),
+             sh.get("entry_age_s"),sh.get("entry_price"),sh.get("stop"),sh.get("tp1"),sh.get("tp2"),
+             sh.get("tp1_hit_s"),sh.get("tp2_hit_s"),sh.get("stop_hit_s"),sh.get("be_hit_s"),
+             float(sh.get("mfe") or 0),float(sh.get("mae") or 0),float(close_price) if completed_60m and close_price else None,
+             int(bool(completed_60m)),current_outcome,current_ret,be_outcome,be_ret,sh.get("no_entry_reason"),int(time.time()))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _arm_delayed_shadow(p: PendingOutcome, strategy: str, age_s: float, price: float, decision: str,
+                        horizon_ms: Optional[int] = None, pullback_s: Optional[float] = None):
+    if not FORWARD_STRATEGY_SHADOW_ENABLED or not price or price <= 0:
+        return
+    sh=p.delayed_shadows.get(strategy) or {}
+    if sh.get("entry_price"):
+        return
+    lv=_forward_translated_levels(p,float(price))
+    sh.update({"decision":decision,"horizon_ms":horizon_ms,"pullback_s":pullback_s,"entry_age_s":float(age_s),"entry_price":float(price),
+               "stop":lv["stop"],"tp1":lv["tp1"],"tp2":lv["tp2"],"tp1_hit_s":None,"tp2_hit_s":None,"stop_hit_s":None,"be_hit_s":None,
+               "mfe":0.0,"mae":0.0,"no_entry_reason":None})
+    p.delayed_shadows[strategy]=sh
+    _save_delayed_shadow(p,strategy,sh)
+
+
+def _update_forward_strategy_shadows(p: PendingOutcome, price: float, age: float, completed_60m: bool = False):
+    """Forward-only event logger for exit policies, WAIT_RECLAIM and Gate V2.1 delayed entries."""
+    if not FORWARD_STRATEGY_SHADOW_ENABLED:
+        return
+    changed_exit=False
+    if p.entry_touch_s is not None:
+        entry=float(p.path_entry_price or p.entry_price or 0)
+        if entry > 0:
+            if p.tp1_hit_s is not None and age >= float(p.tp1_hit_s):
+                r=pct_change(price,entry)
+                p.forward_mfe_after_tp1=max(p.forward_mfe_after_tp1,r)
+                p.forward_mae_after_tp1=min(p.forward_mae_after_tp1,r)
+                if p.forward_be_hit_s is None and age > float(p.tp1_hit_s) and price <= entry:
+                    p.forward_be_hit_s=age; changed_exit=True
+            if p.tp2_hit_s is not None and age >= float(p.tp2_hit_s):
+                r=pct_change(price,entry)
+                p.forward_mfe_after_tp2=max(p.forward_mfe_after_tp2,r)
+                p.forward_mae_after_tp2=min(p.forward_mae_after_tp2,r)
+                runner_price=entry*(1.0+float(FORWARD_RUNNER_TARGET_PCT)/100.0)
+                if p.forward_runner5_hit_s is None and age >= float(p.tp2_hit_s) and price >= runner_price:
+                    p.forward_runner5_hit_s=age; changed_exit=True
+            if changed_exit or completed_60m:
+                _save_forward_exit_shadow(p,price if completed_60m else None,completed_60m)
+
+    if WAIT_RECLAIM_FORWARD_ENABLED and p.execution_status_at_signal == "WAIT_RECLAIM":
+        sh=p.delayed_shadows.get("WAIT_RECLAIM")
+        if sh is None:
+            sh={"decision":"WAIT_PULLBACK_RECLAIM","horizon_ms":None,"pullback_s":None,"entry_age_s":None,"entry_price":None,
+                "stop":None,"tp1":None,"tp2":None,"tp1_hit_s":None,"tp2_hit_s":None,"stop_hit_s":None,"be_hit_s":None,
+                "mfe":0.0,"mae":0.0,"no_entry_reason":None}
+            p.delayed_shadows["WAIT_RECLAIM"]=sh
+        if not sh.get("entry_price") and not sh.get("no_entry_reason"):
+            if age <= WAIT_RECLAIM_MAX_DELAY_S:
+                if sh.get("pullback_s") is None and p.entry_high and price <= p.entry_high and (not p.invalidation or price > p.invalidation):
+                    sh["pullback_s"]=float(age); _save_delayed_shadow(p,"WAIT_RECLAIM",sh)
+                elif sh.get("pullback_s") is not None and age > float(sh["pullback_s"]) and price >= p.entry_high and (not p.invalidation or price > p.invalidation):
+                    _arm_delayed_shadow(p,"WAIT_RECLAIM",age,price,"PULLBACK_THEN_RECLAIM",pullback_s=float(sh["pullback_s"]))
+                    sh=p.delayed_shadows["WAIT_RECLAIM"]
+            else:
+                sh["no_entry_reason"]="NO_RECLAIM_WITHIN_WINDOW"; _save_delayed_shadow(p,"WAIT_RECLAIM",sh)
+
+    for strategy,sh in list(p.delayed_shadows.items()):
+        entry=float(sh.get("entry_price") or 0)
+        if entry <= 0:
+            if completed_60m:
+                _save_delayed_shadow(p,strategy,sh,price,True)
+            continue
+        if age < float(sh.get("entry_age_s") or 0):
+            continue
+        r=pct_change(price,entry)
+        sh["mfe"]=max(float(sh.get("mfe") or 0),r)
+        sh["mae"]=min(float(sh.get("mae") or 0),r)
+        changed=False
+        if sh.get("tp1") and sh.get("tp1_hit_s") is None and price >= float(sh["tp1"]): sh["tp1_hit_s"]=age; changed=True
+        if sh.get("tp2") and sh.get("tp2_hit_s") is None and price >= float(sh["tp2"]): sh["tp2_hit_s"]=age; changed=True
+        if sh.get("stop") and sh.get("stop_hit_s") is None and price <= float(sh["stop"]): sh["stop_hit_s"]=age; changed=True
+        if sh.get("tp1_hit_s") is not None and sh.get("be_hit_s") is None and age > float(sh["tp1_hit_s"]) and price <= entry:
+            sh["be_hit_s"]=age; changed=True
+        if changed or completed_60m:
+            _save_delayed_shadow(p,strategy,sh,price if completed_60m else None,completed_60m)
+
+
+def _arm_gate_v21_forward_shadow(signal_id: int, decision: Optional[str], horizon_ms: Optional[int]):
+    if not FORWARD_STRATEGY_SHADOW_ENABLED or decision not in ("EARLY_ALLOW_15","ALLOW_30") or not horizon_ms:
+        return
+    p=next((x for x in pending_outcomes if x.signal_id==signal_id),None)
+    if not p or (p.delayed_shadows.get("GATE_V21") or {}).get("entry_price"):
+        return
+    conn=db_connect()
+    try:
+        row=conn.execute("SELECT last_price FROM premium_micro_snapshots WHERE signal_id=? AND horizon_ms=?",(signal_id,int(horizon_ms))).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return
+    _arm_delayed_shadow(p,"GATE_V21",float(horizon_ms)/1000.0,float(row[0]),str(decision),int(horizon_ms))
 
 
 def save_signal_path(p: PendingOutcome, completed_60m: bool = False):
@@ -3584,6 +3923,8 @@ def update_pending_tick(symbol: str, price: float, tick_ts: float):
                 p.first_event = p.first_event or "INVALIDATION"
                 path_changed = True
 
+        _update_forward_strategy_shadows(p, price, age, completed_60m=False)
+
         # V5.11: true post-gate path, measured from the 15s counterfactual gate price.
         # This is what prevents us from mistaking pre-gate winners for evidence that delayed entry works.
         if p.gate_shadow_finalized and p.gate_shadow_price and tick_ts >= p.gate_shadow_ts:
@@ -3704,9 +4045,17 @@ def recover_pending_tracking():
                 target1=float(r[8] or 0),target2=float(r[9] or 0),invalidation=float(r[10] or 0),target_before_entry_s=r[11],
                 tp1_hit_s=r[12],tp2_hit_s=r[13],invalidation_hit_s=r[14],first_event=r[15],
                 mfe_before_tp1=float(r[16] or 0),mae_before_tp1=float(r[17] or 0),trade_mfe=float(r[18] or 0),trade_mae=float(r[19] or 0))
-            ctx=conn.execute("SELECT signal_generated_ts_ms,breakout_reference_price FROM premium_context WHERE signal_id=?",(sid,)).fetchone()
+            ctx=conn.execute("SELECT signal_generated_ts_ms,breakout_reference_price,execution_status FROM premium_context WHERE signal_id=?",(sid,)).fetchone()
             p.signal_generated_ts_ms=int((ctx[0] if ctx and ctx[0] else int(float(ts)*1000)))
             p.breakout_reference_price=float((ctx[1] if ctx and ctx[1] else 0) or 0)
+            p.execution_status_at_signal=str((ctx[2] if ctx and len(ctx)>2 and ctx[2] else "UNKNOWN"))
+            fx=conn.execute("SELECT be_hit_s,runner5_hit_s,mfe_after_tp1,mae_after_tp1,mfe_after_tp2,mae_after_tp2 FROM premium_exit_forward_shadow WHERE signal_id=?",(sid,)).fetchone()
+            if fx:
+                p.forward_be_hit_s=fx[0]; p.forward_runner5_hit_s=fx[1]
+                p.forward_mfe_after_tp1=float(fx[2] or 0); p.forward_mae_after_tp1=float(fx[3] or 0)
+                p.forward_mfe_after_tp2=float(fx[4] or 0); p.forward_mae_after_tp2=float(fx[5] or 0)
+            for ds in conn.execute("""SELECT strategy,decision,horizon_ms,pullback_s,entry_age_s,entry_price,stop_price,tp1_price,tp2_price,tp1_hit_s,tp2_hit_s,stop_hit_s,be_hit_s,mfe_pct,mae_pct,no_entry_reason FROM premium_delayed_entry_shadow WHERE signal_id=? AND completed_60m=0""",(sid,)).fetchall():
+                p.delayed_shadows[str(ds[0])]={"decision":ds[1],"horizon_ms":ds[2],"pullback_s":ds[3],"entry_age_s":ds[4],"entry_price":ds[5],"stop":ds[6],"tp1":ds[7],"tp2":ds[8],"tp1_hit_s":ds[9],"tp2_hit_s":ds[10],"stop_hit_s":ds[11],"be_hit_s":ds[12],"mfe":float(ds[13] or 0),"mae":float(ds[14] or 0),"no_entry_reason":ds[15]}
             p.micro_completed={int(x[0]) for x in conn.execute("SELECT horizon_ms FROM premium_micro_snapshots WHERE signal_id=?",(sid,)).fetchall()}
             p.liquidity_completed={int(x[0]) for x in conn.execute("SELECT horizon_ms FROM premium_liquidity_snapshots WHERE signal_id=?",(sid,)).fetchall()}
             p.progress_finalized=bool(conn.execute("SELECT 1 FROM premium_progress_validation WHERE signal_id=?",(sid,)).fetchone())
@@ -5018,6 +5367,7 @@ async def evaluate(session, symbol: str):
         )
         po.signal_generated_ts_ms = int(m["signal_generated_ts_ms"])
         po.breakout_reference_price = float(m.get("breakout_reference_price") or 0.0)
+        po.execution_status_at_signal = str((m.get("execution") or {}).get("status") or "UNKNOWN")
         po.peak_price = m["price"]
         po.acceptance_peak_price = m["price"]
         po.acceptance_last_ts = signal_generated_ts
@@ -5414,6 +5764,8 @@ async def outcome_loop(session):
             if path_changed:
                 save_signal_path(p)
 
+            _update_forward_strategy_shadows(p, price, age, completed_60m=False)
+
             t2_ret = pct_change(p.target2, p.entry_price) if p.target2 else CONTINUATION_MIN_MFE_PCT
             continuation_trigger = max(CONTINUATION_MIN_MFE_PCT, t2_ret)
             if CONTINUATION_ALERT_ENABLED and not p.continuation_sent and age <= 1800 and p.mfe >= continuation_trigger:
@@ -5446,6 +5798,7 @@ async def outcome_loop(session):
                 save_wave_tracking(p, max(0.0, -pct_change(price, p.peak_price or price)), completed_60m=True)
                 if p.gate_shadow_finalized:
                     save_gate_shadow_path(p, completed_60m=1)
+                _update_forward_strategy_shadows(p, price, age, completed_60m=True)
                 remove.append(p)
         for p in remove:
             if p in pending_outcomes:
@@ -6615,6 +6968,7 @@ async def telegram_command_loop(session):
                         f"🚦 Post-Premium Failure Risk: {'açık' if POST_PREMIUM_RISK_ENABLED else 'kapalı'} | 15/30sn liquidity + 60sn progress | PUBLIC ALERT YOK\n"
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
                         f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"                        f"🧪 Gate V2.1 15/30sn: {'açık' if EXECUTION_GATE_V21_SHADOW_ENABLED else 'kapalı'} | PASS+POSITIVE+SUPPORTIVE / NEGATIVE+HOSTILE | SHADOW\n"
+                        f"🧪 Forward strateji audit: {'açık' if FORWARD_STRATEGY_SHADOW_ENABLED else 'kapalı'} | TP1→BE + TP2→%50/+%{FORWARD_RUNNER_TARGET_PCT:g} + WAIT_RECLAIM + Gate V2.1 gecikmeli fill | SHADOW\n"
 
                         f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | LIVE kilidi {'AÇIK' if AUTO_TRADE_LIVE_ALLOWED else 'KAPALI'}\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
