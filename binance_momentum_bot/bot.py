@@ -29,8 +29,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.13.2"
-RESEARCH_LOGIC_VERSION = "v5132-forward-exit-delayed-entry-shadow"
+BOT_VERSION = "5.13.3"
+RESEARCH_LOGIC_VERSION = "v5133-stage-entry-secondary60-policy-shadow"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -245,6 +245,19 @@ FORWARD_RUNNER_TARGET_PCT = float(os.getenv("FORWARD_RUNNER_TARGET_PCT", "5.0"))
 WAIT_RECLAIM_FORWARD_ENABLED = os.getenv("WAIT_RECLAIM_FORWARD_ENABLED", "1").strip() not in ("0", "false", "False")
 WAIT_RECLAIM_MAX_DELAY_S = int(os.getenv("WAIT_RECLAIM_MAX_DELAY_S", "180"))
 FORWARD_STRATEGY_HORIZON_S = int(os.getenv("FORWARD_STRATEGY_HORIZON_S", "3600"))
+
+# V5.13.3: stage-entry + exit-policy forward cohorts. SHADOW ONLY.
+# Purpose: separate late discovery, bad selection and exit-management problems without touching production.
+STAGE_ENTRY_FORWARD_ENABLED = os.getenv("STAGE_ENTRY_FORWARD_ENABLED", "1").strip() not in ("0", "false", "False")
+STAGE_ENTRY_HORIZON_S = int(os.getenv("STAGE_ENTRY_HORIZON_S", "3600"))
+SECONDARY_60_FORWARD_ENABLED = os.getenv("SECONDARY_60_FORWARD_ENABLED", "1").strip() not in ("0", "false", "False")
+FORWARD_FEE_ROUNDTRIP_PCT = float(os.getenv("FORWARD_FEE_ROUNDTRIP_PCT", "0.10"))
+FORWARD_BE_BUFFER_10_PCT = float(os.getenv("FORWARD_BE_BUFFER_10_PCT", "0.10"))
+FORWARD_BE_BUFFER_15_PCT = float(os.getenv("FORWARD_BE_BUFFER_15_PCT", "0.15"))
+FORWARD_LATE_RUNNER_25_ACTIVATE_PCT = float(os.getenv("FORWARD_LATE_RUNNER_25_ACTIVATE_PCT", "2.50"))
+FORWARD_LATE_RUNNER_25_TRAIL_PCT = float(os.getenv("FORWARD_LATE_RUNNER_25_TRAIL_PCT", "1.00"))
+FORWARD_LATE_RUNNER_30_ACTIVATE_PCT = float(os.getenv("FORWARD_LATE_RUNNER_30_ACTIVATE_PCT", "3.00"))
+FORWARD_LATE_RUNNER_30_TRAIL_PCT = float(os.getenv("FORWARD_LATE_RUNNER_30_TRAIL_PCT", "1.25"))
 
 # V5.13: AutoTrade execution infrastructure. SAFE BY DEFAULT.
 # LIVE can never start automatically after a deploy/restart. The default path is OFF -> DRY -> explicit LIVE confirmation.
@@ -513,6 +526,39 @@ class PendingShadowEvent:
     completed: set = field(default_factory=set)
 
 
+@dataclass
+class PendingStageEntry:
+    row_id: int
+    symbol: str
+    stage: str
+    episode_id: int
+    entry_price: float
+    created_ts: float
+    stop_price: float
+    tp1_price: float
+    tp2_price: float
+    signal_id: Optional[int] = None
+    decision: str = ""
+    entry_age_s: Optional[float] = None
+    tp1_hit_s: Optional[float] = None
+    tp2_hit_s: Optional[float] = None
+    stop_hit_s: Optional[float] = None
+    be0_hit_s: Optional[float] = None
+    be10_hit_s: Optional[float] = None
+    be15_hit_s: Optional[float] = None
+    mfe: float = 0.0
+    mae: float = 0.0
+    runner25_active_s: Optional[float] = None
+    runner25_peak: float = 0.0
+    runner25_exit_s: Optional[float] = None
+    runner25_exit_price: Optional[float] = None
+    runner30_active_s: Optional[float] = None
+    runner30_peak: float = 0.0
+    runner30_exit_s: Optional[float] = None
+    runner30_exit_price: Optional[float] = None
+    completed_60m: bool = False
+
+
 states: Dict[str, SymbolState] = defaultdict(SymbolState)
 symbols: List[str] = []
 stop_event = asyncio.Event()
@@ -521,6 +567,7 @@ pending_radars: List[PendingRadar] = []
 pending_gainers: List[PendingGainer] = []
 pending_research: List[PendingResearch] = []
 pending_shadow_events: List[PendingShadowEvent] = []
+pending_stage_entries: List[PendingStageEntry] = []
 stream_health = {
     "ticker": 0.0,
     "book": 0.0,
@@ -1246,6 +1293,31 @@ def init_db():
            )"""
     )
 
+    # V5.13.3 unified stage-entry / policy cohort. SHADOW ONLY.
+    # It tracks CANDIDATE, EARLY, PREMIUM, GATE15/30 and SECONDARY60 with true forward event order.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               symbol TEXT NOT NULL, episode_id INTEGER, stage TEXT NOT NULL, signal_id INTEGER,
+               decision TEXT, created_ts_ms INTEGER NOT NULL, entry_age_s REAL, entry_price REAL NOT NULL,
+               stop_price REAL, tp1_price REAL, tp2_price REAL,
+               tp1_hit_s REAL, tp2_hit_s REAL, stop_hit_s REAL,
+               be0_hit_s REAL, be10_hit_s REAL, be15_hit_s REAL,
+               mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+               runner25_active_s REAL, runner25_exit_s REAL, runner25_exit_price REAL, runner25_peak REAL,
+               runner30_active_s REAL, runner30_exit_s REAL, runner30_exit_price REAL, runner30_peak REAL,
+               became_premium INTEGER DEFAULT 0, close60_price REAL, completed_60m INTEGER DEFAULT 0,
+               current_outcome TEXT, current_return_pct REAL,
+               be0_outcome TEXT, be0_return_pct REAL, be10_outcome TEXT, be10_return_pct REAL, be15_outcome TEXT, be15_return_pct REAL,
+               late25_outcome TEXT, late25_return_pct REAL, late30_outcome TEXT, late30_return_pct REAL,
+               fee_adjusted_current_pct REAL, fee_adjusted_be0_pct REAL, fee_adjusted_be10_pct REAL, fee_adjusted_be15_pct REAL,
+               fee_adjusted_late25_pct REAL, fee_adjusted_late30_pct REAL,
+               updated_ts INTEGER NOT NULL
+           )"""
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stage_shadow_symbol_episode ON entry_stage_forward_shadow(symbol,episode_id,stage)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stage_shadow_signal ON entry_stage_forward_shadow(signal_id,stage)")
+
     # V5.13 AutoTrade persistence. These tables are independent from scanner/research tables.
     conn.execute(
         """CREATE TABLE IF NOT EXISTS autotrade_settings (
@@ -1339,7 +1411,7 @@ def init_db():
            (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
            VALUES (?,?,?,?,?,?)""",
         (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
-         "V5.13 safe AutoTrade infra: OFF/DRY/LIVE, Telegram controls, risk locks, manual-position isolation; scanner + V5.12 research logic unchanged",int(time.time())),
+         "V5.13.3 shadow research: Candidate/Early/Premium/Gate/Secondary60 stage cohorts + BE buffers + late runner + fee-adjusted outcomes; production scanner/AutoTrade execution unchanged",int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -2215,6 +2287,7 @@ def maybe_finalize_execution_composite(signal_id: int, finalized_ts_ms: Optional
         conn.commit()
     finally:
         conn.close()
+    _maybe_arm_secondary_60(signal_id, p)
     maybe_finalize_execution_gate_v2(signal_id, finalized_ts_ms)
 
 
@@ -2905,6 +2978,276 @@ def _forward_first(a: Optional[float], b: Optional[float]) -> Optional[str]:
     return "A" if float(a) <= float(b) else "B"
 
 
+def _stage_levels_from_plan(plan: dict, fill: float) -> dict:
+    """Translate the contemporaneous plan geometry to the actual shadow fill. Research only."""
+    base = float(plan.get("entry_mid") or ((float(plan.get("entry_low") or fill) + float(plan.get("entry_high") or fill)) / 2.0))
+    base = max(base, 1e-12)
+    stop_pct = max(0.05, abs((float(plan.get("invalidation") or base * 0.9935) / base - 1.0) * 100.0))
+    tp1_pct = max(0.05, (float(plan.get("target1") or base * 1.0065) / base - 1.0) * 100.0)
+    tp2_pct = max(tp1_pct, (float(plan.get("target2") or base * 1.0120) / base - 1.0) * 100.0)
+    return {"stop": fill * (1.0 - stop_pct / 100.0), "tp1": fill * (1.0 + tp1_pct / 100.0), "tp2": fill * (1.0 + tp2_pct / 100.0)}
+
+
+def _stage_policy_results(x: PendingStageEntry, close_price: Optional[float] = None) -> dict:
+    """Event-order results for one entry-stage cohort. All returns are unlevered percentages."""
+    entry = float(x.entry_price or 0)
+    if entry <= 0:
+        return {}
+    stop_ret = pct_change(x.stop_price, entry) if x.stop_price else -0.65
+    tp1_ret = pct_change(x.tp1_price, entry) if x.tp1_price else 0.65
+    tp2_ret = pct_change(x.tp2_price, entry) if x.tp2_price else 1.20
+    mark_ret = pct_change(float(close_price), entry) if close_price else None
+
+    def unresolved():
+        return ("M2M60", mark_ret) if mark_ret is not None else ("OPEN", None)
+
+    # Legacy current policy.
+    if x.tp2_hit_s is not None and (x.stop_hit_s is None or float(x.tp2_hit_s) < float(x.stop_hit_s)):
+        current = ("TP2", tp2_ret)
+    elif x.stop_hit_s is not None:
+        current = ("STOP", stop_ret)
+    else:
+        current = unresolved()
+
+    def buffered_policy(hit_s: Optional[float], buffer_pct: float):
+        if x.stop_hit_s is not None and (x.tp1_hit_s is None or float(x.stop_hit_s) < float(x.tp1_hit_s)):
+            return ("STOP", stop_ret)
+        if x.tp1_hit_s is None:
+            return unresolved()
+        b = hit_s if hit_s is not None and float(hit_s) >= float(x.tp1_hit_s) else None
+        t = x.tp2_hit_s if x.tp2_hit_s is not None and float(x.tp2_hit_s) >= float(x.tp1_hit_s) else None
+        first = _forward_first(b, t)
+        if first == "B":
+            return ("TP2", tp2_ret)
+        if first == "A":
+            return ("BE" if buffer_pct == 0 else f"BE_MINUS_{buffer_pct:.2f}", -float(buffer_pct))
+        if mark_ret is not None:
+            return ("M2M60_AFTER_TP1", mark_ret)
+        return ("OPEN_AFTER_TP1", None)
+
+    be0 = buffered_policy(x.be0_hit_s, 0.0)
+    be10 = buffered_policy(x.be10_hit_s, float(FORWARD_BE_BUFFER_10_PCT))
+    be15 = buffered_policy(x.be15_hit_s, float(FORWARD_BE_BUFFER_15_PCT))
+
+    def late_runner(exit_s: Optional[float], exit_price: Optional[float], label: str):
+        # This policy uses BE0 protection after TP1, realizes 50% at TP2, then runs the rest.
+        if x.stop_hit_s is not None and (x.tp1_hit_s is None or float(x.stop_hit_s) < float(x.tp1_hit_s)):
+            return ("STOP", stop_ret)
+        if x.tp1_hit_s is None:
+            return unresolved()
+        b_before_tp2 = x.be0_hit_s if x.be0_hit_s is not None and (x.tp2_hit_s is None or float(x.be0_hit_s) < float(x.tp2_hit_s)) else None
+        if b_before_tp2 is not None:
+            return ("BE_BEFORE_TP2", 0.0)
+        if x.tp2_hit_s is None:
+            if mark_ret is not None:
+                return ("M2M60_BEFORE_TP2", mark_ret)
+            return ("OPEN_BEFORE_TP2", None)
+        # After TP2, remaining half has BE floor and optional delayed trailing exit.
+        be_after = x.be0_hit_s if x.be0_hit_s is not None and float(x.be0_hit_s) >= float(x.tp2_hit_s) else None
+        trail_after = exit_s if exit_s is not None and float(exit_s) >= float(x.tp2_hit_s) else None
+        first = _forward_first(be_after, trail_after)
+        if first == "B" and exit_price:
+            rr = pct_change(float(exit_price), entry)
+            return (f"TP2+{label}", 0.5 * tp2_ret + 0.5 * rr)
+        if first == "A":
+            return ("TP2+BE", 0.5 * tp2_ret)
+        if mark_ret is not None:
+            return ("TP2+M2M60", 0.5 * tp2_ret + 0.5 * mark_ret)
+        return ("OPEN_AFTER_TP2", None)
+
+    late25 = late_runner(x.runner25_exit_s, x.runner25_exit_price, "LATE25_TRAIL")
+    late30 = late_runner(x.runner30_exit_s, x.runner30_exit_price, "LATE30_TRAIL")
+
+    def fee_adj(v):
+        return (float(v) - float(FORWARD_FEE_ROUNDTRIP_PCT)) if v is not None else None
+
+    return {
+        "current": current, "be0": be0, "be10": be10, "be15": be15, "late25": late25, "late30": late30,
+        "fee_current": fee_adj(current[1]), "fee_be0": fee_adj(be0[1]), "fee_be10": fee_adj(be10[1]),
+        "fee_be15": fee_adj(be15[1]), "fee_late25": fee_adj(late25[1]), "fee_late30": fee_adj(late30[1]),
+    }
+
+
+def _save_stage_entry(x: PendingStageEntry, close_price: Optional[float] = None, completed_60m: bool = False):
+    if not STAGE_ENTRY_FORWARD_ENABLED:
+        return
+    res = _stage_policy_results(x, close_price if completed_60m else None)
+    if not res:
+        return
+    conn = db_connect()
+    try:
+        conn.execute(
+            """UPDATE entry_stage_forward_shadow SET
+               signal_id=?,decision=?,entry_age_s=?,tp1_hit_s=?,tp2_hit_s=?,stop_hit_s=?,be0_hit_s=?,be10_hit_s=?,be15_hit_s=?,
+               mfe_pct=?,mae_pct=?,runner25_active_s=?,runner25_exit_s=?,runner25_exit_price=?,runner25_peak=?,
+               runner30_active_s=?,runner30_exit_s=?,runner30_exit_price=?,runner30_peak=?,became_premium=?,
+               close60_price=COALESCE(?,close60_price),completed_60m=MAX(completed_60m,?),
+               current_outcome=?,current_return_pct=?,be0_outcome=?,be0_return_pct=?,be10_outcome=?,be10_return_pct=?,be15_outcome=?,be15_return_pct=?,
+               late25_outcome=?,late25_return_pct=?,late30_outcome=?,late30_return_pct=?,
+               fee_adjusted_current_pct=?,fee_adjusted_be0_pct=?,fee_adjusted_be10_pct=?,fee_adjusted_be15_pct=?,fee_adjusted_late25_pct=?,fee_adjusted_late30_pct=?,updated_ts=?
+               WHERE id=?""",
+            (x.signal_id,x.decision,x.entry_age_s,x.tp1_hit_s,x.tp2_hit_s,x.stop_hit_s,x.be0_hit_s,x.be10_hit_s,x.be15_hit_s,
+             x.mfe,x.mae,x.runner25_active_s,x.runner25_exit_s,x.runner25_exit_price,x.runner25_peak,
+             x.runner30_active_s,x.runner30_exit_s,x.runner30_exit_price,x.runner30_peak,int(bool(x.signal_id)),
+             float(close_price) if completed_60m and close_price else None,int(bool(completed_60m)),
+             res["current"][0],res["current"][1],res["be0"][0],res["be0"][1],res["be10"][0],res["be10"][1],res["be15"][0],res["be15"][1],
+             res["late25"][0],res["late25"][1],res["late30"][0],res["late30"][1],
+             res["fee_current"],res["fee_be0"],res["fee_be10"],res["fee_be15"],res["fee_late25"],res["fee_late30"],int(time.time()),x.row_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _stage_exists(symbol: str, episode_id: int, stage: str, signal_id: Optional[int] = None) -> bool:
+    conn = db_connect()
+    try:
+        if signal_id is not None:
+            row = conn.execute("SELECT 1 FROM entry_stage_forward_shadow WHERE signal_id=? AND stage=? LIMIT 1",(int(signal_id),stage)).fetchone()
+        else:
+            row = conn.execute("SELECT 1 FROM entry_stage_forward_shadow WHERE symbol=? AND episode_id=? AND stage=? LIMIT 1",(symbol,int(episode_id or 0),stage)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _arm_stage_entry(symbol: str, stage: str, m: dict, episode_id: int, created_ts: Optional[float] = None,
+                     signal_id: Optional[int] = None, decision: str = "", entry_age_s: Optional[float] = None,
+                     entry_price: Optional[float] = None, levels: Optional[dict] = None):
+    """Create a true forward entry cohort at the moment the stage becomes observable."""
+    if not STAGE_ENTRY_FORWARD_ENABLED:
+        return None
+    created = float(created_ts if created_ts is not None else time.time())
+    fill = float(entry_price or m.get("price") or 0)
+    if fill <= 0:
+        return None
+    if _stage_exists(symbol, int(episode_id or 0), stage, signal_id=signal_id if stage not in ("CANDIDATE","EARLY") else None):
+        return None
+    if levels is None:
+        try:
+            plan = estimate_trade_plan(symbol, m)
+            levels = _stage_levels_from_plan(plan, fill)
+        except Exception as e:
+            log.debug("stage plan failed %s %s: %r",symbol,stage,e)
+            return None
+    conn=db_connect()
+    try:
+        cur=conn.execute(
+            """INSERT INTO entry_stage_forward_shadow
+               (symbol,episode_id,stage,signal_id,decision,created_ts_ms,entry_age_s,entry_price,stop_price,tp1_price,tp2_price,became_premium,updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (symbol,int(episode_id or 0),stage,signal_id,decision,int(created*1000),entry_age_s,fill,levels.get("stop"),levels.get("tp1"),levels.get("tp2"),int(bool(signal_id)),int(time.time()))
+        )
+        rid=int(cur.lastrowid); conn.commit()
+    finally:
+        conn.close()
+    obj=PendingStageEntry(rid,symbol,stage,int(episode_id or 0),fill,created,float(levels.get("stop") or 0),float(levels.get("tp1") or 0),float(levels.get("tp2") or 0),
+                          signal_id=signal_id,decision=decision,entry_age_s=entry_age_s)
+    pending_stage_entries.append(obj)
+    return obj
+
+
+def _arm_stage_from_pending(p: PendingOutcome, stage: str, age_s: float, price: float, decision: str):
+    if not STAGE_ENTRY_FORWARD_ENABLED or not price or price <= 0:
+        return None
+    levels=_forward_translated_levels(p,float(price))
+    episode_id=0
+    conn=db_connect()
+    try:
+        r=conn.execute("SELECT episode_id FROM candidate_events WHERE symbol=? AND event='premium_signal' AND ts BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
+                       (p.symbol,int(p.created_ts)-2,int(p.created_ts)+2)).fetchone()
+        episode_id=int(r[0] or 0) if r else 0
+    finally:
+        conn.close()
+    return _arm_stage_entry(p.symbol,stage,{"price":price},episode_id,created_ts=p.created_ts+float(age_s),signal_id=p.signal_id,
+                            decision=decision,entry_age_s=float(age_s),entry_price=float(price),levels=levels)
+
+
+def _link_stage_entries_to_premium(symbol: str, episode_id: int, signal_id: int):
+    """Label earlier CANDIDATE/EARLY cohorts that actually matured into this Premium."""
+    if not STAGE_ENTRY_FORWARD_ENABLED:
+        return
+    conn=db_connect()
+    try:
+        conn.execute("UPDATE entry_stage_forward_shadow SET signal_id=?,became_premium=1,updated_ts=? WHERE symbol=? AND episode_id=? AND stage IN ('CANDIDATE','EARLY') AND signal_id IS NULL",
+                     (int(signal_id),int(time.time()),symbol,int(episode_id or 0)))
+        conn.commit()
+    finally:
+        conn.close()
+    for x in pending_stage_entries:
+        if x.symbol==symbol and int(x.episode_id or 0)==int(episode_id or 0) and x.stage in ("CANDIDATE","EARLY") and x.signal_id is None:
+            x.signal_id=int(signal_id)
+
+
+def _update_stage_entries_tick(symbol: str, price: float, tick_ts: float):
+    if not STAGE_ENTRY_FORWARD_ENABLED or not price:
+        return
+    for x in list(pending_stage_entries):
+        if x.symbol != symbol or tick_ts < x.created_ts or x.completed_60m:
+            continue
+        age=max(0.0,tick_ts-x.created_ts)
+        ret=pct_change(price,x.entry_price)
+        x.mfe=max(x.mfe,ret); x.mae=min(x.mae,ret)
+        changed=False
+        if x.tp1_price and x.tp1_hit_s is None and price >= x.tp1_price:
+            x.tp1_hit_s=age; changed=True
+        if x.tp2_price and x.tp2_hit_s is None and price >= x.tp2_price:
+            x.tp2_hit_s=age; changed=True
+        if x.stop_price and x.stop_hit_s is None and price <= x.stop_price:
+            x.stop_hit_s=age; changed=True
+        if x.tp1_hit_s is not None and age > float(x.tp1_hit_s):
+            if x.be0_hit_s is None and price <= x.entry_price:
+                x.be0_hit_s=age; changed=True
+            if x.be10_hit_s is None and price <= x.entry_price*(1.0-float(FORWARD_BE_BUFFER_10_PCT)/100.0):
+                x.be10_hit_s=age; changed=True
+            if x.be15_hit_s is None and price <= x.entry_price*(1.0-float(FORWARD_BE_BUFFER_15_PCT)/100.0):
+                x.be15_hit_s=age; changed=True
+        # Delayed runner candidates only become active after TP2 and the activation threshold.
+        if x.tp2_hit_s is not None and age >= float(x.tp2_hit_s):
+            if x.runner25_active_s is None and ret >= float(FORWARD_LATE_RUNNER_25_ACTIVATE_PCT):
+                x.runner25_active_s=age; x.runner25_peak=price; changed=True
+            if x.runner25_active_s is not None and x.runner25_exit_s is None:
+                old_peak=float(x.runner25_peak or 0)
+                if price > old_peak:
+                    x.runner25_peak=price; changed=True
+                dd=max(0.0,-pct_change(price,x.runner25_peak or price))
+                if dd >= float(FORWARD_LATE_RUNNER_25_TRAIL_PCT):
+                    x.runner25_exit_s=age; x.runner25_exit_price=price; changed=True
+            if x.runner30_active_s is None and ret >= float(FORWARD_LATE_RUNNER_30_ACTIVATE_PCT):
+                x.runner30_active_s=age; x.runner30_peak=price; changed=True
+            if x.runner30_active_s is not None and x.runner30_exit_s is None:
+                old_peak=float(x.runner30_peak or 0)
+                if price > old_peak:
+                    x.runner30_peak=price; changed=True
+                dd=max(0.0,-pct_change(price,x.runner30_peak or price))
+                if dd >= float(FORWARD_LATE_RUNNER_30_TRAIL_PCT):
+                    x.runner30_exit_s=age; x.runner30_exit_price=price; changed=True
+        if changed:
+            _save_stage_entry(x)
+
+
+def _maybe_arm_secondary_60(signal_id: int, p: Optional[PendingOutcome] = None):
+    """HOLD_30 -> 60s PROGRESS+STRONG_CONTINUATION recovery cohort. SHADOW ONLY."""
+    if not (STAGE_ENTRY_FORWARD_ENABLED and SECONDARY_60_FORWARD_ENABLED):
+        return
+    conn=db_connect()
+    try:
+        gate=conn.execute("SELECT decision_30 FROM premium_execution_gate_v21_shadow WHERE signal_id=?",(signal_id,)).fetchone()
+        comp=conn.execute("SELECT progress_status,composite_state,terminal_event FROM premium_execution_composite WHERE signal_id=?",(signal_id,)).fetchone()
+        px=conn.execute("SELECT last_price FROM premium_micro_snapshots WHERE signal_id=? AND horizon_ms=60000",(signal_id,)).fetchone()
+    finally:
+        conn.close()
+    if not gate or gate[0] != "HOLD_30" or not comp or comp[0] != "PROGRESS" or comp[1] != "STRONG_CONTINUATION" or not px or not px[0]:
+        return
+    if str(comp[2] or "") in ("STOPPED","TP2_REACHED"):
+        return
+    if p is None:
+        p=next((z for z in pending_outcomes if z.signal_id==signal_id),None)
+    if not p:
+        return
+    _arm_stage_from_pending(p,"SECONDARY60",60.0,float(px[0]),"HOLD30_TO_PROGRESS_STRONG")
+
+
 def _forward_exit_results(p: PendingOutcome, close_price: Optional[float] = None) -> dict:
     """Compute four exit policies from event order. Fees/slippage are deliberately excluded."""
     if p.entry_touch_s is None:
@@ -3170,6 +3513,7 @@ def _arm_gate_v21_forward_shadow(signal_id: int, decision: Optional[str], horizo
     if not row or not row[0]:
         return
     _arm_delayed_shadow(p,"GATE_V21",float(horizon_ms)/1000.0,float(row[0]),str(decision),int(horizon_ms))
+    _arm_stage_from_pending(p, "GATE15" if int(horizon_ms)==15000 else "GATE30", float(horizon_ms)/1000.0, float(row[0]), str(decision))
 
 
 def save_signal_path(p: PendingOutcome, completed_60m: bool = False):
@@ -3827,6 +4171,7 @@ def update_pending_tick(symbol: str, price: float, tick_ts: float):
     """Event-level MFE/MAE and Premium path accounting from aggTrade. No signal decision is made here."""
     if not price:
         return
+    _update_stage_entries_tick(symbol, price, tick_ts)
     for p in list(pending_outcomes):
         if p.symbol != symbol or tick_ts < p.created_ts:
             continue
@@ -4115,8 +4460,25 @@ def recover_pending_tracking():
                 mm=conn.execute(f"SELECT MAX(mfe_pct),MIN(mae_pct) FROM {outcome_table} WHERE {fk}=?",(eid,)).fetchone()
                 obj.mfe=float(mm[0] or 0); obj.mae=float(mm[1] or 0)
                 target.append(obj)
-        log.info("Recovered trackers: premium=%d radar=%d gainers=%d research=%d shadow=%d",
-                 len(pending_outcomes),len(pending_radars),len(pending_gainers),len(pending_research),len(pending_shadow_events))
+        # V5.13.3 stage-entry cohorts survive deploy/restart when the DB is persistent.
+        for r in conn.execute(
+            """SELECT id,symbol,stage,episode_id,entry_price,created_ts_ms,stop_price,tp1_price,tp2_price,signal_id,decision,entry_age_s,
+                      tp1_hit_s,tp2_hit_s,stop_hit_s,be0_hit_s,be10_hit_s,be15_hit_s,mfe_pct,mae_pct,
+                      runner25_active_s,runner25_exit_s,runner25_exit_price,runner25_peak,
+                      runner30_active_s,runner30_exit_s,runner30_exit_price,runner30_peak,completed_60m
+               FROM entry_stage_forward_shadow WHERE completed_60m=0 AND created_ts_ms>=?""", (int((now-STAGE_ENTRY_HORIZON_S-120)*1000),)
+        ).fetchall():
+            if r[1] not in states: continue
+            x=PendingStageEntry(int(r[0]),str(r[1]),str(r[2]),int(r[3] or 0),float(r[4]),float(r[5])/1000.0,
+                                float(r[6] or 0),float(r[7] or 0),float(r[8] or 0),signal_id=(int(r[9]) if r[9] is not None else None),
+                                decision=str(r[10] or ""),entry_age_s=r[11],tp1_hit_s=r[12],tp2_hit_s=r[13],stop_hit_s=r[14],
+                                be0_hit_s=r[15],be10_hit_s=r[16],be15_hit_s=r[17],mfe=float(r[18] or 0),mae=float(r[19] or 0),
+                                runner25_active_s=r[20],runner25_exit_s=r[21],runner25_exit_price=r[22],runner25_peak=float(r[23] or 0),
+                                runner30_active_s=r[24],runner30_exit_s=r[25],runner30_exit_price=r[26],runner30_peak=float(r[27] or 0),
+                                completed_60m=bool(r[28]))
+            pending_stage_entries.append(x)
+        log.info("Recovered trackers: premium=%d radar=%d gainers=%d research=%d shadow=%d stage=%d",
+                 len(pending_outcomes),len(pending_radars),len(pending_gainers),len(pending_research),len(pending_shadow_events),len(pending_stage_entries))
     except Exception as e:
         log.warning("Tracker recovery failed: %r", e)
     finally:
@@ -5175,6 +5537,7 @@ async def evaluate(session, symbol: str):
             st.candidate_prices.append(m["price"])
             st.candidate_scores.append(score)
             save_candidate_event(symbol, "candidate_start", m, score, st)
+            _arm_stage_entry(symbol, "CANDIDATE", m, st.episode_id or 0, created_ts=now, decision="QUALIFIES_START")
             log.info("CANDIDATE %s score=%d episode=%s", symbol, score, st.episode_id)
             if early_watch_pass(m, score) and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS:
                 st.radar_record_ts = now
@@ -5236,6 +5599,7 @@ async def evaluate(session, symbol: str):
                     mark_radar_notified(st.active_radar_id, m["daily_notice_no"])
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
+                    _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
                     await telegram_public_alert(session, build_early_message(m, score, st), symbol=symbol,
                                                 notification_kind="EARLY", notification_ordinal=m.get("daily_notice_no"), signal_price=m.get("price"))
         else:
@@ -5379,6 +5743,9 @@ async def evaluate(session, symbol: str):
         po.wave_start_price = m["price"]
         po.wave_peak_price = m["price"]
         pending_outcomes.append(po)
+        _link_stage_entries_to_premium(symbol, int(m.get("episode_id") or 0), signal_id)
+        _arm_stage_entry(symbol, "PREMIUM", m, int(m.get("episode_id") or 0), created_ts=signal_generated_ts, signal_id=signal_id,
+                         decision="IMMEDIATE_PREMIUM", entry_age_s=0.0, entry_price=m["price"], levels=_forward_translated_levels(po, float(m["price"])))
         save_wave_tracking(po)
         if LIQUIDITY_RESEARCH_ENABLED:
             po.liquidity_completed.add(0)
@@ -5855,6 +6222,19 @@ async def outcome_loop(session):
             if max(SHADOW_OUTCOME_HORIZONS) in s.completed: shadow_remove.append(s)
         for s in shadow_remove:
             if s in pending_shadow_events: pending_shadow_events.remove(s)
+
+        stage_remove=[]
+        for x in list(pending_stage_entries):
+            price=states[x.symbol].last_price
+            if not price: continue
+            age=now-x.created_ts
+            ret=pct_change(price,x.entry_price); x.mfe=max(x.mfe,ret); x.mae=min(x.mae,ret)
+            if age >= STAGE_ENTRY_HORIZON_S:
+                x.completed_60m=True
+                _save_stage_entry(x,price,True)
+                stage_remove.append(x)
+        for x in stage_remove:
+            if x in pending_stage_entries: pending_stage_entries.remove(x)
 
         await asyncio.sleep(2)
 
@@ -6969,6 +7349,7 @@ async def telegram_command_loop(session):
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
                         f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"                        f"🧪 Gate V2.1 15/30sn: {'açık' if EXECUTION_GATE_V21_SHADOW_ENABLED else 'kapalı'} | PASS+POSITIVE+SUPPORTIVE / NEGATIVE+HOSTILE | SHADOW\n"
                         f"🧪 Forward strateji audit: {'açık' if FORWARD_STRATEGY_SHADOW_ENABLED else 'kapalı'} | TP1→BE + TP2→%50/+%{FORWARD_RUNNER_TARGET_PCT:g} + WAIT_RECLAIM + Gate V2.1 gecikmeli fill | SHADOW\n"
+                        f"🧪 V5.13.3 stage audit: {'açık' if STAGE_ENTRY_FORWARD_ENABLED else 'kapalı'} | Candidate/Early/Premium/Gate15-30/Secondary60 + BE 0/-0.10/-0.15 + late runner 2.5/3.0 + fee-adjusted | SHADOW\n"
 
                         f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | LIVE kilidi {'AÇIK' if AUTO_TRADE_LIVE_ALLOWED else 'KAPALI'}\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
@@ -7665,6 +8046,7 @@ async def main():
                 f"🧪 Shadow Exit + first-wave/session-peak + post-shadow outcome: AÇIK; işlem sinyali değil\n"
                 f"🔬 Second-wave / Pre-Breakout / reject outcome araştırması: {'AÇIK' if RESEARCH_ENABLED else 'KAPALI'}\n"
                 f"🧭 15sn breakout acceptance + 60sn Progress + stop sonrası reclaim + TP2 runner: SHADOW\n"
+                f"🧪 V5.13.3 stage audit: Candidate/Early/Premium/Gate15-30/Secondary60 + BE buffer + late runner + fee-adjusted: SHADOW\n"
                 f"🌊 Liquidity V1 + frozen Regime V2 + CORE ablation 5/15/30sn: SHADOW | tek wall hard filter değil\n"
                 f"🚦 Post-Premium Failure Risk 15/30/60sn: yalnız aktif/executable trade actionability | public alert yok\n"
                 f"🔭 Discovery episode audit: event tekrarlarını dedup eder | gap {DISCOVERY_EPISODE_GAP_S}s\n"
