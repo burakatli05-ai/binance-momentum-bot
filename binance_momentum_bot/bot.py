@@ -29,8 +29,8 @@ WS_MARKET = "wss://fstream.binance.com/market/stream"
 WS_PUBLIC = "wss://fstream.binance.com/public/stream"
 IST = timezone(timedelta(hours=3))
 
-BOT_VERSION = "5.13.3"
-RESEARCH_LOGIC_VERSION = "v5133-stage-entry-secondary60-policy-shadow"
+BOT_VERSION = "5.13.4"
+RESEARCH_LOGIC_VERSION = "v5134-trend-build-liq-transition-position-observer-risk-guard"
 PROCESS_STARTED_TS_MS = int(time.time() * 1000)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -259,6 +259,23 @@ FORWARD_LATE_RUNNER_25_TRAIL_PCT = float(os.getenv("FORWARD_LATE_RUNNER_25_TRAIL
 FORWARD_LATE_RUNNER_30_ACTIVATE_PCT = float(os.getenv("FORWARD_LATE_RUNNER_30_ACTIVATE_PCT", "3.00"))
 FORWARD_LATE_RUNNER_30_TRAIL_PCT = float(os.getenv("FORWARD_LATE_RUNNER_30_TRAIL_PCT", "1.25"))
 
+# V5.13.4: real-early / trend-build research. This is observer-only and never opens a trade.
+TREND_BUILDUP_ENABLED = os.getenv("TREND_BUILDUP_ENABLED", "1").strip() not in ("0", "false", "False")
+TREND_BUILDUP_NOTIFY = os.getenv("TREND_BUILDUP_NOTIFY", "1").strip() not in ("0", "false", "False")
+TREND_BUILDUP_MIN_SCORE = int(os.getenv("TREND_BUILDUP_MIN_SCORE", "82"))
+TREND_BUILDUP_CONFIRM_PASSES = max(2, int(os.getenv("TREND_BUILDUP_CONFIRM_PASSES", "3")))
+TREND_BUILDUP_CONFIRM_INTERVAL_S = max(3.0, float(os.getenv("TREND_BUILDUP_CONFIRM_INTERVAL_S", "5")))
+TREND_BUILDUP_COOLDOWN_S = max(300, int(os.getenv("TREND_BUILDUP_COOLDOWN_S", "1800")))
+LIQUIDITY_TRANSITION_V3_ENABLED = os.getenv("LIQUIDITY_TRANSITION_V3_ENABLED", "1").strip() not in ("0", "false", "False")
+
+# Position observer is informational only: it never places/cancels/changes an order.
+POSITION_OBSERVER_ENABLED = os.getenv("POSITION_OBSERVER_ENABLED", "1").strip() not in ("0", "false", "False")
+POSITION_OBSERVER_POLL_SECONDS = max(3, int(os.getenv("POSITION_OBSERVER_POLL_SECONDS", "5")))
+POSITION_ENTRY_HYSTERESIS_PCT = max(0.01, float(os.getenv("POSITION_ENTRY_HYSTERESIS_PCT", "0.10")))
+POSITION_ENTRY_CONFIRM_SECONDS = max(0, int(os.getenv("POSITION_ENTRY_CONFIRM_SECONDS", "5")))
+POSITION_ROE_MILESTONES = tuple(sorted({abs(float(x)) for x in os.getenv("POSITION_ROE_MILESTONES", "5,10,20").split(",") if x.strip()})) or (5.0,10.0,20.0)
+AUTO_TRADE_RISK_FEE_PCT = max(0.0, float(os.getenv("AUTO_TRADE_RISK_FEE_PCT", "0.10")))
+
 # V5.13: AutoTrade execution infrastructure. SAFE BY DEFAULT.
 # LIVE can never start automatically after a deploy/restart. The default path is OFF -> DRY -> explicit LIVE confirmation.
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "").strip()
@@ -287,7 +304,7 @@ AUTO_TRADE_CLIENT_PREFIX = os.getenv("AUTO_TRADE_CLIENT_PREFIX", "MBOT").strip()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("momentum-v5.13.2")
+log = logging.getLogger("momentum-v5.13.4")
 
 
 @dataclass
@@ -380,6 +397,10 @@ class SymbolState:
     last_near_miss_ts: float = 0.0
     last_ignition_ts: float = 0.0
     last_fast_early_shadow_ts: float = 0.0
+    # V5.13.4 trend-build persistence is independent from momentum_episode resets.
+    trend_build_passes: int = 0
+    trend_build_last_check: float = 0.0
+    trend_build_last_notify: float = 0.0
 
 
 @dataclass
@@ -1407,11 +1428,30 @@ def init_db():
     ensure_column(conn, "premium_execution_gate_shadow", "gate_mae", "REAL")
     ensure_column(conn, "premium_execution_gate_shadow", "completed_60m", "INTEGER DEFAULT 0")
     conn.execute(
+        """CREATE TABLE IF NOT EXISTS premium_liquidity_transition_v3 (
+               signal_id INTEGER PRIMARY KEY, finalized_ts_ms INTEGER NOT NULL,
+               liq_state_5 TEXT, liq_state_15 TEXT, liq_state_30 TEXT,
+               liq_score_5 INTEGER, liq_score_15 INTEGER, liq_score_30 INTEGER,
+               oi_regime TEXT, barrier_30 TEXT, ask025_vs_initial_30 REAL, bid025_vs_initial_30 REAL,
+               transition_state TEXT, reason TEXT, updated_ts INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS position_observer_state (
+               symbol TEXT NOT NULL, position_side TEXT NOT NULL, direction TEXT NOT NULL,
+               entry_price REAL NOT NULL, qty REAL NOT NULL, leverage INTEGER, source TEXT,
+               zone TEXT, pending_zone TEXT, pending_since_ts INTEGER DEFAULT 0,
+               profit_hits_json TEXT DEFAULT '[]', loss_hits_json TEXT DEFAULT '[]',
+               last_roe REAL, last_unrealized_pnl REAL, active INTEGER DEFAULT 1, updated_ts INTEGER NOT NULL,
+               PRIMARY KEY(symbol,position_side)
+           )"""
+    )
+    conn.execute(
         """INSERT OR IGNORE INTO bot_deployments
            (started_ts_ms,bot_version,research_logic_version,db_path,note,updated_ts)
            VALUES (?,?,?,?,?,?)""",
         (PROCESS_STARTED_TS_MS,BOT_VERSION,RESEARCH_LOGIC_VERSION,DB_PATH,
-         "V5.13.3 shadow research: Candidate/Early/Premium/Gate/Secondary60 stage cohorts + BE buffers + late runner + fee-adjusted outcomes; production scanner/AutoTrade execution unchanged",int(time.time())),
+         "V5.13.4: trend-build REAL EARLY watch + liquidity/OI transition V3 shadow + all-position observer + projected-risk guard; production Premium thresholds unchanged",int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -2538,6 +2578,42 @@ def save_gate_shadow_path(p: PendingOutcome, completed_60m: Optional[int] = None
         conn.close()
 
 
+def finalize_liquidity_transition_v3(signal_id: int, finalized_ts_ms: Optional[int] = None):
+    """Forward-only 5→15→30s liquidity/OI transition classifier. Research only."""
+    if not LIQUIDITY_TRANSITION_V3_ENABLED: return
+    conn=db_connect()
+    try:
+        rows=conn.execute("""SELECT horizon_ms,liquidity_v2_state,liquidity_v2_score,barrier_label,ask025_vs_initial,bid025_vs_initial
+                             FROM premium_liquidity_snapshots WHERE signal_id=? AND horizon_ms IN (5000,15000,30000)""",(signal_id,)).fetchall()
+        d={int(r[0]):r for r in rows}
+        if 30000 not in d: return
+        ctx=conn.execute("SELECT oi_regime FROM premium_context WHERE signal_id=?",(signal_id,)).fetchone()
+        oi=(ctx[0] if ctx else "UNKNOWN") or "UNKNOWN"
+        def val(h,i,default=None): return d.get(h,[None]*6)[i] if h in d else default
+        s5,s15,s30=val(5000,1,"MISSING"),val(15000,1,"MISSING"),val(30000,1,"MISSING")
+        q5,q15,q30=val(5000,2),val(15000,2),val(30000,2)
+        barrier=val(30000,3,"UNKNOWN"); askr=val(30000,4); bidr=val(30000,5)
+        reasons=[]
+        support_votes=sum(x=="SUPPORTIVE" for x in (s5,s15,s30)); hostile_votes=sum(x=="HOSTILE" for x in (s5,s15,s30))
+        if oi=="POS_GT_005": reasons.append("OI+")
+        if s30=="SUPPORTIVE": reasons.append("30s supportive")
+        if s30=="HOSTILE": reasons.append("30s hostile")
+        if askr is not None and askr<=0.85: reasons.append("ask depletion")
+        if askr is not None and askr>=1.10: reasons.append("ask refill")
+        if bidr is not None and bidr>=0.60: reasons.append("bid retained")
+        if bidr is not None and bidr<=0.45: reasons.append("bid lost")
+        if barrier=="HIGH": reasons.append("high barrier")
+        if oi=="POS_GT_005" and support_votes>=2 and barrier!="HIGH" and (askr is None or askr<=1.0): state="EARLY_SUPPORT"
+        elif hostile_votes>=2 or (s30=="HOSTILE" and barrier=="HIGH") or (oi!="POS_GT_005" and s30=="HOSTILE"): state="FAIL_RISK"
+        else: state="MIXED_WATCH"
+        conn.execute("""INSERT OR REPLACE INTO premium_liquidity_transition_v3
+            (signal_id,finalized_ts_ms,liq_state_5,liq_state_15,liq_state_30,liq_score_5,liq_score_15,liq_score_30,oi_regime,barrier_30,
+             ask025_vs_initial_30,bid025_vs_initial_30,transition_state,reason,updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (signal_id,int(finalized_ts_ms or now_ms()),s5,s15,s30,q5,q15,q30,oi,barrier,askr,bidr,state,"; ".join(reasons),int(time.time())))
+        conn.commit()
+    finally: conn.close()
+
+
 async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingOutcome, horizon_ms: int):
     if not LIQUIDITY_RESEARCH_ENABLED:
         return
@@ -2613,6 +2689,7 @@ async def capture_liquidity_snapshot(session: aiohttp.ClientSession, p: PendingO
             save_post_premium_risk(p, 30000, observed, None)
             update_gate_recovery_30(p.signal_id)
             maybe_finalize_execution_composite(p.signal_id, observed, p)
+            finalize_liquidity_transition_v3(p.signal_id, observed)
             # If the 60s progress row already exists (e.g. depth request was delayed),
             # finalize failure-risk now instead of losing the sample.
             conn_p = db_connect()
@@ -4098,6 +4175,93 @@ def record_candidate_reject_audit(symbol: str, m: dict, score: int, reason: str)
     )
 
 
+def _trend_build_context(symbol: str, m: dict) -> dict:
+    """Slow-trend context independent from candidate/episode resets. Uses only already-streamed data."""
+    st=states[symbol]
+    cs=list(st.candles)
+    px=float(m.get("price") or 0)
+    if px <= 0 or len(cs) < 12:
+        return {}
+    closes=[float(c.close) for c in cs[-12:]]+[px]
+    lows=[float(c.low) for c in cs[-10:]]
+    def ret_n(n):
+        base=closes[-(n+1)] if len(closes) > n else 0
+        return pct_change(px,base) if base else 0.0
+    ret3,ret5,ret10=ret_n(3),ret_n(5),ret_n(10)
+    last5=closes[-6:]
+    positive5=sum(1 for a,b in zip(last5,last5[1:]) if b>a)/max(1,len(last5)-1)
+    higher_lows=sum(1 for a,b in zip(lows[-6:],lows[-5:]) if b>=a)/max(1,len(lows[-5:])) if len(lows)>=6 else 0.0
+    peak=closes[-11]
+    max_dd=0.0
+    for v in closes[-10:]:
+        peak=max(peak,v)
+        if peak: max_dd=min(max_dd,pct_change(v,peak))
+    rank=gainers_prev_rank.get(symbol)
+    rv=rank_velocity_per_min(symbol,rank) if rank else 0.0
+    return {"ret3":ret3,"ret5":ret5,"ret10":ret10,"positive5":positive5,"higher_lows":higher_lows,"max_dd10":max_dd,"rank":rank,"rank_velocity":rv}
+
+
+def _trend_build_score(symbol: str, m: dict) -> Tuple[int,dict,List[str]]:
+    c=_trend_build_context(symbol,m)
+    if not c: return 0,c,["insufficient history"]
+    sc=0; why=[]
+    def add(cond,pts,msg):
+        nonlocal sc
+        if cond: sc+=pts; why.append(msg)
+    add(0.20 <= c["ret3"] <= 2.8,14,f"3m {c['ret3']:+.2f}%")
+    add(0.40 <= c["ret5"] <= 4.5,14,f"5m {c['ret5']:+.2f}%")
+    add(0.70 <= c["ret10"] <= 7.0,14,f"10m {c['ret10']:+.2f}%")
+    add(c["positive5"] >= 0.60,12,f"pozitif kapanış %{c['positive5']*100:.0f}")
+    add(c["higher_lows"] >= 0.60,12,f"higher-low %{c['higher_lows']*100:.0f}")
+    add(c["max_dd10"] >= -1.50,10,f"10m max PB {c['max_dd10']:.2f}%")
+    add(m.get("rel30",0) >= 0.20,10,f"rel30 {m.get('rel30',0):+.2f}%")
+    add(1.15 <= m.get("flow30",0) <= 8.0,8,f"flow {m.get('flow30',0):.1f}x")
+    add(0.55 <= m.get("buy30",0) <= 0.82,3,f"buy %{m.get('buy30',0)*100:.0f}")
+    add((c.get("rank") is not None and c["rank"] <= 100) or c.get("rank_velocity",0) >= 5,3,f"rank {c.get('rank') or '-'}")
+    # Penalize obvious late-stage vertical extension; do not hard-block mature trends.
+    if c["ret5"] > 5.0 or c["ret10"] > 8.0: sc-=15; why.append("uzamış trend")
+    if m.get("chg30",0) < -0.20: sc-=15; why.append("30s geri çekilme")
+    if m.get("spread",99) > min(MAX_SPREAD_PCT,0.30): sc-=10; why.append("spread")
+    return max(0,min(100,int(round(sc)))),c,why
+
+
+async def maybe_trend_build_up(session, symbol: str, m: dict, score: int, now: float):
+    """Selective REAL EARLY watch. Notification is informational/research-only, never an AutoTrade trigger."""
+    if not TREND_BUILDUP_ENABLED: return
+    st=states[symbol]
+    if now-st.trend_build_last_check < TREND_BUILDUP_CONFIRM_INTERVAL_S: return
+    st.trend_build_last_check=now
+    tscore,ctx,reasons=_trend_build_score(symbol,m)
+    if tscore >= TREND_BUILDUP_MIN_SCORE:
+        st.trend_build_passes += 1
+    else:
+        st.trend_build_passes = 0
+        return
+    if st.trend_build_passes < TREND_BUILDUP_CONFIRM_PASSES: return
+    if now-st.trend_build_last_notify < TREND_BUILDUP_COOLDOWN_S: return
+    st.trend_build_last_notify=now; st.trend_build_passes=0
+    mm=dict(m)
+    try:
+        oi5,oi_prev5,oi_accel5=await get_oi_context(session,symbol)
+    except Exception:
+        oi5=oi_prev5=oi_accel5=None
+    mm["oi5"]=oi5; mm["oi_prev5"]=oi_prev5; mm["oi_accel5"]=oi_accel5; mm["oi_regime"]=oi_regime_label(oi5)
+    add_research_event("TREND_BUILDUP",symbol,mm,score,
+        f"trend_score={tscore}; ret3={ctx.get('ret3',0):+.3f}; ret5={ctx.get('ret5',0):+.3f}; ret10={ctx.get('ret10',0):+.3f}; "
+        f"positive5={ctx.get('positive5',0):.3f}; higher_lows={ctx.get('higher_lows',0):.3f}; max_dd10={ctx.get('max_dd10',0):+.3f}; oi={mm.get('oi_regime')}; reasons={','.join(reasons[:8])}",
+        shadow_score=tscore,shadow_label="REAL_EARLY_WATCH")
+    if TREND_BUILDUP_NOTIFY and TELEGRAM_ADMIN_CHAT_ID:
+        oi_txt="veri yok" if oi5 is None else f"{oi5:+.2f}% ({oi_regime_label(oi5)})"
+        await telegram_send(session,
+            f"🧭 ERKEN TREND — YAPI OLUŞUYOR (SHADOW)\n\n{symbol} | {fmt_price(mm['price'])}\n"
+            f"Trend skoru: {tscore}/100 | 3m {ctx.get('ret3',0):+.2f}% | 5m {ctx.get('ret5',0):+.2f}% | 10m {ctx.get('ret10',0):+.2f}%\n"
+            f"Higher-low: %{ctx.get('higher_lows',0)*100:.0f} | 10m max pullback {ctx.get('max_dd10',0):.2f}%\n"
+            f"Flow {mm.get('flow30',0):.1f}x | Rel30 {mm.get('rel30',0):+.2f}% | OI {oi_txt}\n"
+            f"Gainers: #{ctx.get('rank') or '-'} | rank hızı {ctx.get('rank_velocity',0):+.1f}/dk\n\n"
+            "⚠️ Bu AL sinyali değildir. Premium öncesi gerçek trend oluşumunu forward ölçen erken-watch katmanıdır.",
+            chat_id=TELEGRAM_ADMIN_CHAT_ID)
+
+
 def maybe_record_research(symbol: str, m: dict, score: int, now: float):
     """Shadow-only hypothesis collection; it never changes qualifies/continuity/Premium decisions."""
     if not RESEARCH_ENABLED:
@@ -5520,6 +5684,8 @@ async def evaluate(session, symbol: str):
         maybe_record_v59_research(symbol, m, score, now, candidate_active=bool(st.candidate_since))
         if m.get("qv24", 0) < MIN_24H_QUOTE_VOLUME:
             return
+        # V5.13.4 real-early trend watcher is independent from candidate/episode resets.
+        await maybe_trend_build_up(session, symbol, m, score, now)
         # Existing V5.7 research collectors remain observer-only.
         maybe_record_research(symbol, m, score, now)
         update_episode_peak(symbol, m["price"])
@@ -6438,6 +6604,9 @@ def create_consistent_db_backup() -> Tuple[str, str]:
     src = db_connect()
     dst = sqlite3.connect(db_copy, timeout=30)
     try:
+        # Passive checkpoint keeps writers unblocked while reducing WAL-only tail risk.
+        try: src.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception as e: log.warning("DB backup passive checkpoint: %r", e)
         # SQLite Backup API is safe against a live WAL database and avoids raw-file copies.
         src.backup(dst)
         dst.commit()
@@ -6454,7 +6623,10 @@ def create_consistent_db_backup() -> Tuple[str, str]:
     finally:
         chk.close()
 
-    health = f"quick={quick}; integrity={integrity}"
+    healthy = quick.lower() == "ok" and integrity.lower() == "ok"
+    health = f"quick={quick}; integrity={integrity}; valid={'YES' if healthy else 'NO'}"
+    if not healthy:
+        log.error("DB BACKUP HEALTH WARNING: %s", health)
     info = (
         f"bot_version={BOT_VERSION}\n"
         f"research_logic_version={RESEARCH_LOGIC_VERSION}\n"
@@ -6569,6 +6741,8 @@ def load_autotrade_settings():
     autotrade_cfg["mode"] = "DRY" if persisted_mode == "DRY" and AUTO_TRADE_BOOT_MODE == "DRY" else "OFF"
     _at_save_setting("mode", autotrade_cfg["mode"])
     recover_autotrade_active()
+    _at_repair_daily_from_trade_history("DRY")
+    _at_repair_daily_from_trade_history("LIVE")
 
 
 def recover_autotrade_active():
@@ -6637,22 +6811,70 @@ def _at_update_daily(net_pnl: float, close_reason: str, scope: Optional[str] = N
     finally: conn.close()
     return _at_daily_row(scope=sc)
 
+def _at_repair_daily_from_trade_history(scope: str):
+    """Rebuild today's bot ledger from persisted closed trades; never makes the ledger less conservative."""
+    sc=_at_scope(scope); r=_at_daily_row(scope=sc)
+    now_local=datetime.now(IST); start_local=datetime.combine(now_local.date(), datetime.min.time(), tzinfo=IST)
+    start_ms=int(start_local.timestamp()*1000); end_ms=start_ms+86400000
+    conn=db_connect()
+    try:
+        rows=conn.execute("""SELECT close_reason,net_pnl,closed_ts_ms FROM autotrade_trades
+                             WHERE mode=? AND status='CLOSED' AND closed_ts_ms>=? AND closed_ts_ms<? ORDER BY closed_ts_ms,id""",
+                          (sc,start_ms,end_ms)).fetchall()
+        if not rows: return
+        hist_pnl=sum(float(x[1] or 0) for x in rows)
+        streak=0
+        for reason,pnl,_ in rows:
+            if str(reason or '').upper()=="STOP": streak+=1
+            elif float(pnl or 0)>0: streak=0
+        existing=float(r.get("realized_net_pnl") or 0)
+        # If the ledger and trade history disagree, keep the more loss-conservative value.
+        repaired=min(existing,hist_pnl) if (existing<0 or hist_pnl<0) else hist_pnl
+        limit=float(r["start_balance"])*float(autotrade_cfg["daily_max_loss_pct"])/100.0
+        locked=bool(r["locked"]) or repaired<=-limit
+        lock_reason=(r.get("lock_reason") or (f"DAILY_LOSS_{autotrade_cfg['daily_max_loss_pct']:.2f}PCT" if locked else None))
+        cooldown=int(r.get("cooldown_until_ts") or 0)
+        if streak>=int(autotrade_cfg["max_consecutive_stops"]):
+            cooldown=max(cooldown,int((int(rows[-1][2] or 0)/1000)+int(autotrade_cfg["stop_cooldown_minutes"])*60))
+        conn.execute("UPDATE autotrade_daily SET realized_net_pnl=?,consecutive_stops=?,locked=?,lock_reason=?,cooldown_until_ts=?,updated_ts=? WHERE local_date=? AND scope=?",
+                     (repaired,streak,int(locked),lock_reason,cooldown,int(time.time()),r["local_date"],sc)); conn.commit()
+    finally: conn.close()
+
+
 def _at_open_count(mode: Optional[str] = None) -> int:
     if mode:
         return sum(1 for x in autotrade_active.values() if str(x.get("mode")).upper() == str(mode).upper())
     return len(autotrade_active)
 
 
-def _at_risk_allowed(scope: Optional[str] = None) -> Tuple[bool, str]:
+def _at_trade_worst_case_risk_usdt(tr: dict) -> float:
+    entry=float(tr.get("entry_price") or 0); stop=float(tr.get("stop_price") or 0)
+    qty=abs(float(tr.get("expected_qty") or tr.get("qty") or 0))
+    if entry<=0 or stop<=0 or qty<=0: return 0.0
+    gross=max(0.0,(entry-stop)*qty)
+    fee=(entry*qty)*AUTO_TRADE_RISK_FEE_PCT/100.0
+    return gross+fee
+
+
+def _at_open_worst_case_risk(scope: str) -> float:
+    sc=_at_scope(scope)
+    return sum(_at_trade_worst_case_risk_usdt(x) for x in autotrade_active.values()
+               if str(x.get("mode")).upper()==sc and str(x.get("status")) in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL"))
+
+
+def _at_risk_allowed(scope: Optional[str] = None, proposed_risk_usdt: float = 0.0) -> Tuple[bool, str]:
     sc=_at_scope(scope); r = _at_daily_row(scope=sc)
-    if r["locked"]:
-        return False, r["lock_reason"] or "RISK_LOCK"
+    if r["locked"]: return False, r["lock_reason"] or "RISK_LOCK"
     cooldown_until=int(r.get("cooldown_until_ts") or 0)
     if cooldown_until > int(time.time()):
-        mins=max(1, math.ceil((cooldown_until-time.time())/60.0))
-        return False, f"STOP_COOLDOWN_{mins}MIN"
-    if _at_open_count(sc) >= int(autotrade_cfg["max_open_positions"]):
-        return False, "MAX_OPEN_POSITIONS"
+        mins=max(1, math.ceil((cooldown_until-time.time())/60.0)); return False, f"STOP_COOLDOWN_{mins}MIN"
+    if _at_open_count(sc) >= int(autotrade_cfg["max_open_positions"]): return False, "MAX_OPEN_POSITIONS"
+    limit=float(r["start_balance"])*float(autotrade_cfg["daily_max_loss_pct"])/100.0
+    realized_loss=max(0.0,-float(r.get("realized_net_pnl") or 0))
+    open_risk=_at_open_worst_case_risk(sc)
+    projected=realized_loss+open_risk+max(0.0,float(proposed_risk_usdt or 0))
+    if projected > limit+1e-9:
+        return False, f"PROJECTED_DAILY_RISK {projected:.2f}>{limit:.2f} (realized_loss={realized_loss:.2f}; open={open_risk:.2f}; new={float(proposed_risk_usdt or 0):.2f})"
     return True, "OK"
 
 def _at_quantize(value: float, step: float, rounding=ROUND_DOWN) -> float:
@@ -6844,10 +7066,11 @@ def _at_close_trade(trade_id: int, reason: str, exit_price: float, realized_pnl:
 async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict, plan: dict):
     mode=str(autotrade_cfg.get("mode","OFF")).upper()
     if mode == "OFF": return
-    allowed, why = _at_risk_allowed(mode)
-    if not allowed:
-        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why)
-        return
+    if mode == "DRY":
+        allowed, why = _at_risk_allowed("DRY")
+        if not allowed:
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why)
+            return
     if autotrade_active_by_symbol.get(symbol):
         _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="BOT_POSITION_ALREADY_ACTIVE")
         return
@@ -6861,6 +7084,10 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if mode == "DRY":
         qty=_at_qty(symbol,notional,entry_ref)
         levels=_at_levels_from_fill(symbol,entry_ref,plan)
+        proposed=max(0.0,(entry_ref-float(levels["stop"]))*qty)+(entry_ref*qty)*AUTO_TRADE_RISK_FEE_PCT/100.0
+        allowed,why=_at_risk_allowed("DRY",proposed)
+        if not allowed:
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
         tid=_at_insert_trade(signal_id,symbol,"DRY",signal_price,entry_ref,qty,levels,plan)
         _at_log_event("DRY_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"entry={entry_ref}; qty={qty}; profile={autotrade_cfg['exit_profile']}")
         await telegram_send(session, f"🟡 DRY RUN — {symbol}\n{margin:.0f} USDT × {lev}x | giriş ~{fmt_price(entry_ref)}\nStop {fmt_price(levels['stop'])} | TP2 {fmt_price(levels['tp2'])}\nGerçek emir gönderilmedi.", chat_id=TELEGRAM_ADMIN_CHAT_ID)
@@ -6901,6 +7128,11 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
             # Binance -4046: no need to change margin type. Treat as benign.
             if "-4046" not in str(e): log.warning("AutoTrade marginType %s: %r",symbol,e)
     qty=_at_qty(symbol,notional,entry_ref)
+    proposed_levels=_at_levels_from_fill(symbol,entry_ref,plan)
+    proposed=max(0.0,(entry_ref-float(proposed_levels["stop"]))*qty)+(entry_ref*qty)*AUTO_TRADE_RISK_FEE_PCT/100.0
+    allowed,why=_at_risk_allowed("LIVE",proposed)
+    if not allowed:
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
     f=exchange_filters.get(symbol,{})
     if qty<=0 or (f.get("min_notional") and qty*entry_ref < float(f["min_notional"])):
         raise RuntimeError(f"Quantity/minNotional geçersiz: qty={qty}")
@@ -7002,6 +7234,90 @@ async def _at_window_net_pnl(session, symbol: str, opened_ts_ms: int) -> Tuple[f
         return realized,commission,(quote/q if q else 0.0)
     except Exception:
         return 0.0,0.0,0.0
+
+
+def _po_bot_source(symbol: str, position_side: str) -> str:
+    for tr in autotrade_active.values():
+        if str(tr.get("mode")).upper()=="LIVE" and str(tr.get("status")) in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL") and str(tr.get("symbol"))==symbol:
+            ps=str(tr.get("position_side") or "BOTH")
+            if ps==position_side or ps=="BOTH" or position_side=="BOTH": return "BOT"
+    return "MANUAL"
+
+
+def _po_zone(direction: str, mark: float, entry: float) -> Tuple[str,float]:
+    if entry<=0 or mark<=0: return "NEUTRAL",0.0
+    move=pct_change(mark,entry)
+    signed=move if direction=="LONG" else -move
+    if signed>=POSITION_ENTRY_HYSTERESIS_PCT: return "PROFIT",signed
+    if signed<=-POSITION_ENTRY_HYSTERESIS_PCT: return "LOSS",signed
+    return "NEUTRAL",signed
+
+
+def _po_roe(p: dict, direction: str, entry: float, mark: float, lev: int) -> Tuple[float,float]:
+    upnl=float(p.get("unRealizedProfit",p.get("unrealizedProfit",0)) or 0)
+    margin=float(p.get("positionInitialMargin",0) or 0)
+    if margin>0: return upnl/margin*100.0,upnl
+    _,signed=_po_zone(direction,mark,entry)
+    return signed*max(1,lev),upnl
+
+
+async def position_observer_loop(session):
+    """Observe every real Binance Futures position, manual or bot-owned. Notification-only."""
+    while not stop_event.is_set():
+        try:
+            if not POSITION_OBSERVER_ENABLED or not BINANCE_API_KEY or not BINANCE_API_SECRET:
+                await asyncio.sleep(POSITION_OBSERVER_POLL_SECONDS); continue
+            positions=await binance_signed_request(session,"GET","/fapi/v3/positionRisk")
+            active_keys=set(); nowi=int(time.time())
+            for p in positions:
+                amt=float(p.get("positionAmt",0) or 0)
+                if abs(amt)<=1e-12: continue
+                sym=str(p.get("symbol") or ""); ps=str(p.get("positionSide") or "BOTH")
+                direction="LONG" if (ps=="LONG" or (ps=="BOTH" and amt>0)) else "SHORT"
+                entry=float(p.get("entryPrice",0) or 0); mark=float(p.get("markPrice",0) or states[sym].mark_price or states[sym].last_price or 0)
+                lev=max(1,int(float(p.get("leverage",1) or 1))); qty=abs(amt); source=_po_bot_source(sym,ps)
+                if entry<=0 or mark<=0: continue
+                key=(sym,ps); active_keys.add(key); zone,signed_move=_po_zone(direction,mark,entry); roe,upnl=_po_roe(p,direction,entry,mark,lev)
+                conn=db_connect()
+                row=conn.execute("SELECT direction,entry_price,qty,zone,pending_zone,pending_since_ts,profit_hits_json,loss_hits_json,active FROM position_observer_state WHERE symbol=? AND position_side=?",key).fetchone()
+                if row is None:
+                    conn.execute("""INSERT INTO position_observer_state(symbol,position_side,direction,entry_price,qty,leverage,source,zone,pending_zone,pending_since_ts,profit_hits_json,loss_hits_json,last_roe,last_unrealized_pnl,active,updated_ts)
+                                    VALUES (?,?,?,?,?,?,?,?,NULL,0,'[]','[]',?,?,1,?)""",(sym,ps,direction,entry,qty,lev,source,zone,roe,upnl,nowi)); conn.commit(); conn.close()
+                    profit_hits=set(); loss_hits=set(); old_zone=zone
+                else:
+                    old_dir,old_entry,old_qty,old_zone,pending,pending_since,ph,lh,was_active=row
+                    # Average-entry or side change establishes a new position basis; reset milestones safely.
+                    reset=(not bool(was_active) or str(old_dir)!=direction or abs(float(old_entry)-entry)/entry*100.0>0.01)
+                    profit_hits=set() if reset else set(json.loads(ph or '[]')); loss_hits=set() if reset else set(json.loads(lh or '[]'))
+                    if reset: old_zone=zone; pending=None; pending_since=0
+                    # Hysteresis + persistence for entry cross notifications.
+                    if zone!="NEUTRAL" and zone!=old_zone:
+                        if pending!=zone: pending=zone; pending_since=nowi
+                        elif nowi-int(pending_since or 0)>=POSITION_ENTRY_CONFIRM_SECONDS:
+                            old_zone=zone; pending=None; pending_since=0
+                            icon="🟢" if zone=="PROFIT" else "🔴"; label="KÂR BÖLGESİNE GEÇTİ" if zone=="PROFIT" else "ZARAR BÖLGESİNE GEÇTİ"
+                            await telegram_send(session,f"{icon} {sym} — {label}\n{direction} · {lev}x · {source}\nEntry: {fmt_price(entry)} | Anlık: {fmt_price(mark)}\nEntry'ye göre: {signed_move:+.2f}% | ROE: {roe:+.2f}%\nAçık PnL: {upnl:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                    elif zone==old_zone or zone=="NEUTRAL": pending=None; pending_since=0
+                    # Milestones fire once per position basis. If several are crossed in one poll, send one compact message.
+                    newp=[x for x in POSITION_ROE_MILESTONES if roe>=x and x not in profit_hits]
+                    newl=[x for x in POSITION_ROE_MILESTONES if roe<=-x and x not in loss_hits]
+                    if newp:
+                        profit_hits.update(newp); top=max(newp); crossed="/".join(f"+%{x:g}" for x in newp)
+                        await telegram_send(session,f"🚀 {sym} — KÂR +%{top:g}'A ULAŞTI\n{direction} · {lev}x · {source}\nEntry: {fmt_price(entry)} | Anlık: {fmt_price(mark)}\nROE: {roe:+.2f}% | Açık PnL: {upnl:+.2f} USDT\nGeçilen seviye: {crossed}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                    if newl:
+                        loss_hits.update(newl); top=max(newl); crossed="/".join(f"-%{x:g}" for x in newl)
+                        await telegram_send(session,f"⚠️ {sym} — ZARAR -%{top:g}'A ULAŞTI\n{direction} · {lev}x · {source}\nEntry: {fmt_price(entry)} | Anlık: {fmt_price(mark)}\nROE: {roe:+.2f}% | Açık PnL: {upnl:+.2f} USDT\nGeçilen seviye: {crossed}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                    conn.execute("""UPDATE position_observer_state SET direction=?,entry_price=?,qty=?,leverage=?,source=?,zone=?,pending_zone=?,pending_since_ts=?,profit_hits_json=?,loss_hits_json=?,last_roe=?,last_unrealized_pnl=?,active=1,updated_ts=? WHERE symbol=? AND position_side=?""",
+                        (direction,entry,qty,lev,source,old_zone,pending,int(pending_since or 0),json.dumps(sorted(profit_hits)),json.dumps(sorted(loss_hits)),roe,upnl,nowi,sym,ps)); conn.commit(); conn.close()
+            conn=db_connect()
+            rows=conn.execute("SELECT symbol,position_side FROM position_observer_state WHERE active=1").fetchall()
+            for k in rows:
+                if tuple(k) not in active_keys: conn.execute("UPDATE position_observer_state SET active=0,updated_ts=? WHERE symbol=? AND position_side=?",(nowi,k[0],k[1]))
+            conn.commit(); conn.close()
+            await asyncio.sleep(POSITION_OBSERVER_POLL_SECONDS)
+        except asyncio.CancelledError: raise
+        except Exception as e:
+            log.warning("Position observer: %r",e); await asyncio.sleep(max(5,POSITION_OBSERVER_POLL_SECONDS))
 
 
 async def autotrade_reconcile_loop(session):
@@ -7349,8 +7665,8 @@ async def telegram_command_loop(session):
                         f"🧭 60sn Acceptance+Progress + composite: AÇIK (Shadow)\n"
                         f"🧪 Execution Gate V2 Quality: {'açık' if EXECUTION_GATE_V2_SHADOW_ENABLED else 'kapalı'} | Progress+Composite+Sticky+Over60 | PRODUCTION KAPALI\n"                        f"🧪 Gate V2.1 15/30sn: {'açık' if EXECUTION_GATE_V21_SHADOW_ENABLED else 'kapalı'} | PASS+POSITIVE+SUPPORTIVE / NEGATIVE+HOSTILE | SHADOW\n"
                         f"🧪 Forward strateji audit: {'açık' if FORWARD_STRATEGY_SHADOW_ENABLED else 'kapalı'} | TP1→BE + TP2→%50/+%{FORWARD_RUNNER_TARGET_PCT:g} + WAIT_RECLAIM + Gate V2.1 gecikmeli fill | SHADOW\n"
-                        f"🧪 V5.13.3 stage audit: {'açık' if STAGE_ENTRY_FORWARD_ENABLED else 'kapalı'} | Candidate/Early/Premium/Gate15-30/Secondary60 + BE 0/-0.10/-0.15 + late runner 2.5/3.0 + fee-adjusted | SHADOW\n"
-
+                        f"🧪 V5.13.4 stage audit + REAL EARLY + Liquidity/OI Transition V3: {'açık' if STAGE_ENTRY_FORWARD_ENABLED else 'kapalı'} | SHADOW\n"
+                        f"👁 Pozisyon gözlemcisi: tüm gerçek Futures pozisyonları | entry-cross + ROE %5/%10/%20\n"
                         f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | LIVE kilidi {'AÇIK' if AUTO_TRADE_LIVE_ALLOWED else 'KAPALI'}\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
                         f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
@@ -8046,7 +8362,7 @@ async def main():
                 f"🧪 Shadow Exit + first-wave/session-peak + post-shadow outcome: AÇIK; işlem sinyali değil\n"
                 f"🔬 Second-wave / Pre-Breakout / reject outcome araştırması: {'AÇIK' if RESEARCH_ENABLED else 'KAPALI'}\n"
                 f"🧭 15sn breakout acceptance + 60sn Progress + stop sonrası reclaim + TP2 runner: SHADOW\n"
-                f"🧪 V5.13.3 stage audit: Candidate/Early/Premium/Gate15-30/Secondary60 + BE buffer + late runner + fee-adjusted: SHADOW\n"
+                f"🧪 V5.13.4: stage audit + REAL EARLY trend-build + liquidity/OI transition V3: SHADOW\n"
                 f"🌊 Liquidity V1 + frozen Regime V2 + CORE ablation 5/15/30sn: SHADOW | tek wall hard filter değil\n"
                 f"🚦 Post-Premium Failure Risk 15/30/60sn: yalnız aktif/executable trade actionability | public alert yok\n"
                 f"🔭 Discovery episode audit: event tekrarlarını dedup eder | gap {DISCOVERY_EPISODE_GAP_S}s\n"
@@ -8055,6 +8371,7 @@ async def main():
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
                 f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
                 f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n"
+                f"👁 Pozisyon gözlemcisi: tüm gerçek Futures pozisyonları | entry-cross + ROE %5/%10/%20\n"
                 f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} | 4-stop koruması {int(autotrade_cfg['max_consecutive_stops'])} | LIVE varsayılan KAPALI\n\n"
                 f"Komutlar: /status  /top  /gainers  /funnel  /stats  /radarstats  /shadowstats  /entrystats  /latencystats  /researchstats  /v511stats  /v510stats  /riskstats  /gatestats  /discoverystats  /dbhealth  /backupdb  /joinstatus  /settings  /autotrade  /riskstatus  /positions  /analiz COIN  /test"
             )
@@ -8062,7 +8379,7 @@ async def main():
         chunks = [symbols[i:i + AGGTRADE_CHUNK] for i in range(0, len(symbols), AGGTRADE_CHUNK)]
         tasks = [
             ticker_ws(session), book_ws(session), mark_price_ws(session), liquidation_ws(session),
-            outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session), autotrade_reconcile_loop(session),
+            outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session), autotrade_reconcile_loop(session), position_observer_loop(session),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         await asyncio.gather(*tasks)
