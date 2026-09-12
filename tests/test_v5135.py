@@ -239,9 +239,9 @@ class PureTests(unittest.TestCase):
     def test_x_conditional_and_ambiguous(self):
         a=xmod.classify('$BTC wait for breakout above 100',{'BTCUSDT'})
         self.assertEqual('WATCH_SETUP',a['category'])
-        self.assertEqual({'operator':'CROSS_ABOVE','price':100},a['condition'])
+        self.assertEqual('$BTC wait for breakout above 100',a['condition'])
         a=xmod.classify('$BTC wait reclaim, do not buy market',{'BTCUSDT'})
-        self.assertIsNone(a['condition'])
+        self.assertIsInstance(a['condition'],str)
         self.assertIsNone(xmod.classify('$BTC $ETH above 100',{'BTCUSDT','ETHUSDT'})['symbol'])
 
 
@@ -249,7 +249,7 @@ class XTests(unittest.TestCase):
     setUp=DatabaseCase.setUp
     rows=DatabaseCase.rows
     sql=DatabaseCase.sql
-    def test_bootstrap_new_tweet_delivery_and_trigger(self):
+    def test_bootstrap_new_tweet_information_only(self):
         price={'price':99,'chg5':1,'chg24':2}
         send=AsyncMock(return_value=True);media=AsyncMock(return_value=True)
         watcher=xmod.XWatcher(bot.db_connect,lambda symbol:price if symbol else {'BTCUSDT'},send,media)
@@ -260,9 +260,9 @@ class XTests(unittest.TestCase):
         self.assertEqual(1,send.await_count)
         price['price']=101
         asyncio.run(watcher.process(None));asyncio.run(watcher.process(None));asyncio.run(watcher.process(None))
-        self.assertEqual(2,send.await_count)
-        self.assertIn('X SHADOW TETİK',send.call_args.args[1])
-        self.assertEqual('DELIVERED',self.rows("SELECT trigger_delivery FROM x_watcher_tweets WHERE tweet_id='2'")[0]['trigger_delivery'])
+        self.assertEqual(1,send.await_count)
+        self.assertIn('X BİLGİ',send.call_args.args[1])
+        self.assertIsNone(self.rows("SELECT trigger_delivery FROM x_watcher_tweets WHERE tweet_id='2'")[0]['trigger_delivery'])
 
 
 if __name__=='__main__':unittest.main()

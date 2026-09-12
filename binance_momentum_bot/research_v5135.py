@@ -91,6 +91,13 @@ def migrate(conn):
             delivery_time_ms INTEGER);
         CREATE TABLE IF NOT EXISTS measurement_migrations (version TEXT PRIMARY KEY, applied_time_ms INTEGER NOT NULL);
     """)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(position_observer_events)")}
+    if "attempt_count" not in existing:
+        conn.execute("ALTER TABLE position_observer_events ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE position_observer_events SET attempt_count=1 WHERE notification_delivery IN ('FAILED','DELIVERED')")
+    if "last_attempt_time" not in existing:
+        conn.execute("ALTER TABLE position_observer_events ADD COLUMN last_attempt_time INTEGER")
+        conn.execute("UPDATE position_observer_events SET last_attempt_time=delivery_time_ms WHERE attempt_count>0")
     conn.execute("INSERT OR IGNORE INTO measurement_migrations VALUES ('5.13.5',?)", (int(time.time()*1000),))
 
 

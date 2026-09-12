@@ -7689,7 +7689,7 @@ async def telegram_command_loop(session):
                         f"🧪 Forward strateji audit: {'açık' if FORWARD_STRATEGY_SHADOW_ENABLED else 'kapalı'} | TP1→BE + TP2→%50/+%{FORWARD_RUNNER_TARGET_PCT:g} + WAIT_RECLAIM + Gate V2.1 gecikmeli fill | SHADOW\n"
                         f"🧪 V5.13.5 stage audit + REAL EARLY + Liquidity/OI Transition V3: {'açık' if STAGE_ENTRY_FORWARD_ENABLED else 'kapalı'} | SHADOW\n"
                         f"📣 Trend={int(TREND_BUILDUP_NOTIFY)} | LIQ_V3={int(LIQ_V3_NOTIFY)} | Research={int(RESEARCH_NOTIFY)} | X={int(X_WATCHER_NOTIFY)}\n"
-                        f"🐦 X watcher: {x_watcher.status if x_watcher else 'NOT_STARTED'} | takip-only shadow\n"
+                        f"🐦 X watcher: {x_watcher.status if x_watcher else 'NOT_STARTED'} | yalnız bilgi ve ölçüm\n"
                         f"💸 DRY maliyet: taraf başına fee %{audit.DRY_FEE_PCT:g} + slippage %{audit.DRY_SLIPPAGE_PCT:g}\n"
                         f"👁 Pozisyon gözlemcisi: tüm gerçek Futures pozisyonları | entry-cross + ROE %5/%10/%20\n"
                         f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | 🔒 LIVE: KİLİTLİ / İZİN YOK\n"
@@ -8377,9 +8377,13 @@ def _x_market(symbol):
     if symbol not in states: return {}
     st=states[symbol]
     if not st.last_trade_receive_ms or now_ms()-st.last_trade_receive_ms>10000: return {}
-    m=compute_metrics(symbol)
-    if not m: return {}
-    return {k:m.get(k) for k in ("price","chg5","chg24")}
+    # Read-only snapshot: compute_metrics prunes shared production queues.
+    candles = list(st.candles)
+    return {"price":st.last_price, "chg24":st.pct24,
+            "chg5":pct_change(st.last_price,candles[-5].close) if len(candles)>=5 else None,
+            "quote_volume24":st.quote_volume24,
+            "trade_event_time_ms":st.last_trade_event_ms,
+            "trade_receive_time_ms":st.last_trade_receive_ms}
 
 
 async def _x_photo(session,url):

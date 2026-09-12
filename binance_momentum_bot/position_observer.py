@@ -63,6 +63,7 @@ class PositionObserver:
         return result.lastrowid
 
     async def poll(self,session):
+        await self.deliver_pending(session)
         positions = await self.request(session,"GET","/fapi/v3/positionRisk")
         if not isinstance(positions,list):
             raise ValueError("positionRisk is not an array")
@@ -125,11 +126,37 @@ class PositionObserver:
                     self.event(c,old,"CLOSE_OBSERVED",None,old["last_roe"],{"exact_close_time_unknown":True})
                     c.execute("UPDATE position_observer_state SET active=0,updated_ts=? WHERE symbol=? AND position_side=?",(now,row["symbol"],row["position_side"]))
             c.commit()
-            deliveries = [dict(r) for r in c.execute("SELECT * FROM position_observer_events WHERE notification_delivery='PENDING'")]
+
         finally:
             c.close()
+        await self.deliver_pending(session)
+
+    async def deliver_pending(self, session):
+        now = int(time.time()*1000)
+        c = self.connect()
+        try:
+            c.row_factory = __import__('sqlite3').Row
+            deliveries = [dict(r) for r in c.execute("""SELECT * FROM position_observer_events
+                WHERE notification_delivery IN ('PENDING','FAILED') AND attempt_count<4
+                AND (last_attempt_time IS NULL OR last_attempt_time +
+                     CASE attempt_count WHEN 1 THEN 30000 WHEN 2 THEN 60000 ELSE 120000 END <= ?)
+                ORDER BY id LIMIT 50""", (now,))]
+        finally:
+            c.close()
+        # One initial attempt + at most three retries, reserved durably before I/O.
         # No SQLite write transaction held during Telegram awaits.
         for e in deliveries:
+            c = self.connect()
+            try:
+                claimed = c.execute("""UPDATE position_observer_events SET attempt_count=attempt_count+1,
+                    last_attempt_time=?,notification_delivery='FAILED'
+                    WHERE id=? AND attempt_count=? AND notification_delivery IN ('PENDING','FAILED')""",
+                    (int(time.time()*1000), e["id"], e["attempt_count"])).rowcount
+                c.commit()
+            finally:
+                c.close()
+            if not claimed:
+                continue
             lev_text = f"{e['leverage']:g}x" if e["leverage"] else "UNKNOWN"
             roe_text = f"{e['roe']:+.2f}%" if e["roe"] is not None else "UNKNOWN"
             text = (f"👁 {e['symbol']} — {e['event']}\n{e['direction']} · {lev_text} · {e['source']}\n"

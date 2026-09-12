@@ -120,7 +120,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_x_multiple_numeric_conditions_stays_manual_watch(self):
         result=xmod.classify('$BTC wait above 100 or below 90',{'BTCUSDT'})
-        self.assertEqual('WATCH_SETUP',result['category']);self.assertIsNone(result['condition'])
+        self.assertEqual('WATCH_SETUP',result['category']);self.assertEqual('$BTC wait above 100 or below 90',result['condition'])
 
     def test_real_legacy_schema_migrates_twice_without_repricing(self):
         old_db=bot.DB_PATH

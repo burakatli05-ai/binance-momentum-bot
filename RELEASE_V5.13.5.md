@@ -1,21 +1,21 @@
 # V5.13.5 review / Railway notes
 
-V5.13.4 production signal and exit rules are retained. This release fixes measurement, notification routing and DRY accounting; it adds shadow-only X and re-entry tracking. Main must not be merged or deployed without the user's next decision.
+V5.13.4 production signal and exit rules are retained. This release fixes measurement, notification routing and DRY accounting; it adds information-only X measurements and shadow re-entry tracking. Main must not be merged or deployed without the user's next decision.
 
 ## Changes
 
 - `binance_momentum_bot/bot.py`: additive integrations, safe notification defaults, separate Trend logging/cooldown, cost-aware DRY close and risk reserve, version/status text, hard LIVE release lock, consistent backup manifest.
 - `research_v5135.py`: idempotent schema additions, actual-decision cohorts and later observation fills, per-episode Premium ordinal, shadow STOP/WATCH/reclaim/new trade/terminal accounting, backup integrity and restore inspection.
-- `position_observer.py`: read-only symbolConfig leverage cache, UNKNOWN behavior, initial-margin ROE priority, persistent position identity and notification event history.
-- `x_watcher.py`, `X_WATCHER_SETUP.md`: official API v2 account reader for `@chartexpt`, silent bootstrap, photo/text delivery log, conservative classification and explicit crossing watches.
+- `position_observer.py`: read-only symbolConfig leverage cache, UNKNOWN behavior, initial-margin ROE priority, persistent position identity, notification event history and at most three durable retries.
+- `x_watcher.py`, `X_WATCHER_SETUP.md`: official API v2 account reader for `@chartexpt`, silent bootstrap, photo/text delivery log, descriptive classification and tweet-relative 5/15/30/60-minute, 4-hour and 24-hour outcomes; no crossing watches or trigger delivery.
 - `.env.example`, `PROJECT_STATE.md`, `.gitignore`: operational defaults, strategy decisions, exclusions for credentials and local databases.
 - `tests/`, `.github/workflows/tests.yml`: offline regression/integration suite and PR CI. No exchange orders, real Telegram sends or production DB required.
 
 ## Validation
 
-Local Python 3.12, isolated dependencies from the existing requirements.txt. All 35 distinct tests passed, including a V5.13.4 schema fixture migrated twice without repricing legacy data. Syntax/compile check passes for application and tests. AST regression checks cover 8 critical production functions and 25 threshold/config definitions against `fd37b56`.
+Local Python 3.12, isolated dependencies from the existing requirements.txt. All 46 distinct tests passed, including a V5.13.4 schema fixture migrated twice without repricing legacy data. Syntax/compile check passes for application and tests. AST regression checks cover 8 critical production functions and 25 threshold/config definitions against `fd37b56`.
 
-Test coverage includes fee/slippage + partial exits, frozen cost settings, duplicate close, daily ledger crash repair, day boundary/open risk, budget boundary, nonfinite risk rejection, initial/current-mid depth capture, real causal stage linking, stop/reclaim/second-trade net accounting, no-quote timeout, restart observation gaps, leverage cache failure/UNKNOWN, Observer reset/close/delivery failure, X silent bootstrap, classification, pagination failure, photos capped at two, delivery retry and one-time condition trigger.
+Test coverage includes fee/slippage + partial exits, frozen cost settings, duplicate close, daily ledger crash repair, day boundary/open risk, budget boundary, nonfinite risk rejection, initial/current-mid depth capture, real causal stage linking, stop/reclaim/second-trade net accounting, no-quote timeout, restart observation gaps, leverage cache failure/UNKNOWN, Observer reset/close/delivery failure, X silent bootstrap, classification, pagination failure, photos capped at two, delivery retry, absence of crossing triggers, historical-price timestamp validation, missing-data recovery, outcome restart idempotency, read-only X market access, and bounded Observer retries across restart/cancellation.
 
 Live API credentials and mobile app routing were not tested. No production DB was accessed. Mobile Binance deep link remains in PROJECT_STATE backlog. X commentary is clearly labeled rule-based Turkish analysis; an LLM service is not required or implied.
 
@@ -32,11 +32,10 @@ Keep existing Telegram/Binance secrets, DB_PATH and production strategy settings
 | RESEARCH_NOTIFY | 0 | Default for other research delivery |
 | SHADOW_EXIT_NOTIFY | 0 | Explicitly override any old deployed value of 1 |
 | X_WATCHER_ENABLED | 1 | Start tracking-only watcher |
-| X_WATCHER_NOTIFY | 1 | Deliver new X messages and shadow triggers |
+| X_WATCHER_NOTIFY | 1 | Deliver informational new-tweet messages only |
 | X_WATCHER_ACCOUNTS | chartexpt | User-confirmed account |
 | X_BEARER_TOKEN | secret, no default | X API read access; set only in Railway secret UI |
 | X_WATCHER_POLL_SECONDS | 60 | Minimum 30 seconds |
-| X_WATCH_TIMEOUT_SECONDS | 86400 | Condition watch expiry |
 | DRY_FEE_PCT_PER_SIDE | 0.05 | Fee percentage on each entry/exit leg |
 | DRY_SLIPPAGE_PCT_PER_SIDE | 0.02 | Cash slippage assumption per side |
 | POSITION_LEVERAGE_CACHE_SECONDS | 300 | Symbol configuration TTL; minimum 30 |
@@ -49,7 +48,7 @@ At flat price, DRY cost is 0.14% round trip. Rates are nonnegative, finite and f
 
 ## DB impact / analysis
 
-Startup adds nullable columns to six existing tables and creates `causal_cohorts`, `causal_cohort_events`, `causal_cohort_outcomes`, `premium_fatigue_shadow`, `position_observer_events`, `measurement_migrations`, and three `x_watcher_*` tables. Existing columns and history remain intact. Migration is repeatable. No UPDATE backfills past fees, P/L, timestamps or liquidity measurements.
+Startup adds nullable columns to six existing tables and creates `causal_cohorts`, `causal_cohort_events`, `causal_cohort_outcomes`, `premium_fatigue_shadow`, `position_observer_events`, `measurement_migrations`, three `x_watcher_*` tables and `x_forward_outcomes`. Existing columns and history remain intact. Migration is repeatable. No UPDATE backfills past fees, P/L, timestamps or liquidity measurements.
 
 Legacy stage rows retain nominal history; new `causal_cohort_id` points to the decision-after-feature dataset. Use `fill_time_ms > decision_time_ms`, `observation_gap=0` and explicit fill_source when selecting executable cohorts. NEXT_TRADE_PROXY is an observation, never a claimed exchange fill. No quotes at timeout produce an explicit unavailable outcome rather than fabricated P/L.
 
@@ -64,3 +63,11 @@ Backup ZIP includes signals.db, backup_info.txt and manifest.json. The manifest 
 Before any future deployment, create and verify a consistent backup. To stop only X delivery, set X_WATCHER_NOTIFY=0 (collection continues); to stop the watcher set X_WATCHER_ENABLED=0. Research modules remain separate from real trading.
 
 For application rollback, select the previous deployment/commit `fd37b56` with AUTO_TRADE_LIVE_ALLOWED=0 and AUTO_TRADE_BOOT_MODE=OFF, retaining additive DB tables/columns. Do not drop tables or overwrite the current database. V5.13.4 lacks the new cost model: keep DRY disabled while rolling back if any new cost-version trades remain open, so they are not closed under old accounting. Preserve the database for reconciliation. A backup restoration, if later needed, must target a separate path and be explicitly reviewed; restoring over the live DB is not part of this PR.
+
+## Information-only revision
+
+X never affects signals, Premium, Early, filters, scores, Gate or AutoTrade. The X market callback reads a snapshot without calling shared queue-pruning metrics. Legacy pending trigger notifications are cancelled and active watches retired; original history is retained. `X_WATCH_TIMEOUT_SECONDS` is obsolete and ignored.
+
+See X_WATCHER_SETUP.md for the measurement contract. Tweet-time and forward prices are explicitly labeled Binance Futures minute-open proxies (up to 59.999 seconds early), not exact tweet ticks. Ingestion context is separately timestamped. No missing historical price is substituted; conditional posts have no direction-adjusted success score. Existing valid tweet timestamps/symbols are adopted for historical measurement, without fabricating legacy context.
+
+Observer `attempt_count` counts the initial send plus at most three retries (maximum 4). `last_attempt_time` is UTC epoch milliseconds. Backoff after failed attempts is 30/60/120 seconds; acknowledged events are never retried. Attempts are reserved before I/O, so interruption consumes an attempt and cannot reset the budget. Existing FAILED/DELIVERED rows migrate to one initial attempt. A Telegram acceptance followed by a crash before acknowledgement can still cause a duplicate. No SQLite write transaction is held over network awaits.
