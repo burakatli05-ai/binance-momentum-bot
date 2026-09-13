@@ -6724,24 +6724,41 @@ def create_consistent_db_backup() -> Tuple[str, str]:
     return zip_path, health
 
 
+# Conservative decimal-byte ceiling for Telegram cloud Bot API multipart documents.
+TELEGRAM_DOCUMENT_MAX_BYTES = 50_000_000
+
+
 async def telegram_send_document(session: aiohttp.ClientSession, file_path: str, caption: str = "", chat_id=None) -> bool:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    form = aiohttp.FormData()
-    form.add_field("chat_id", str(chat_id or TELEGRAM_CHAT_ID))
-    if caption:
-        form.add_field("caption", caption[:1024])
-    with open(file_path, "rb") as f:
-        form.add_field("document", f, filename=os.path.basename(file_path), content_type="application/zip")
+    target_chat=chat_id or TELEGRAM_CHAT_ID
+    reason=None
+    try:
+        size=os.path.getsize(file_path)
+        if size>TELEGRAM_DOCUMENT_MAX_BYTES:
+            reason=(f"Dosya gönderilmedi: {size/1_000_000:.2f} MB ({size:,} bayt). "
+                    f"Telegram dosya limiti {TELEGRAM_DOCUMENT_MAX_BYTES/1_000_000:g} MB. "
+                    "Küçük paket için /latestexport kullanın.")
+        elif not TELEGRAM_BOT_TOKEN or not target_chat:
+            reason="Dosya gönderilemedi: Telegram token veya hedef sohbet ayarı eksik."
+        else:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(target_chat))
+            if caption:form.add_field("caption", caption[:1024])
+            with open(file_path, "rb") as f:
+                form.add_field("document", f, filename=os.path.basename(file_path), content_type="application/zip")
+                async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=180, connect=10, sock_read=170)) as r:
+                    body = await r.json(content_type=None)
+                    if r.status == 200 and isinstance(body,dict) and body.get('ok') is True:
+                        return True
+                    reason=f"Dosya gönderilemedi: Telegram isteği başarısız (HTTP {r.status})."
+    except Exception as exc:
+        reason=f"Dosya gönderilemedi: {type(exc).__name__}."
+    log.error('Telegram sendDocument: %s',reason)
+    if TELEGRAM_BOT_TOKEN and target_chat:
         try:
-            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=180, connect=10, sock_read=170)) as r:
-                body = await r.text()
-                if r.status == 200:
-                    return True
-                log.warning("Telegram sendDocument HTTP %s body=%s", r.status, body[:1000])
-        except Exception as e:
-            log.warning("Telegram sendDocument failed: %r", e)
+            await telegram_send(session,'❌ '+reason,chat_id=target_chat)
+        except Exception as exc:
+            log.error('Document failure notification also failed: %s',type(exc).__name__)
     return False
 
 
@@ -7555,7 +7572,7 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
     text=raw_text.strip(); low=text.lower()
-    if low in ('/altstats','/daytrades','/latestexport'):
+    if low in ('/altstats','/daytrades','/latestexport','/latestexportfull'):
         if not _at_admin_allowed(chat_id,user_id): return True
         if low=='/altstats':
             def get_stats():
@@ -7572,9 +7589,15 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
             finally:c.close()
             await telegram_send(session,message,chat_id=chat_id)
         elif export_worker:
-            bundle=await asyncio.to_thread(export_worker.download_bundle)
+            full=low=='/latestexportfull'
+            try:bundle=await asyncio.to_thread(export_worker.download_bundle,include_db=full)
+            except Exception as exc:
+                log.error('Export bundle failed: %s',type(exc).__name__)
+                await telegram_send(session,f'❌ Export paketi hazırlanamadı: {type(exc).__name__}.',chat_id=chat_id)
+                return True
             if bundle:
-                await telegram_send_document(session,str(bundle),'Son geçerli araştırma snapshot + manifest + mevcut summary',chat_id=chat_id)
+                caption='Tam export: signals.db + manifest + summary + metadata' if full else 'Küçük export: manifest + summary + metadata (DB içermez)'
+                await telegram_send_document(session,str(bundle),caption,chat_id=chat_id)
             else:await telegram_send(session,'Henüz doğrulanmış export yok.',chat_id=chat_id)
         else:await telegram_send(session,'Export kapalı: RESEARCH_EXPORT_ENABLED=0.',chat_id=chat_id)
         return True
