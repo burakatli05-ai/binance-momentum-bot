@@ -25,6 +25,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import research_v5135 as audit
+import alt_shadow
+import research_reports
+import research_export
+import daytrades
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -32,6 +36,10 @@ RESEARCH_NOTIFY = audit.flag("RESEARCH_NOTIFY", False)
 LIQ_V3_NOTIFY = audit.flag("LIQ_V3_NOTIFY", False)
 measurements = None
 x_watcher = None
+alt_engine = None
+export_worker = None
+ALT_SHADOW_ENABLED = audit.flag('ALT_SHADOW_ENABLED', True)
+RESEARCH_EXPORT_ENABLED = audit.flag('RESEARCH_EXPORT_ENABLED', False)
 
 
 REST = "https://fapi.binance.com"
@@ -1464,6 +1472,7 @@ def init_db():
          "V5.13.4: trend-build REAL EARLY watch + liquidity/OI transition V3 shadow + all-position observer + projected-risk guard; production Premium thresholds unchanged",int(time.time())),
     )
     audit.migrate(conn)
+    alt_shadow.migrate(conn)
     from x_watcher import migrate as migrate_x
     migrate_x(conn)
     conn.commit()
@@ -3258,7 +3267,7 @@ def _arm_stage_entry(symbol: str, stage: str, m: dict, episode_id: int, created_
     if measurements:
         cohort_id=measurement_call("arm",f"stage:{rid}",symbol,stage,signal_id=signal_id,episode_id=episode_id,
             nominal_ms=int(created*1000),ready_ms=ready,stop_pct=max(0.01,(fill-float(levels.get("stop") or fill))*100/fill),
-            tp_pct=max(0.01,(float(levels.get("tp2") or fill)-fill)*100/fill))
+            tp_pct=max(0.01,(float(levels.get("tp2") or fill)-fill)*100/fill),features=m)
     conn=db_connect()
     try:
         conn.execute("UPDATE entry_stage_forward_shadow SET feature_ready_time_ms=?,decision_time_ms=?,nominal_time_ms=?,causal_cohort_id=? WHERE id=?",(ready,now_ms(),int(created*1000),cohort_id,rid)); conn.commit()
@@ -6193,6 +6202,9 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                             log.warning("Causal research tick failed: %s",type(exc).__name__)
                     if st.quote_volume24 >= min(MIN_24H_QUOTE_VOLUME, NEAR_MISS_MIN_QV24):
                         asyncio.create_task(evaluate(session, sym))
+                    if alt_engine:
+                        fresh_ask=st.ask_price if st.last_book_receive_ms and now_ms()-st.last_book_receive_ms<=MAX_SYMBOL_BOOK_STALE_S*1000 else None
+                        alt_engine.feed(sym,price,int(ts),now_ms(),fresh_ask)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -6712,12 +6724,12 @@ def create_consistent_db_backup() -> Tuple[str, str]:
     return zip_path, health
 
 
-async def telegram_send_document(session: aiohttp.ClientSession, file_path: str, caption: str = "") -> bool:
+async def telegram_send_document(session: aiohttp.ClientSession, file_path: str, caption: str = "", chat_id=None) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     form = aiohttp.FormData()
-    form.add_field("chat_id", str(TELEGRAM_CHAT_ID))
+    form.add_field("chat_id", str(chat_id or TELEGRAM_CHAT_ID))
     if caption:
         form.add_field("caption", caption[:1024])
     with open(file_path, "rb") as f:
@@ -7543,6 +7555,29 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
     text=raw_text.strip(); low=text.lower()
+    if low in ('/altstats','/daytrades','/latestexport'):
+        if not _at_admin_allowed(chat_id,user_id): return True
+        if low=='/altstats':
+            def get_stats():
+                c=db_connect()
+                try:return research_reports.altstats_text(c)
+                finally:c.close()
+            await telegram_send(session,await asyncio.to_thread(get_stats),chat_id=chat_id)
+        elif low=='/daytrades':
+            async def read_account(path,params):
+                if path not in ('/fapi/v1/income','/fapi/v1/userTrades','/fapi/v1/order'):raise ValueError('read-only history endpoint required')
+                return await binance_signed_request(session,'GET',path,params)
+            c=db_connect()
+            try:message=await daytrades.report(c,read_account,now_ms())
+            finally:c.close()
+            await telegram_send(session,message,chat_id=chat_id)
+        elif export_worker:
+            bundle=await asyncio.to_thread(export_worker.download_bundle)
+            if bundle:
+                await telegram_send_document(session,str(bundle),'Son geçerli araştırma snapshot + manifest + mevcut summary',chat_id=chat_id)
+            else:await telegram_send(session,'Henüz doğrulanmış export yok.',chat_id=chat_id)
+        else:await telegram_send(session,'Export kapalı: RESEARCH_EXPORT_ENABLED=0.',chat_id=chat_id)
+        return True
     if low in ("/settings","/tradesettings"):
         if not _at_admin_allowed(chat_id,user_id): return True
         await telegram_send(session,_at_panel_text(),chat_id=chat_id,reply_markup=_at_panel_markup()); return True
@@ -8372,6 +8407,30 @@ async def measurement_maintenance_loop():
         await asyncio.sleep(5)
 
 
+async def alt_shadow_loop():
+    global alt_engine
+    while not stop_event.is_set():
+        if alt_engine:
+            # Snapshot closed candles on the event loop; all DB work runs off-loop.
+            candles={symbol:[(x.open_time,x.open,x.high,x.low,x.close) for x in list(st.candles)] for symbol,st in states.items()}
+            try:await asyncio.to_thread(alt_engine.step,candles)
+            except Exception as exc:
+                log.error('ALT shadow failed; recovering durable state: %s',type(exc).__name__)
+                try:alt_engine=await asyncio.to_thread(alt_shadow.ShadowEngine,db_connect,alt_engine.starting_balance)
+                except Exception:
+                    alt_engine=None
+                    log.error('ALT shadow stopped; production continues; inspect research DB error')
+        await asyncio.sleep(1)
+
+
+async def research_export_loop():
+    while not stop_event.is_set():
+        if export_worker:
+            try:await asyncio.to_thread(export_worker.run_due)
+            except Exception as exc:log.error('Research export failed: %s',type(exc).__name__)
+        await asyncio.sleep(30)
+
+
 def _x_market(symbol):
     if symbol is None: return set(symbols)
     if symbol not in states: return {}
@@ -8392,10 +8451,16 @@ async def _x_photo(session,url):
 
 
 async def main():
-    global measurements,x_watcher
+    global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
     measurements=audit.Measurements(db_connect)
+    if ALT_SHADOW_ENABLED:
+        alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
+    if RESEARCH_EXPORT_ENABLED:
+        export_worker=research_export.Exporter(DB_PATH,os.getenv('RESEARCH_EXPORT_DIR',os.path.join(os.path.dirname(DB_PATH),'research_exports')),
+            version=BOT_VERSION,deployment=os.getenv('RAILWAY_DEPLOYMENT_ID','UNKNOWN'),
+            config={'models':alt_shadow.MODELS,'fee_pct':audit.DRY_FEE_PCT,'slippage_pct':audit.DRY_SLIPPAGE_PCT,'alt_enabled':ALT_SHADOW_ENABLED})
     x_watcher=XWatcher(db_connect,_x_market,_observer_send,_x_photo)
     load_autotrade_settings()
     timeout = aiohttp.ClientTimeout(total=30)
@@ -8443,6 +8508,7 @@ async def main():
             outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session), autotrade_reconcile_loop(session), position_observer_loop(session), x_watcher.run(session,stop_event), measurement_maintenance_loop(),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
+        tasks.extend((alt_shadow_loop(),research_export_loop()))
         await asyncio.gather(*tasks)
 
 

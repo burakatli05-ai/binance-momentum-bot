@@ -11,9 +11,9 @@ class LeverageCache:
         self.values = {}
         self.retry_after = 0
 
-    async def refresh(self, session, request):
+    async def refresh(self, session, request, force=False):
         now = time.monotonic()
-        if now < self.expires or now < self.retry_after:
+        if not force and (now < self.expires or now < self.retry_after):
             return
         try:
             rows = await request(session,"GET","/fapi/v1/symbolConfig")
@@ -54,6 +54,8 @@ class PositionObserver:
 
     def event(self,c,state,event,mark,roe,detail=None,notify=False):
         now = int(time.time()*1000)
+        detail=dict(detail or {})
+        detail.setdefault("pnl",state.get("last_unrealized_pnl"))
         result = c.execute("""INSERT INTO position_observer_events
             (position_instance_id,symbol,position_side,event,event_time_ms,entry_price,current_price,direction,source,leverage,leverage_source,margin_source,roe,detail_json,notification_delivery)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -67,7 +69,20 @@ class PositionObserver:
         positions = await self.request(session,"GET","/fapi/v3/positionRisk")
         if not isinstance(positions,list):
             raise ValueError("positionRisk is not an array")
-        await self.cache.refresh(session,self.request)
+        # New position basis forces an authoritative refresh before any new card.
+        with __import__('contextlib').closing(self.connect()) as before:
+            before.row_factory = __import__('sqlite3').Row
+            previous = {(r['symbol'],r['position_side']):dict(r) for r in before.execute('SELECT * FROM position_observer_state')}
+        force = False
+        for p in positions:
+            amount=float(p.get('positionAmt') or 0)
+            if abs(amount)<1e-12: continue
+            side=p.get('positionSide') or 'BOTH';entry=float(p.get('entryPrice') or 0)
+            direction='LONG' if side=='LONG' or side=='BOTH' and amount>0 else 'SHORT'
+            old=previous.get((p['symbol'],side))
+            if not old or not old['active'] or not old.get('position_instance_id') or old['direction']!=direction or entry>0 and abs(old['entry_price']-entry)/entry*100>0.01:
+                force=True
+        await self.cache.refresh(session,self.request,force=force)
         active = set()
         now = int(time.time())
         c = self.connect()
@@ -157,11 +172,7 @@ class PositionObserver:
                 c.close()
             if not claimed:
                 continue
-            lev_text = f"{e['leverage']:g}x" if e["leverage"] else "UNKNOWN"
-            roe_text = f"{e['roe']:+.2f}%" if e["roe"] is not None else "UNKNOWN"
-            text = (f"👁 {e['symbol']} — {e['event']}\n{e['direction']} · {lev_text} · {e['source']}\n"
-                    f"Entry: {e['entry_price']:g} | Anlık: {e['current_price']:g}\nROE: {roe_text}\n"
-                    f"{e['detail_json']}\nLeverage: {e['leverage_source']} | Margin: {e['margin_source']}")
+            text = render_card(e)
             try:
                 ok = bool(await self.send(session,text))
             except Exception:
@@ -171,3 +182,23 @@ class PositionObserver:
                 c.execute("UPDATE position_observer_events SET notification_delivery=?,delivery_time_ms=? WHERE id=?",("DELIVERED" if ok else "FAILED",int(time.time()*1000),e["id"])); c.commit()
             finally:
                 c.close()
+
+
+def render_card(event):
+    def price(value):
+        return 'UNKNOWN' if value is None else f'{value:g}'
+    detail=json.loads(event.get('detail_json') or '{}')
+    leverage=price(event.get('leverage'))+('x' if event.get('leverage') else '')
+    roe='UNKNOWN' if event.get('roe') is None else f"{event['roe']:+.2f}%"
+    pnl=detail.get('pnl')
+    pnl_text='UNKNOWN' if pnl is None else f'{pnl:+.2f} USDT'
+    source=event.get('source') or 'UNKNOWN'
+    if source.startswith('BOT'): source='BOT'
+    label=event['event']
+    if detail.get('milestones'):
+        sign='+' if label=='ROE_PROFIT' else '-'
+        label='ROE '+ ' / '.join(f'{sign}{n:g}%' for n in detail['milestones'])
+    return (f"👁 {event['symbol']} — {label}\n"
+            f"{event.get('direction') or 'UNKNOWN'} · {source}\n"
+            f"Giriş: {price(event.get('entry_price'))} | Anlık: {price(event.get('current_price'))}\n"
+            f"Kaldıraç: {leverage} | ROE: {roe}\nPnL: {pnl_text}")
