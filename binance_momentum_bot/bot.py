@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import research_v5135 as audit
-import early_continuation_bridge as ec_bridge
 import alt_shadow
 import research_reports
 import research_export
@@ -3818,7 +3817,7 @@ def save_candidate_event(symbol: str, event: str, m: Optional[dict] = None, scor
         rank = gainers_prev_rank.get(symbol)
         age = (time.time() - st.candidate_since) if st.candidate_since else 0.0
         conn = db_connect()
-        ec_cursor = conn.execute(
+        conn.execute(
             """INSERT INTO candidate_events
             (ts,symbol,event,price,score,chg30,chg60,chg5,flow30,buy30,book_imbalance,rel30,breakout,candidate_age_s,confirm_passes,gainer_rank,qv24,note,episode_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -3828,7 +3827,6 @@ def save_candidate_event(symbol: str, event: str, m: Optional[dict] = None, scor
         )
         conn.commit()
         conn.close()
-        ec_bridge.capture(globals(), symbol, event, m, score, source_id=ec_cursor.lastrowid, terminal=event, note=note)
     except Exception as e:
         log.debug("candidate event save failed %s %s: %r", symbol, event, e)
 
@@ -4003,7 +4001,6 @@ def end_episode(symbol: str, reason: str, m: Optional[dict] = None, score: Optio
         st.prev_meaningful_price = price or st.episode_start_price
         st.prev_meaningful_peak_price = st.episode_peak_price
         st.prev_meaningful_low_price = price or st.episode_low_price or st.episode_start_price
-    ec_bridge.capture(globals(), symbol, "episode_reset", m or {}, score, terminal=reason)
     st.episode_id = 0
     st.episode_started_ts = 0.0
     st.episode_start_price = 0.0
@@ -4081,7 +4078,6 @@ def add_research_event(event_type: str, symbol: str, m: dict, score: Optional[in
     )
     event_id = int(cur.lastrowid)
     conn.commit(); conn.close()
-    ec_bridge.research(globals(), event_id, event_type, symbol, m, score, shadow_score)
     pending_research.append(PendingResearch(event_id, symbol, float(m["price"]), time.time()))
     ready = now_ms()
     cohort_id = None
@@ -4295,7 +4291,6 @@ async def maybe_trend_build_up(session, symbol: str, m: dict, score: int, now: f
     if now-st.trend_build_last_check < TREND_BUILDUP_CONFIRM_INTERVAL_S: return
     st.trend_build_last_check=now
     tscore,ctx,reasons=_trend_build_score(symbol,m)
-    ec_bridge.capture(globals(), symbol, "trend_evaluation", m, score, context=ctx, trend_score=tscore)
     if tscore >= TREND_BUILDUP_MIN_SCORE:
         st.trend_build_passes += 1
     else:
@@ -5746,7 +5741,6 @@ async def evaluate(session, symbol: str):
         if not m:
             return
         score = score_metrics(m)
-        ec_bridge.capture(globals(), symbol, "candidate_evaluation", m, score)
         maybe_record_v59_research(symbol, m, score, now, candidate_active=bool(st.candidate_since))
         if m.get("qv24", 0) < MIN_24H_QUOTE_VOLUME:
             return
@@ -5771,7 +5765,6 @@ async def evaluate(session, symbol: str):
             save_candidate_event(symbol, "candidate_start", m, score, st)
             _arm_stage_entry(symbol, "CANDIDATE", m, st.episode_id or 0, created_ts=now, decision="QUALIFIES_START")
             log.info("CANDIDATE %s score=%d episode=%s", symbol, score, st.episode_id)
-            ec_bridge.capture(globals(), symbol, "early_watch_evaluation", m, score)
             if early_watch_pass(m, score) and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS:
                 st.radar_record_ts = now
                 st.active_radar_id = save_radar_signal(symbol, m, score)
@@ -5806,7 +5799,6 @@ async def evaluate(session, symbol: str):
         st.candidate_prices.append(m["price"])
         st.candidate_scores.append(score)
 
-        ec_bridge.capture(globals(), symbol, "continuity_evaluation", m, score)
         if continuity_pass(m, score):
             prices = list(st.candidate_prices)
             price_ok = len(prices) < 2 or prices[-1] >= prices[-2] * 0.999
@@ -5814,7 +5806,6 @@ async def evaluate(session, symbol: str):
                 st.candidate_passes += 1
                 funnel_hit("confirm_pass")
                 save_candidate_event(symbol, "confirm_pass", m, score, st)
-                ec_bridge.capture(globals(), symbol, "early_watch_evaluation", m, score)
                 if (not st.active_radar_id and early_watch_pass(m, score)
                         and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS):
                     st.radar_record_ts = now
@@ -5824,7 +5815,6 @@ async def evaluate(session, symbol: str):
                     pending_radars.append(PendingRadar(st.active_radar_id, symbol, m["price"], now))
                     funnel_hit("early_radar")
                     save_candidate_event(symbol, "early_radar", m, score, st, "created at confirm stage")
-                ec_bridge.capture(globals(), symbol, "early_notify_evaluation", m, score)
                 if (st.active_radar_id and not st.active_radar_notified
                         and now - st.early_alert_ts >= EARLY_ALERT_COOLDOWN_SECONDS
                         and early_notify_pass(m, score, st)):
@@ -6189,7 +6179,6 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                     recv_ms = now_ms()
                     st.last_trade_event_ms = ts
                     st.last_trade_receive_ms = recv_ms
-                    ec_bridge.tick(sym, price, d.get("T"), recv_ms)
                     st.last_price = price
                     st.agg_events += 1
                     trade_event_count += 1
@@ -8488,7 +8477,6 @@ async def main():
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
-    ec_bridge.start(globals())
     measurements=audit.Measurements(db_connect)
     if ALT_SHADOW_ENABLED:
         alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
