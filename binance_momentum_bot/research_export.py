@@ -86,20 +86,26 @@ class Exporter:
         if digest!=manifest['sha256']:raise ValueError('snapshot hash mismatch')
         return directory,manifest
 
-    def download_bundle(self):
+    def download_bundle(self, *, include_db=False):
         latest=self.latest()
         if not latest:return None
         directory,manifest=latest
-        bundle=directory/'export.zip'
+        bundle=directory/('export-full.zip' if include_db else 'export-small.zip')
+        metadata={'snapshot_id':manifest['snapshot_id'],'snapshot_created_time_ms':manifest['created_time_ms'],
+                  'snapshot_sha256':manifest['sha256'],'includes_database':include_db,'summary_source':None}
         with zipfile.ZipFile(bundle,'w',zipfile.ZIP_DEFLATED) as z:
-            z.write(directory/'signals.db','signals.db');z.write(directory/'manifest.json','manifest.json')
+            if include_db:z.write(directory/'signals.db','signals.db')
+            z.write(directory/'manifest.json','manifest.json')
             pointer=self.root/'latest-summary.json'
             if pointer.exists():
                 info=json.loads(pointer.read_text(encoding='utf-8'))
                 summary_dir=(self.root/info['snapshot_id']).resolve()
                 if summary_dir.parent!=self.root:raise ValueError('invalid summary pointer')
                 z.write(summary_dir/'summary.json','summary.json')
-                z.writestr('summary-source.json',json.dumps(info))
+                metadata['summary_source']=info
+            else:
+                z.writestr('summary.json',json.dumps({'status':'NO_SUMMARY_AVAILABLE'}))
+            z.writestr('metadata.json',json.dumps(metadata,ensure_ascii=False,indent=2))
         return bundle
 
     def snapshot(self,now):
