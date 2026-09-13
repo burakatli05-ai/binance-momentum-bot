@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import time
 import unittest
+from ec_test_support import production_tree
 from unittest.mock import AsyncMock,patch
 
 import test_v5135 as fixtures
@@ -228,7 +229,7 @@ class AltCase(unittest.TestCase):
 class ExtendedInvariants(unittest.TestCase):
     def test_current_baseline_and_no_shadow_production_consumers(self):
         baseline=json.loads((fixtures.ROOT/'tests/alt_production_baseline.json').read_text())
-        tree=ast.parse((fixtures.ROOT/'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
+        tree=production_tree(ast.parse((fixtures.ROOT/'binance_momentum_bot/bot.py').read_text(encoding='utf-8')))
         functions={n.name:n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}
         for name,digest in baseline['functions'].items():
             self.assertEqual(digest,hashlib.sha256(ast.dump(functions[name],include_attributes=False).encode()).hexdigest(),name)
