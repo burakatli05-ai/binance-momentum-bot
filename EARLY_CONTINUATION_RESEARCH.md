@@ -137,7 +137,14 @@ queue. One daemon worker owns its own SQLite connection, aggregates tick extrema
 in memory, and checkpoints once per second. No transaction is held while waiting
 for another queue item. Only watched symbols enqueue ticks; no per-tick DB history
 queries or network requests are added. SQLite lock waits are bounded to 100 ms in
-the worker. An unrecoverable worker/DB error disables collection and logs an error;
+the worker. Transient SQLITE_BUSY/SQLITE_LOCKED operations retry in place up to five
+times with 50/100/200/400/800 ms backoff, entirely on that worker. The finite budget
+also applies to COMMIT and the idempotent schema initialization. Engine methods are
+not replayed, so retries do not double-count candidates or regenerate causal IDs.
+Recovered interruptions persist as `SQLITE_LOCK_RETRY` gaps with duration, retry
+count and operation names. Diagnostic writes use the same bounded retry without
+recursively generating diagnostics. Queue overflow during a wait retains the existing
+loss accounting. Exhausted contention or an unexpected worker/DB error disables collection and logs an error;
 stopped run heartbeats expose that interruption. The scanner continues unchanged.
 Queue drops are counted and persisted as gaps rather than causing scanner waits.
 

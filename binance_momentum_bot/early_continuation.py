@@ -33,6 +33,78 @@ OPERANDS = ('chg10', 'chg30', 'chg60', 'chg5', 'rel30', 'flow10', 'flow30',
             'higher_lows', 'positive5', 'gainers_rank', 'rank_velocity', 'trend_score',
             'score', 'candidate_age_s', 'candidate_passes')
 
+# Worker-only delays, in addition to SQLite's existing 100ms busy timeout.
+LOCK_RETRY_DELAYS = (.05, .10, .20, .40, .80)
+
+
+def transient_lock(error):
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, 'sqlite_errorcode', None)
+    if code is not None:
+        return code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # Compatibility with exceptions without native error codes; never retry arbitrary
+    # OperationalError messages (missing schema, disk errors, corruption, etc.).
+    message = str(error).lower()
+    return message in ('database is locked', 'database is busy', 'database table is locked')
+
+
+class WorkerConnection:
+    """Retry the failed SQL operation in place, not the stateful Engine method.
+
+    BUSY/LOCKED leave these single statements/COMMIT uncompleted. Retaining the
+    transaction avoids duplicate C2 increments, event links or partial outcomes.
+    A snapshot conflict that cannot recover in place exhausts the same finite budget.
+    """
+    def __init__(self, connection):
+        self.connection = connection
+        self.interruption = None
+        self.reporting = False
+
+    def call(self, operation, *args):
+        for attempt in range(len(LOCK_RETRY_DELAYS)+1):
+            try:
+                return getattr(self.connection, operation)(*args)
+            except sqlite3.OperationalError as error:
+                if not transient_lock(error) or attempt == len(LOCK_RETRY_DELAYS):
+                    raise
+                if not self.reporting:
+                    now = int(time.time()*1000)
+                    if self.interruption is None:
+                        self.interruption = dict(start=now, retries=0, operations=set())
+                    self.interruption['retries'] += 1
+                    self.interruption['operations'].add(operation)
+                time.sleep(LOCK_RETRY_DELAYS[attempt])
+
+    def execute(self, *args):
+        return self.call('execute', *args)
+
+    def executescript(self, script):
+        # Only migrate() uses this, and every statement is idempotent CREATE IF NOT EXISTS.
+        return self.call('executescript', script)
+
+    def commit(self):
+        return self.call('commit')
+
+    def close(self):
+        self.connection.close()
+
+    def report_interruptions(self, engine):
+        if self.interruption is None:
+            return
+        interruption = self.interruption
+        self.reporting = True
+        try:
+            engine.gap(None, 'SQLITE_LOCK_RETRY', interruption['start'], int(time.time()*1000),
+                       detail={'retries': interruption['retries'],
+                               'operations': sorted(interruption['operations'])})
+            self.commit()
+            self.interruption = None
+        finally:
+            # Diagnostic writes have the same finite retry budget, without recursively
+            # creating more diagnostics for their own contention.
+            self.reporting = False
+
 
 def dumps(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
@@ -340,8 +412,9 @@ class Collector:
         c = None
         try:
             # mode=rw: never create a missing database or volume. Worker lock waits are bounded.
-            c = sqlite3.connect(Path(self.path).resolve().as_uri()+'?mode=rw', uri=True, timeout=.1)
+            c = WorkerConnection(sqlite3.connect(Path(self.path).resolve().as_uri()+'?mode=rw', uri=True, timeout=.1))
             engine = Engine(c, self.config, self.code_hash, self.app_version, int(time.time()*1000))
+            c.report_interruptions(engine)
             for p in engine.active.values(): self.watch[p['symbol']] = p['start']+3_600_000
             last_flush = time.monotonic()
             reported_loss = 0
@@ -371,7 +444,9 @@ class Collector:
                 else:
                     # Never hold a SQLite write transaction across a queue wait.
                     c.commit()
+                c.report_interruptions(engine)
             engine.flush(int(time.time()*1000))
+            c.report_interruptions(engine)
         except Exception:
             # Scanner remains operational; incomplete persisted observations recover as gapped.
             logging.getLogger(__name__).exception('Early continuation worker disabled; telemetry incomplete')
