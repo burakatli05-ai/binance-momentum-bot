@@ -126,7 +126,7 @@ class Measurements:
                   (item["id"], kind, event_ms, observed_ms, price, json.dumps(detail or {})))
 
     def arm(self, source_key, symbol, stage, *, signal_id=None, episode_id=0, nominal_ms=None,
-            stop_pct=1.0, tp_pct=2.0, ready_ms=None, parent=None):
+            stop_pct=1.0, tp_pct=2.0, ready_ms=None, parent=None, features=None):
         now = int(time.time()*1000)
         with connection(self.connect) as c:
             existing = c.execute("SELECT id FROM causal_cohorts WHERE source_key=?", (source_key,)).fetchone()
@@ -144,7 +144,7 @@ class Measurements:
                         fee_pct_per_side=DRY_FEE_PCT, slippage_pct_per_side=DRY_SLIPPAGE_PCT,
                         reclaim_price=parent["first_executable_price"] if parent else None,
                         deadline_ms=now+int(REENTRY_TIMEOUT_S*1000), observation_gap=0,
-                        config_json=json.dumps({"version":"5.13.5", "shadow":True, "reclaim_confirm_s":REENTRY_CONFIRM_S}),
+                        config_json=json.dumps({"version":"5.13.5", "shadow":True, "reclaim_confirm_s":REENTRY_CONFIRM_S,"decision_features":features or {},"risk_at_entry_pct":abs(stop_pct)+2*(DRY_FEE_PCT+DRY_SLIPPAGE_PCT)}),
                         mfe_pct=0.0, mae_pct=0.0)
             cols = list(item)
             c.execute(f"INSERT INTO causal_cohorts({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", tuple(item.values()))
@@ -190,6 +190,19 @@ class Measurements:
                 x["last_event_time_ms"] = event_ms
                 changes = {"last_event_time_ms":event_ms}
                 if x["status"] == "WATCH":
+                    context=json.loads(x['config_json'])
+                    prices=context.get('watch_prices',[])
+                    if len(prices)==2 and prices[1]<prices[0] and price>prices[1]:
+                        low=prices[1]
+                        if context.get('previous_low') is not None and low>context['previous_low']:
+                            self.event(c,x,'HIGHER_LOW',event_ms,observed_ms,price,{'low':low,'previous_low':context['previous_low']})
+                            context['higher_low_observed']=True
+                        context['previous_low']=low
+                    context['watch_prices']=(prices+[price])[-2:]
+                    changes['config_json']=json.dumps(context)
+                    if price>=x['reclaim_price'] and prices and prices[-1]<x['reclaim_price']:
+                        self.event(c,x,'RECLAIM',event_ms,observed_ms,price)
+                        if context.get('higher_low_observed'):self.event(c,x,'SECOND_WAVE',event_ms,observed_ms,price)
                     if observed_ms >= x["deadline_ms"]:
                         changes.update(status="TIMEOUT", first_event="WATCH_TIMEOUT", first_event_time_ms=observed_ms)
                         parent = c.execute("SELECT net_pnl_pct FROM causal_cohorts WHERE id=?", (x["parent_id"],)).fetchone()
