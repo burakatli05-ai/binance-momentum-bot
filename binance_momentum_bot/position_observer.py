@@ -1,12 +1,17 @@
 """Read-only Futures position observer with durable identity and event history."""
+import asyncio
+import logging
+import math
 import json
 import time
 import uuid
-from telegram_cards import ownership, number
+from telegram_cards import ownership, number, timestamp
 
 # Notification-only hysteresis (ROE percentage points) and cooldown. Not trade gates.
 RECOVERY_HYSTERESIS = 1.0
 ALERT_COOLDOWN_S = 60
+REQUEST_TIMEOUT_S = 15
+log = logging.getLogger(__name__)
 
 
 def roe_crossings(memory, roe, milestones, loss_hits, now):
@@ -68,9 +73,34 @@ def roe_values(p, direction, entry, mark, leverage):
 
 class PositionObserver:
     def __init__(self, connect, request, send, source, zone, milestones, confirm_s, ttl=300):
-        self.connect,self.request,self.send,self.source,self.zone = connect,request,send,source,zone
+        self.connect,self.send,self.source,self.zone = connect,send,source,zone
+        self._request = request
+        self.baselined = False
+        self.stage = "idle"
         self.milestones,self.confirm_s = milestones,confirm_s
         self.cache = LeverageCache(ttl)
+
+    async def request(self, session, method, path):
+        self.stage = path.rsplit('/', 1)[-1]
+        return await asyncio.wait_for(self._request(session, method, path), REQUEST_TIMEOUT_S)
+
+    async def safe_delivery(self, session):
+        try:
+            self.stage = 'delivery'
+            await self.deliver_pending(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.warning('Position observer delivery failed (%s); durable queue retained', type(error).__name__)
+
+    async def poll(self, session):
+        try:
+            return await self._poll(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.warning('Position observer poll failed at %s (%s); retry next poll', self.stage, type(error).__name__)
+            return False
 
     def event(self,c,state,event,mark,roe,detail=None,notify=False):
         now = int(time.time()*1000)
@@ -84,11 +114,28 @@ class PositionObserver:
              json.dumps(detail or {}),"PENDING" if notify else "NOT_REQUESTED"))
         return result.lastrowid
 
-    async def poll(self,session):
-        await self.deliver_pending(session)
+    async def _poll(self,session):
+        await self.safe_delivery(session)
         positions = await self.request(session,"GET","/fapi/v3/positionRisk")
         if not isinstance(positions,list):
             raise ValueError("positionRisk is not an array")
+        # Validate the complete snapshot before any state/close mutation. A malformed
+        # response must never masquerade as a missing (closed) position.
+        seen = set()
+        for p in positions:
+            key = (p['symbol'], p.get('positionSide') or 'BOTH')
+            if not key[0] or key[1] not in ('BOTH', 'LONG', 'SHORT') or key in seen:
+                raise ValueError('invalid position identity')
+            seen.add(key)
+            amount = float(p['positionAmt'])
+            if not math.isfinite(amount): raise ValueError('invalid position amount')
+            if abs(amount) > 1e-12:
+                for field in ('entryPrice', 'markPrice'):
+                    value = float(p[field])
+                    if not math.isfinite(value) or value <= 0: raise ValueError('invalid position price')
+                for field in ('unRealizedProfit', 'unrealizedProfit', 'positionInitialMargin'):
+                    if p.get(field) is not None and not math.isfinite(float(p[field])):
+                        raise ValueError('invalid position metric')
         # New position basis forces an authoritative refresh before any new card.
         with __import__('contextlib').closing(self.connect()) as before:
             before.row_factory = __import__('sqlite3').Row
@@ -103,6 +150,7 @@ class PositionObserver:
             if not old or not old['active'] or not old.get('position_instance_id') or old['direction']!=direction or entry>0 and abs(old['entry_price']-entry)/entry*100>0.01:
                 force=True
         await self.cache.refresh(session,self.request,force=force)
+        self.stage = "state transaction"
         active = set()
         now = int(time.time())
         c = self.connect()
@@ -144,7 +192,12 @@ class PositionObserver:
                 if reset:
                     if old and old.get("position_instance_id") and old["active"]:
                         self.event(c,old,"RESET",mark,old["last_roe"],{"next_instance_id":instance})
-                    self.event(c,s,"OPEN_OBSERVED",mark,roe,{"entry_observation_only":True})
+                    # First successful snapshot is adoption, including positions opened
+                    # while this process was offline. Same-direction basis changes (e.g.
+                    # scale-in) are not a new opening announcement.
+                    announce = self.baselined and (old is None or not old['active'] or old['direction'] != direction)
+                    self.event(c,s,"OPEN_OBSERVED",mark,roe,{"entry_observation_only":True,
+                        "adopted":not announce},announce)
                 else:
                     if not old.get("position_instance_id"):
                         self.event(c,s,"ADOPT_EXISTING",mark,roe)
@@ -181,10 +234,12 @@ class PositionObserver:
                     self.event(c,old,"CLOSE_OBSERVED",None,old["last_roe"],{"exact_close_time_unknown":True},True)
                     c.execute("UPDATE position_observer_state SET active=0,updated_ts=? WHERE symbol=? AND position_side=?",(now,row["symbol"],row["position_side"]))
             c.commit()
+            self.baselined = True
 
         finally:
             c.close()
-        await self.deliver_pending(session)
+        await self.safe_delivery(session)
+        return True
 
     async def deliver_pending(self, session):
         now = int(time.time()*1000)
@@ -214,7 +269,7 @@ class PositionObserver:
                 continue
             text = render_card(e)
             try:
-                ok = bool(await self.send(session,text))
+                ok = bool(await asyncio.wait_for(self.send(session,text), REQUEST_TIMEOUT_S))
             except Exception:
                 ok = False
             c = self.connect()
@@ -228,7 +283,7 @@ def render_card(event):
     detail=json.loads(event.get('detail_json') or '{}')
     kind=event['event']
     label={'ENTRY_CROSS_LOSS':'🔴 GİRİŞ ALTINA İNDİ','ENTRY_CROSS_PROFIT':'🟢 GİRİŞ ÜZERİNE ÇIKTI',
-           'CLOSE_OBSERVED':'🔵 POZİSYON KAPANDI','OPEN_OBSERVED':'👁 POZİSYON İZLENİYOR',
+           'CLOSE_OBSERVED':'🔵 POZİSYON KAPANDI','OPEN_OBSERVED':'🟢 POZİSYON AÇILDI',
            'RESET':'👁 POZİSYON BİLGİSİ YENİLENDİ','ADOPT_EXISTING':'👁 POZİSYON İZLENİYOR'}.get(kind,'👁 POZİSYON BİLDİRİMİ')
     if detail.get('milestones'):
         values=' / '.join(f'{"+" if kind=="ROE_PROFIT" else "-"}%{n:g}' for n in detail['milestones'])
@@ -239,4 +294,5 @@ def render_card(event):
             f'Giriş: {number(event.get("entry_price"))} | {"Kapanış" if closed else "Anlık"}: {number(event.get("current_price"))}\n'
             f'Kaldıraç: {number(event.get("leverage"),"x")} | {"Son gözlem ROE" if closed else "ROE"}: {number(event.get("roe"),"%",True)}\n'
             f'{"Son gözlem P/L" if closed else "P/L"}: {number(detail.get("pnl")," USDT",True)}'+
-            ('\nKesin kapanış fiyatı/gerçekleşmiş P/L bu gözlemde yok.' if closed else ''))
+            ('\nKesin kapanış fiyatı/gerçekleşmiş P/L bu gözlemde yok.' if closed else '')+
+            ('\nGözlem: '+timestamp(event.get('event_time_ms')) if kind=='OPEN_OBSERVED' else ''))
