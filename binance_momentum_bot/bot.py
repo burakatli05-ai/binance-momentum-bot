@@ -29,6 +29,7 @@ import alt_shadow
 import research_reports
 import research_export
 import daytrades
+import telegram_ux
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -7511,16 +7512,14 @@ def _at_choice_markup(kind: str, values: list):
 
 
 async def _at_show_positions(session, chat_id: str):
-    rows=list(autotrade_active.values())
-    if not rows:
-        await telegram_send(session,"📈 Botun yönettiği açık pozisyon yok. Manuel Binance pozisyonları bu listeye dahil edilmez.",chat_id=chat_id); return
-    lines=["📈 BOT POZİSYONLARI\n"]
-    for tr in rows:
-        lines.append(f"#{tr['id']} {tr['symbol']} | {tr['mode']} {tr['status']} | {float(tr['margin_usdt']):.0f}×{int(tr['leverage'])} | entry {fmt_price(float(tr.get('entry_price') or 0))}")
-    await telegram_send(session,"\n".join(lines),chat_id=chat_id)
+    message=await telegram_ux.show_positions(globals(),session)
+    for page in telegram_ux.pages(message):
+        await telegram_send(session,page,chat_id=chat_id)
+
 
 
 async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
+    if await telegram_ux.mode_callback(globals(),session,cb): return True
     data=str(cb.get("data") or "")
     if not data.startswith("at:"): return False
     callback_id=cb.get("id"); actor=cb.get("from") or {}; uid=str(actor.get("id", "")); msg=cb.get("message") or {}; chat_id=str((msg.get("chat") or {}).get("id", ""))
@@ -7548,8 +7547,7 @@ async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
         if target=="LIVE":
             await telegram_send(session,"🔒 LIVE: KİLİTLİ / İZİN YOK — V5.13.5 sürüm kilidi.",chat_id=chat_id)
         else:
-            autotrade_cfg["mode"] = target if target in ("OFF","DRY") else "OFF"; _at_save_setting("mode",autotrade_cfg["mode"])
-            await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":_at_panel_text(),"reply_markup":_at_panel_markup()})
+            await telegram_ux.confirm_mode(globals(),session,target,chat_id,uid)
     elif action=="set" and len(parts)>=4:
         key,val=parts[2],parts[3]
         token=secrets.token_hex(3); autotrade_pending_setting[token]=(key,val,time.time()+120)
@@ -7571,7 +7569,8 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
 
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
-    text=raw_text.strip(); low=text.lower()
+    text=telegram_ux.normalize(raw_text); low=text.lower()
+    if await telegram_ux.handle(globals(), session, low, chat_id, user_id): return True
     if low in ('/altstats','/daytrades','/latestexport','/latestexportfull'):
         if not _at_admin_allowed(chat_id,user_id): return True
         if low=='/altstats':
@@ -7582,7 +7581,7 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
             await telegram_send(session,await asyncio.to_thread(get_stats),chat_id=chat_id)
         elif low=='/daytrades':
             async def read_account(path,params):
-                if path not in ('/fapi/v1/income','/fapi/v1/userTrades','/fapi/v1/order'):raise ValueError('read-only history endpoint required')
+                if path not in ('/fapi/v1/income','/fapi/v1/userTrades','/fapi/v1/order','/fapi/v3/positionRisk'):raise ValueError('read-only history endpoint required')
                 return await binance_signed_request(session,'GET',path,params)
             c=db_connect()
             try:message=await daytrades.report(c,read_account,now_ms())
@@ -7617,8 +7616,7 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
             await telegram_send(session,_at_panel_text(),chat_id=chat_id,reply_markup=_at_panel_markup()); return True
         cmd=parts[1].lower()
         if cmd in ("off","dry"):
-            autotrade_cfg["mode"]="OFF" if cmd=="off" else "DRY"; _at_save_setting("mode",autotrade_cfg["mode"])
-            await telegram_send(session,f"✅ AutoTrade modu: {autotrade_cfg['mode']}. Açık LIVE pozisyonların koruma/yönetimi varsa devam eder.",chat_id=chat_id); return True
+            await telegram_ux.confirm_mode(globals(),session,cmd.upper(),chat_id,user_id); return True
         if cmd=="live":
             await telegram_send(session,"🔒 LIVE: KİLİTLİ / İZİN YOK — V5.13.5 sürüm kilidi.",chat_id=chat_id); return True
         if cmd=="confirm" and len(parts)>=3:
@@ -7703,7 +7701,7 @@ async def telegram_command_loop(session):
                 if chat_id not in {str(TELEGRAM_CHAT_ID), str(TELEGRAM_ADMIN_CHAT_ID)}:
                     continue
                 user_id = str((msg.get("from") or {}).get("id", ""))
-                raw_text = str(msg.get("text", "")).strip()
+                raw_text = telegram_ux.normalize(str(msg.get("text", "")))
                 text = raw_text.lower()
                 if text == "/myid":
                     await telegram_send(

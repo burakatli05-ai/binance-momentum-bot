@@ -203,7 +203,8 @@ class AltCase(unittest.TestCase):
         self.assertEqual(1,len(grouped));self.assertEqual('UNKNOWN OWNERSHIP',grouped[0]['ownership']);self.assertAlmostEqual(5.8,grouped[0]['net_pnl'])
         async def request(path,params):return []
         with closing(bot.db_connect()) as c:message=asyncio.run(daytrades.report(c,request,int(time.time()*1000)))
-        self.assertIn('BOT / DRY',message);self.assertIn('MANUAL BINANCE / REAL',message);self.assertNotIn('GENEL TOPLAM',message)
+        self.assertIn('🤖 BOT / DRY',message);self.assertIn('👤 MANUEL / LIVE',message);self.assertNotIn('GENEL TOPLAM',message)
+        self.assertNotIn('UNKNOWN OWNERSHIP',message)
         self.assertEqual('BOT LIVE',daytrades.classify('BTCUSDT','7','owned',[dict(symbol='BTCUSDT',mode='LIVE',stop_client_id='owned')]))
 
     def test_observer_forced_refresh_and_unknown_clean_card(self):
@@ -221,7 +222,7 @@ class AltCase(unittest.TestCase):
         observer.request=failed;asyncio.run(observer.poll(None))
         self.assertIsNone(self.rows('SELECT leverage FROM position_observer_state')[0]['leverage'])
         message=render_card(self.rows("SELECT * FROM position_observer_events ORDER BY id DESC LIMIT 1")[0])
-        self.assertIn('UNKNOWN',message)
+        self.assertIn('—',message);self.assertNotIn('UNKNOWN',message)
         for forbidden in ('{','detail_json','symbolConfig','positionInitialMargin'):self.assertNotIn(forbidden,message)
 
 
