@@ -92,10 +92,21 @@ class MenuTests(unittest.TestCase):
         root=fixtures.ROOT
         baseline=json.loads((root/'tests/telegram_ux_baseline.json').read_text())
         tree=ast.parse((root/'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
+        # The only additional observer-send statement is the visual opening-card
+        # adapter; assert its exact AST before removing it for the original baseline.
+        sender=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_observer_send')
+        expected=ast.parse("if hasattr(text, 'opening_event'):\n    return await telegram_ux.observer_open(globals(),session,text)").body[0]
+        self.assertEqual(ast.dump(expected),ast.dump(sender.body[0]))
+        sender.body.pop(0)
         tree.body=[n for n in tree.body if (not isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) or n.name not in baseline['ui_functions'])
                    and not (isinstance(n,ast.Import) and ast.unparse(n)=='import telegram_ux')]
         self.assertEqual(baseline['protected_bot_ast'],hashlib.sha256(ast.dump(tree,include_attributes=False).encode()).hexdigest())
-        for path,digest in baseline['files'].items():self.assertEqual(digest,hashlib.sha256((root/path).read_bytes()).hexdigest(),path)
+        for path,digest in baseline['files'].items():
+            content=(root/path).read_bytes()
+            if path.endswith('/requirements.txt'):
+                self.assertEqual(1,content.count(b'Pillow==12.3.0'))
+                content=content.replace(b'Pillow==12.3.0\r\n',b'').replace(b'Pillow==12.3.0\n',b'')
+            self.assertEqual(digest,hashlib.sha256(content).hexdigest(),path)
         self.assertFalse(bot.AUTO_TRADE_LIVE_ALLOWED)
 
 

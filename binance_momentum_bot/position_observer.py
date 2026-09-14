@@ -61,9 +61,10 @@ class LeverageCache:
 
 
 def roe_values(p, direction, entry, mark, leverage):
-    pnl = float(p.get("unRealizedProfit",p.get("unrealizedProfit",0)) or 0)
+    raw_pnl = p.get("unRealizedProfit",p.get("unrealizedProfit"))
+    pnl = float(raw_pnl) if raw_pnl is not None else None
     margin = float(p.get("positionInitialMargin") or 0)
-    if margin>0:
+    if margin>0 and pnl is not None:
         return pnl/margin*100,pnl,"positionInitialMargin"
     if leverage and entry>0:
         signed = (mark/entry-1)*100*(1 if direction=="LONG" else -1)
@@ -279,6 +280,13 @@ class PositionObserver:
                 c.close()
 
 
+class OpeningCard(str):
+    def __new__(cls, text, event):
+        value = super().__new__(cls, text)
+        value.opening_event = dict(event)
+        return value
+
+
 def render_card(event):
     detail=json.loads(event.get('detail_json') or '{}')
     kind=event['event']
@@ -289,10 +297,12 @@ def render_card(event):
         values=' / '.join(f'{"+" if kind=="ROE_PROFIT" else "-"}%{n:g}' for n in detail['milestones'])
         label=('🟢 ROE '+values+' ÜZERİNE TOPARLANDI') if kind=='ROE_RECOVERY' else ('🟢 ' if kind=='ROE_PROFIT' else '🔴 ')+'ROE '+values
     closed=kind=='CLOSE_OBSERVED'
-    return (f'{label}\n\n{event["symbol"]} · {event.get("direction") or "—"}\n'
+    text = (f'{label}\n\n{event["symbol"]} · {event.get("direction") or "—"}\n'
             f'{ownership(event.get("source"))}\n'
             f'Giriş: {number(event.get("entry_price"))} | {"Kapanış" if closed else "Anlık"}: {number(event.get("current_price"))}\n'
             f'Kaldıraç: {number(event.get("leverage"),"x")} | {"Son gözlem ROE" if closed else "ROE"}: {number(event.get("roe"),"%",True)}\n'
             f'{"Son gözlem P/L" if closed else "P/L"}: {number(detail.get("pnl")," USDT",True)}'+
             ('\nKesin kapanış fiyatı/gerçekleşmiş P/L bu gözlemde yok.' if closed else '')+
             ('\nGözlem: '+timestamp(event.get('event_time_ms')) if kind=='OPEN_OBSERVED' else ''))
+
+    return OpeningCard(text,event) if kind=='OPEN_OBSERVED' else text
