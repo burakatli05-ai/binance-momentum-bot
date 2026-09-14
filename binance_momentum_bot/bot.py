@@ -7389,6 +7389,8 @@ async def position_observer_loop(session):
 
 
 async def _observer_send(session,text):
+    if hasattr(text, 'opening_event'):
+        return await telegram_ux.observer_open(globals(),session,text)
     return await telegram_send(session,text,chat_id=TELEGRAM_ADMIN_CHAT_ID)
 
 
@@ -7512,9 +7514,8 @@ def _at_choice_markup(kind: str, values: list):
 
 
 async def _at_show_positions(session, chat_id: str):
-    message=await telegram_ux.show_positions(globals(),session)
-    for page in telegram_ux.pages(message):
-        await telegram_send(session,page,chat_id=chat_id)
+    view=await telegram_ux.trade_views.opened(globals(),session,telegram_ux.leverage_cache)
+    await telegram_ux.visual_cards.deliver(globals(),session,view,chat_id)
 
 
 

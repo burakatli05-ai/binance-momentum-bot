@@ -6,6 +6,8 @@ import time
 import secrets
 
 import daytrades
+import trade_views
+import visual_cards
 from position_observer import LeverageCache, roe_values
 from telegram_cards import ownership, number, pages, timestamp
 
@@ -19,6 +21,18 @@ ALIASES = {label.casefold(): command for label, command in MENU}
 ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu', '/daytrade': '/daytrades'})
 leverage_cache = LeverageCache()
 pending_modes = {}
+
+
+async def observer_open(bot, session, message):
+    event = message.opening_event
+    detail = json.loads(event.get('detail_json') or '{}')
+    record = dict(symbol=event['symbol'], ownership=event.get('source'), side=event.get('direction'),
+        entry_price=event.get('entry_price'), exit_price=event.get('current_price'),
+        leverage=event.get('leverage'), net_pnl=detail.get('pnl'), roe=event.get('roe'),
+        provenance='Gözlem: '+timestamp(event.get('event_time_ms')))
+    view = dict(title='🟢 POZİSYON AÇILDI', date=timestamp(event.get('event_time_ms')), summary=[],
+        cards=[trade_views.card(record,True)], notices=['Açılış gözlemidir; kesin emir/fill zamanı değildir.'])
+    return await visual_cards.deliver(bot,session,view,bot['TELEGRAM_ADMIN_CHAT_ID'])
 
 
 async def confirm_mode(bot, session, target, chat_id, user_id):
@@ -122,15 +136,19 @@ async def show_positions(bot, session):
 
 
 async def handle(bot, session, text, chat_id, user_id):
-    if text not in ('/menu', '/help', '/daytradeslist', '/positions', '/reportstatus'): return False
+    if text not in ('/menu', '/help', '/daytradeslist', '/positions', '/reportstatus', '/daytradesraw', '/positionsraw'): return False
     if not bot['_at_admin_allowed'](chat_id, user_id): return True
+    if text in ('/positions','/positionsraw','/daytradeslist','/daytradesraw'):
+        view = await trade_views.opened(bot,session,leverage_cache) if text.startswith('/positions') else await trade_views.closed(bot,session)
+        await visual_cards.deliver(bot,session,view,chat_id,raw=text.endswith('raw'))
+        return True
     if text == '/menu':
         await bot['telegram_send'](session, '🏠 ANA MENÜ\nBir görünüm seçin. İşlem ayarları ⚙️ Ayarlar bölümündedir.',
                                    chat_id=chat_id, reply_markup=menu_markup())
         return True
     if text == '/help':
         message = '❓ YARDIM\n'+'\n'.join(f'{label} — {command}' for label, command in MENU)
-        message += '\n/menu — ana menü\n/daytrade — /daytrades kısayolu\n/reportstatus — araştırma paketi durumu\n\nGelişmiş: /latestexport, /latestexportfull, /riskstatus, /analiz COIN\n🔒 LIVE kilitli. Ayar değişiklikleri onay gerektirir.'
+        message += '\n/menu — ana menü\n/daytrade — /daytrades kısayolu\n/reportstatus — araştırma paketi durumu\n\nGelişmiş: /latestexport, /latestexportfull, /riskstatus, /analiz COIN, /daytradesraw, /positionsraw\n🔒 LIVE kilitli. Ayar değişiklikleri onay gerektirir.'
     elif text == '/positions': message = await show_positions(bot, session)
     elif text == '/reportstatus':
         try: message = await asyncio.to_thread(report_status, bot['export_worker'])
