@@ -17,7 +17,7 @@
     "binance_momentum_bot/requirements.txt": "cb0878dc6de7d749b13fca9d3f192ef7266784424494489b54c3c3b2f0e21afe",
     "binance_momentum_bot/research_export.py": "e23e68a3ae85e8c07c7d30c357bb4105cedebc4c96afd5b2bd2ed5f5e1ac2ab4",
     "binance_momentum_bot/research_reports.py": "cc37629de85b8f014bcfaa2513058b2b38ec960f51996a55e5e6231c0f9d4f83",
-    "binance_momentum_bot/research_v5135.py": "ac371990ae8896377e077484f9dcd541dc1cc046ce6dc7ceacb16485360e50b6",
+    "binance_momentum_bot/research_v5135.py": "1f8e5a465fe1c49117d227288bc7435393a1a6372c36e94c5153664f58da60d8",
     "binance_momentum_bot/startup.py": "22591eb5f94039c5f4b39b16212220e20ce18fd381c5b699733b64c5cf995a7d",
     "binance_momentum_bot/x_watcher.py": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9",
     "binance_momentum_bot/X_WATCHER_SETUP.md": "0066bc1de95e06cd72f4e3ce69c4bc07f3b75c482fc1ee0b221794c76f8c2c23"

@@ -9,6 +9,8 @@ import uuid
 from contextlib import contextmanager
 from collections import defaultdict
 
+import runner_shadow_v1
+
 
 @contextmanager
 def connection(connect):
@@ -98,6 +100,7 @@ def migrate(conn):
     if "last_attempt_time" not in existing:
         conn.execute("ALTER TABLE position_observer_events ADD COLUMN last_attempt_time INTEGER")
         conn.execute("UPDATE position_observer_events SET last_attempt_time=delivery_time_ms WHERE attempt_count>0")
+    runner_shadow_v1.migrate(conn)
     conn.execute("INSERT OR IGNORE INTO measurement_migrations VALUES ('5.13.5',?)", (int(time.time()*1000),))
 
 
@@ -120,6 +123,7 @@ class Measurements:
                 c.execute("UPDATE causal_cohorts SET observation_gap=1 WHERE id=?", (item["id"],))
             self.symbols = {x["symbol"] for x in self.active.values()}
         c.close()
+        self.runner = runner_shadow_v1.RunnerShadowV1(connect)
 
     def event(self, c, item, kind, event_ms, observed_ms, price=None, detail=None):
         c.execute("INSERT INTO causal_cohort_events(cohort_id,event,event_time_ms,observed_time_ms,price,detail_json) VALUES (?,?,?,?,?,?)",
@@ -153,6 +157,18 @@ class Measurements:
         self.active[item["id"]] = item
         self.by_symbol[symbol].add(item["id"])
         self.symbols.add(symbol)
+        if str(stage).upper() in ("CANDIDATE", "EARLY", "PREMIUM"):
+            try:
+                self.runner.on_stage(
+                    source_key, symbol, stage,
+                    event_ts_ms=now,
+                    episode_id=int(episode_id or 0),
+                    signal_id=signal_id,
+                    price=(features or {}).get("price"),
+                    features=features or {},
+                )
+            except Exception:
+                pass
         return item["id"]
 
     def fatigue(self, signal_id, symbol, episode_id, ready_ms=None):
@@ -166,6 +182,10 @@ class Measurements:
         c.close()
 
     def tick(self, symbol, price, event_ms, observed_ms, executable_ask=None):
+        try:
+            self.runner.on_tick(symbol, price, event_ms, observed_ms)
+        except Exception:
+            pass
         if symbol not in self.symbols or price <= 0:
             return
         selected=[self.active[cid] for cid in self.by_symbol[symbol]
@@ -261,6 +281,10 @@ class Measurements:
 
 
     def expire(self, observed_ms):
+        try:
+            self.runner.expire(observed_ms)
+        except Exception:
+            pass
         expired=[x for x in self.active.values() if observed_ms>=x["deadline_ms"]]
         if not expired: return
         with connection(self.connect) as c:
