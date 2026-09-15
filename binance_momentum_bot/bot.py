@@ -7571,6 +7571,9 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
     text=telegram_ux.normalize(raw_text); low=text.lower()
+    if low=='/analysisexport':
+        import analysis_export
+        return await analysis_export.handle(globals(),session,chat_id,user_id)
     if await telegram_ux.handle(globals(), session, low, chat_id, user_id): return True
     if low in ('/altstats','/daytrades','/latestexport','/latestexportfull'):
         if not _at_admin_allowed(chat_id,user_id): return True
