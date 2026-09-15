@@ -102,7 +102,6 @@ def migrate(conn):
         conn.execute("UPDATE position_observer_events SET last_attempt_time=delivery_time_ms WHERE attempt_count>0")
     runner_shadow_v1.migrate(conn)
     conn.execute("INSERT OR IGNORE INTO measurement_migrations VALUES ('5.13.5',?)", (int(time.time()*1000),))
-    conn.execute("INSERT OR IGNORE INTO measurement_migrations VALUES ('runner-shadow-v1',?)", (int(time.time()*1000),))
 
 
 class Measurements:
