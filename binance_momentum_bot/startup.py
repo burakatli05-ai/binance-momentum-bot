@@ -95,6 +95,9 @@ def main():
     os.environ['AUTO_TRADE_LIVE_ALLOWED'] = '0'
     os.environ['AUTO_TRADE_BOOT_MODE'] = 'OFF'
     os.environ['PYTHON_DOTENV_DISABLED'] = '1'
+    # Shadow Telegram delivery requires explicit opt-in, including at boot.
+    runner_notify = os.getenv('RUNNER_SCORE_V1_NOTIFY', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+    os.environ['RUNNER_SCORE_V1_NOTIFY'] = '1' if runner_notify else '0'
     for key in ('X_WATCHER_NOTIFY', 'RESEARCH_NOTIFY', 'LIQ_V3_NOTIFY',
                 'SHADOW_EXIT_NOTIFY', 'GAINERS_NOTIFY', 'TREND_BUILDUP_NOTIFY'):
         os.environ[key] = '0'
@@ -102,7 +105,8 @@ def main():
         os.environ['X_WATCHER_ENABLED'] = '0'
     print(json.dumps({'startup': 'verified', 'db_path': str(target),
                       'legacy_tables': len(counts), 'counts': counts,
-                      'live_allowed': 0, 'boot_mode': 'OFF'}), flush=True)
+                      'live_allowed': 0, 'boot_mode': 'OFF',
+                      'runner_score_v1_notify': int(runner_notify)}), flush=True)
     os.chdir(Path(__file__).resolve().parent)
     os.execv(sys.executable, [sys.executable, '-u', 'bot.py'])
 

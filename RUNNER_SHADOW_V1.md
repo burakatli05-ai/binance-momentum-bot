@@ -53,7 +53,7 @@ When an entry-quality shadow watch reaches `ALLOW`, the private admin chat can r
 - `FAST RUNNER PREMIUM — SHADOW`
 - `REACQUIRE PREMIUM — SHADOW`
 
-These messages are intentionally not routed through the public broadcast wrapper and do not call AutoTrade. They are labelled TEST/SHADOW and never place an order. `RUNNER_SCORE_V1_NOTIFY=0` disables these private research messages without disabling telemetry.
+These messages are intentionally not routed through the public broadcast wrapper and do not call AutoTrade. They are labelled TEST/SHADOW and never place an order. `RUNNER_SCORE_V1_NOTIFY` defaults to `0` (OFF), including at startup, without disabling telemetry. Only an explicit `1`, `true`, `yes`, or `on` (case-insensitive, whitespace trimmed) enables these private research messages; empty or unrecognized values stay OFF. The verified startup log records the effective `runner_score_v1_notify` value.
 
 ## Additive schema
 

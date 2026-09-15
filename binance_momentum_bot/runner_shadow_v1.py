@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 MODEL_VERSION = "runner-score-v1.0"
 VETO_VERSION = "non-runner-veto-v1.0"
 RUNNER_SCORE_V1_ENABLED = os.getenv("RUNNER_SCORE_V1_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
-RUNNER_SCORE_V1_NOTIFY = os.getenv("RUNNER_SCORE_V1_NOTIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+RUNNER_SCORE_V1_NOTIFY = os.getenv("RUNNER_SCORE_V1_NOTIFY", "0").strip().lower() in ("1", "true", "yes", "on")
 RUNNER_WATCH_MIN_SCORE = int(os.getenv("RUNNER_WATCH_MIN_SCORE", "70"))
 RUNNER_FAST_ALLOW_SCORE = int(os.getenv("RUNNER_FAST_ALLOW_SCORE", "80"))
 RUNNER_REACQUIRE_MIN_SCORE = int(os.getenv("RUNNER_REACQUIRE_MIN_SCORE", "72"))
