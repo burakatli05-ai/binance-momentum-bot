@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'binance_momentum_bot'))
 import assistant_bridge as bridge
 
 
