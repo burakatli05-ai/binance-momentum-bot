@@ -26,8 +26,20 @@ def status():
     if (manifest.get('valid') is not True or manifest.get('snapshot_id') != once.SNAPSHOT_ID
             or not re.fullmatch('[0-9a-f]{64}', digest)):
         raise ValueError('manifest')
-    return {'snapshot_id': once.SNAPSHOT_ID, 'source_sha256': digest,
-            'source_bytes': checked_path(once.SOURCE).stat().st_size}
+    size = checked_path(once.SOURCE).stat().st_size
+    result = {'snapshot_id': once.SNAPSHOT_ID, 'source_sha256': digest,
+              'source_bytes': size, 'resource_ready': False}
+    try:
+        memory = once.memory_available()
+        disk = once.shutil.disk_usage(once.OUTPUT.parent).free
+        state_disk = once.shutil.disk_usage(once.STATE.parent).free
+        result.update(memory_available=memory, tmp_free=disk, state_free=state_disk,
+                      resource_ready=(memory >= once.MEMORY_BYTES + 256 * 1024**2
+                                      and disk >= max(1024**3, size * 3)
+                                      and state_disk >= 16 * 1024**2))
+    except Exception:
+        pass
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
