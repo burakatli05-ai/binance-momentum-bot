@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -108,6 +109,22 @@ def main():
                       'live_allowed': 0, 'boot_mode': 'OFF',
                       'runner_score_v1_notify': int(runner_notify)}), flush=True)
     os.chdir(Path(__file__).resolve().parent)
+
+    # The exporter is a separate read-only consumer of the verified production DB.
+    # Previously research_export.py existed but was never launched by startup.py,
+    # so hourly snapshots and ASSISTANT_BRIDGE_V1 log packages could not appear.
+    export_enabled = os.getenv('RESEARCH_EXPORT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
+    if export_enabled:
+        export_output = os.getenv('RESEARCH_EXPORT_DIR', '/data/research_exports')
+        subprocess.Popen(
+            [sys.executable, '-u', 'research_export.py', '--source', str(target),
+             '--output', export_output, '--loop'],
+            env=os.environ.copy(),
+        )
+        print(json.dumps({'research_exporter': 'started', 'output': export_output}), flush=True)
+    else:
+        print(json.dumps({'research_exporter': 'disabled'}), flush=True)
+
     os.execv(sys.executable, [sys.executable, '-u', 'bot.py'])
 
 
