@@ -12,6 +12,7 @@ import tempfile
 import uuid
 import zipfile
 
+import assistant_bridge
 from research_reports import summary
 
 IST=timezone(timedelta(hours=3))
@@ -165,6 +166,17 @@ class Exporter:
                         result['summary']='NEW_MATURE_DATA'
                     else:result['summary']='UNCHANGED' if manifest['unchanged'] else 'NO_NEW_MATURE_DATA'
                     state['watermarks']=marks
+                try:
+                    bridge_meta=assistant_bridge.emit(directory/'signals.db',manifest)
+                    result['assistant_bridge']={
+                        'chunks':bridge_meta['chunks'],
+                        'compressed_bytes':bridge_meta['compressed_bytes'],
+                        'sha256':bridge_meta['sha256'],
+                    }
+                except Exception as exc:
+                    # Bridge failure must never block the research scheduler or production bot.
+                    print(f"{assistant_bridge.LOG_PREFIX} ERROR {manifest['snapshot_id']} {type(exc).__name__}",flush=True)
+                    result['assistant_bridge']='ERROR'
         local=datetime.fromtimestamp(now/1000,IST);date=local.date().isoformat()
         if local.hour>=22 and state.get('daily_date')!=date:
             latest=self.latest()
