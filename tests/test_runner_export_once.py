@@ -186,11 +186,19 @@ class ExportAndDownloadTests(unittest.TestCase):
             self.assertEqual(get('/health', 'wrong')[0], 404)
             self.assertEqual(get('/health'), (200, b'{"ready":true}'))
             self.assertEqual(get('/../signals.db')[0], 404)
-            self.assertEqual(get('/snapshot')[0], 200)
-            self.assertEqual(get('/runner.zip'), (200, once.OUTPUT.read_bytes()))
+            for path in ('/', '/snapshot', '/manifest.json', '/signals.db', '/.env', '/runner.zip', '/startup.py'):
+                self.assertEqual(get(path)[0], 404)
+            route = '/runner-' + once.SNAPSHOT_ID + '.zip'
+            self.assertEqual(get(route, 'wrong')[0], 404)
+            self.assertEqual(get(route), (200, once.OUTPUT.read_bytes()))
             once.OUTPUT.write_bytes(b'corrupt')
-            self.assertEqual(get('/runner.zip')[0], 503)
-            server.expires = time.time() - 1
+            self.assertEqual(get(route)[0], 503)
+            connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+            connection.request('POST', '/close', headers={'Authorization': 'Bearer test-token'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b'{"closed":true}')
+            connection.close()
             self.assertEqual(get('/health')[0], 404)
         finally:
             server.shutdown()

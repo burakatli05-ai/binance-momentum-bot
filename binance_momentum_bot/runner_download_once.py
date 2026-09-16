@@ -73,9 +73,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/health':
                 self.reply(200, b'{"ready":true}')
-            elif self.path == '/snapshot':
-                self.reply(200, json.dumps(status()).encode())
-            elif self.path == '/runner.zip':
+            elif self.path == '/runner-' + once.SNAPSHOT_ID + '.zip':
                 self.send_zip()
             else:
                 self.reply(404)
@@ -83,6 +81,17 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception:
             self.reply(503)
+
+    def do_POST(self):
+        auth = self.headers.get('Authorization', '')
+        digest = hashlib.sha256(auth.removeprefix('Bearer ').encode()).hexdigest()
+        if (self.path != '/close' or not auth.startswith('Bearer ')
+                or not hmac.compare_digest(digest, self.server.token_hash)
+                or time.time() >= self.server.expires):
+            self.reply(404)
+            return
+        self.server.expires = 0
+        self.reply(200, b'{"closed":true}')
 
     def send_zip(self):
         from runner_snapshot_export import checked_path
@@ -119,10 +128,15 @@ def serve(token_hash, expires):
     if not re.fullmatch('[0-9a-f]{64}', token_hash) or not time.time() < expires <= time.time() + 7200:
         return 1
     once.limits(128 * 1024**2, 120)
+    try:
+        # Restricted operation metadata goes to authenticated Railway logs only.
+        once.event('PREFLIGHT', **{k: v for k, v in status().items() if k != 'snapshot_id'})
+    except Exception:
+        once.event('PREFLIGHT_FAILED')
     with HTTPServer(('0.0.0.0', PORT), Handler) as server:
         server.token_hash, server.expires = token_hash, expires
         server.timeout = 1
-        while time.time() < expires:
+        while time.time() < server.expires:
             server.handle_request()
     return 0
 

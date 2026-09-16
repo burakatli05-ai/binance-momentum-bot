@@ -37,8 +37,8 @@ in a URL/query string. The single-purpose endpoint has no directory listing,
 arbitrary paths, database download or request logging. It serves only:
 
 - Authenticated /health: channel test, with no data access.
-- Authenticated /snapshot: fixed manifest ID/hash and source file size (no DB open).
-- Authenticated /runner.zip: fixed ZIP only with success receipt and matching
+- No snapshot/manifest/database endpoint. Narrow preflight metadata is written only to authenticated Railway operation logs.
+- Authenticated /runner-20260916T190728Z-6cf5b8ff.zip: fixed ZIP only with success receipt and matching
   size/hash, streamed from the same verified descriptor.
 
 Invalid/expired credentials return 404. Responses are no-store. The process
@@ -53,7 +53,7 @@ Use TLS certificate validation and reject redirects in the download client.
 3. Select the temporary config and set only download digest/expiry; keep export
    disabled. Deploy and verify SUCCESS and fresh bot signals.
 4. Create the temporary HTTPS domain on port 8787. Verify wrong-token 404 and
-   authenticated /health 200 over TLS. Read /snapshot and record the source hash.
+   authenticated /health 200 over TLS. Read the PREFLIGHT operation log and record the source hash and resource readiness.
 5. Set the exact export ID and pinned hash, then deploy once to enable export.
 6. After SUCCESS receipt, download ZIP over authenticated TLS and verify ZIP,
    payload, source hashes and table counts locally. NO further deploy before
@@ -67,3 +67,5 @@ Use TLS certificate validation and reject redirects in the download client.
 
 Never put ZIP bytes in Railway logs, GitHub, or a public object store. Source
 snapshot files and production DB are never changed by these helpers.
+
+Operational update: this service rejects custom railway config paths because of Railway deprecation. Use the service startCommand override python runner_export_once.py, verified at runtime, while preserving both original config files. Rollback sets startCommand to python startup.py. After local ZIP/payload verification, authenticated POST /close immediately terminates the download listener before the rollback deploy. No manifest is available over HTTPS.
