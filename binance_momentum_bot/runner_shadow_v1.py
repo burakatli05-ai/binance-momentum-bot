@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import telemetry_p0
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -652,8 +653,11 @@ class RunnerShadowV1:
             c.execute(
                 "UPDATE runner_watch_v1_shadow SET state='ALLOW',decision='ALLOW',decision_ts_ms=?,decision_price=?,reason_codes_json=?,mfe_pct=?,mae_pct=?,last_observed_ms=?,notify_state=?,updated_ts_ms=? WHERE watch_id=?",
                 (observed_ms, price, _json(w.reasons), w.mfe, w.mae, observed_ms,
-                 "QUEUED" if queued else "NOT_CONFIGURED", observed_ms, w.watch_id),
+                "QUEUED" if queued else "NOT_CONFIGURED", observed_ms, w.watch_id),
             )
+        observer = getattr(self, 'allow_observer', None)
+        if observer:
+            telemetry_p0.safe(observer, w, observed_ms, price)
 
     def _message(self, w: Watch, price: float, metrics: Dict[str, Any], reasons: list[str]) -> str:
         title = "🧪 FAST RUNNER PREMIUM — SHADOW" if w.kind == "FAST" else "🧪 REACQUIRE PREMIUM — SHADOW"

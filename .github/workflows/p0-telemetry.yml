@@ -1,0 +1,26 @@
+name: P0 telemetry safety
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r binance_momentum_bot/requirements.txt
+      - run: python -m compileall -q binance_momentum_bot tests
+      - name: Decision, forward, shadow isolation and production invariants
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: >-
+          python -m unittest -v test_telemetry_p0 test_v5135 test_integration
+          test_runner_shadow_v1 test_information_only
+          test_runner_notify_safety.RunnerNotifySafetyTests.test_default_off_preserves_fast_and_reacquire_decisions_and_telemetry
+          test_runner_notify_safety.RunnerNotifySafetyTests.test_unset_off_empty_and_invalid_values_never_queue_or_start_transport
+          test_runner_notify_safety.RunnerNotifySafetyTests.test_explicit_opt_in_queues_with_mocked_worker

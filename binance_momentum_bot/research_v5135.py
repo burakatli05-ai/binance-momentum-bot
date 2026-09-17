@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from collections import defaultdict
 
 import runner_shadow_v1
+import telemetry_p0
 
 
 @contextmanager
@@ -101,6 +102,7 @@ def migrate(conn):
         conn.execute("ALTER TABLE position_observer_events ADD COLUMN last_attempt_time INTEGER")
         conn.execute("UPDATE position_observer_events SET last_attempt_time=delivery_time_ms WHERE attempt_count>0")
     runner_shadow_v1.migrate(conn)
+    telemetry_p0.migrate(conn)
     conn.execute("INSERT OR IGNORE INTO measurement_migrations VALUES ('5.13.5',?)", (int(time.time()*1000),))
 
 
@@ -124,6 +126,19 @@ class Measurements:
             self.symbols = {x["symbol"] for x in self.active.values()}
         c.close()
         self.runner = runner_shadow_v1.RunnerShadowV1(connect)
+        self.telemetry = telemetry_p0.safe(telemetry_p0.Telemetry, connect)
+        self.runner.allow_observer = self._allow_telemetry
+
+    def _allow_telemetry(self, watch, observed_ms, price):
+        if self.telemetry:
+            with connection(self.connect) as c:
+                row = c.execute('SELECT episode_id,signal_id FROM runner_score_v1_shadow WHERE id=?', (watch.score_id,)).fetchone()
+            self.telemetry.arm('allow:'+watch.watch_id,watch.symbol,watch.kind,observed_ms,price,
+                               row[0] if row else None,watch.parent_watch_id or watch.watch_id,row[1] if row else None)
+
+    def observe_stage(self, key, symbol, stage, features, episode_id=None, signal_id=None):
+        if self.telemetry:
+            telemetry_p0.safe(self.telemetry.stage,key,symbol,stage,int(time.time()*1000),features,episode_id,signal_id)
 
     def event(self, c, item, kind, event_ms, observed_ms, price=None, detail=None):
         c.execute("INSERT INTO causal_cohort_events(cohort_id,event,event_time_ms,observed_time_ms,price,detail_json) VALUES (?,?,?,?,?,?)",
@@ -181,7 +196,11 @@ class Measurements:
                 c.execute("INSERT INTO premium_fatigue_shadow VALUES (?,?,?,?,?,?)", (signal_id,symbol,key,n,str(n) if n<3 else "3+",now))
         c.close()
 
-    def tick(self, symbol, price, event_ms, observed_ms, executable_ask=None):
+    def tick(self, symbol, price, event_ms, observed_ms, executable_ask=None, *,
+             telemetry_ask=None, book_event_ms=None, book_received_ms=None):
+        if self.telemetry:
+            telemetry_p0.safe(self.telemetry.tick,symbol,price,event_ms,observed_ms,
+                             telemetry_ask,book_event_ms,book_received_ms)
         try:
             self.runner.on_tick(symbol, price, event_ms, observed_ms)
         except Exception:
@@ -281,6 +300,8 @@ class Measurements:
 
 
     def expire(self, observed_ms):
+        if self.telemetry:
+            telemetry_p0.safe(self.telemetry.expire,observed_ms)
         try:
             self.runner.expire(observed_ms)
         except Exception:

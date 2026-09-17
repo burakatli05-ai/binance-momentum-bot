@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import research_v5135 as audit
+import telemetry_p0
 import alt_shadow
 import research_reports
 import research_export
@@ -3230,6 +3231,38 @@ def _stage_exists(symbol: str, episode_id: int, stage: str, signal_id: Optional[
         conn.close()
 
 
+_p0_oi_observations = {}
+
+
+def _p0_stage_features(symbol, m):
+    """A separate copy; never enrich production metrics or historical snapshots."""
+    st = states[symbol]
+    stamp = now_ms()
+    f = dict(m)
+    f['score'] = m.get('score')
+    if f['score'] is None and all(k in m for k in ('chg30','chg60','chg5','flow30','buy30')):
+        f['score'] = telemetry_p0.safe(score_metrics,m)
+    rank = gainers_prev_rank.get(symbol)
+    f['gainer_rank'] = rank
+    hist = gainers_rank_history.get(symbol)
+    f['rank_source_ts_ms'] = int(hist[-1][0]*1000) if hist else None
+    f['rank_velocity'] = rank_velocity_per_min(symbol,rank) if rank is not None and hist and len(hist)>1 else None
+    f.update(trade_event_ts_ms=st.last_trade_event_ms or None,
+             trade_received_ts_ms=st.last_trade_receive_ms or None,
+             book_event_ts_ms=st.last_book_event_ms or None,
+             book_received_ts_ms=st.last_book_receive_ms or None, feature_ready_ts_ms=stamp)
+    if m.get('oi5') is None:
+        f.update(_p0_oi_observations.get(symbol, {}))
+    else:
+        cached = _p0_oi_observations.get(symbol, {})
+        f['oi_source_ts_ms'] = cached.get('oi_source_ts_ms')
+        f['oi_received_ts_ms'] = cached.get('oi_received_ts_ms')
+    if 'candidate_runup' not in f:
+        start = st.candidate_prices[0] if st.candidate_prices else None
+        f['candidate_runup'] = pct_change(m['price'],start) if start else None
+    return f
+
+
 def _arm_stage_entry(symbol: str, stage: str, m: dict, episode_id: int, created_ts: Optional[float] = None,
                      signal_id: Optional[int] = None, decision: str = "", entry_age_s: Optional[float] = None,
                      entry_price: Optional[float] = None, levels: Optional[dict] = None):
@@ -3266,6 +3299,9 @@ def _arm_stage_entry(symbol: str, stage: str, m: dict, episode_id: int, created_
     ready=now_ms()
     cohort_id=None
     if measurements:
+        frozen_features = telemetry_p0.safe(_p0_stage_features, symbol, m)
+        if frozen_features is not None:
+            measurement_call('observe_stage',f'stage:{rid}',symbol,stage,frozen_features,episode_id,signal_id)
         cohort_id=measurement_call("arm",f"stage:{rid}",symbol,stage,signal_id=signal_id,episode_id=episode_id,
             nominal_ms=int(created*1000),ready_ms=ready,stop_pct=max(0.01,(fill-float(levels.get("stop") or fill))*100/fill),
             tp_pct=max(0.01,(float(levels.get("tp2") or fill)-fill)*100/fill),features=m)
@@ -5582,6 +5618,9 @@ async def get_oi_context(session, symbol: str) -> Tuple[Optional[float], Optiona
             oi5 = pct_change(vals[-1], vals[-2]) if len(vals) >= 2 else None
             oi_prev5 = pct_change(vals[-2], vals[-3]) if len(vals) >= 3 else None
             oi_accel5 = (oi5 - oi_prev5) if oi5 is not None and oi_prev5 is not None else None
+            # Cache only already-fetched observations; no extra requests or waits.
+            _p0_oi_observations[symbol] = dict(oi5=oi5,oi_accel5=oi_accel5,
+                oi_source_ts_ms=d[-1].get('timestamp'),oi_received_ts_ms=now_ms())
             return oi5, oi_prev5, oi_accel5
     except Exception as e:
         log.debug("OI history failed %s: %s", symbol, e)
@@ -6198,7 +6237,10 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                         try:
                             st_audit=states[sym]
                             fresh_ask=st_audit.ask_price if st_audit.last_book_receive_ms and now_ms()-st_audit.last_book_receive_ms<=MAX_SYMBOL_BOOK_STALE_S*1000 else None
-                            measurements.tick(sym,price,int(ts),now_ms(),fresh_ask)
+                            measurements.tick(sym,price,int(ts),now_ms(),fresh_ask,
+                                telemetry_ask=st_audit.ask_price or None,
+                                book_event_ms=st_audit.last_book_event_ms or None,
+                                book_received_ms=st_audit.last_book_receive_ms or None)
                         except Exception as exc:
                             log.warning("Causal research tick failed: %s",type(exc).__name__)
                     if st.quote_volume24 >= min(MIN_24H_QUOTE_VOLUME, NEAR_MISS_MIN_QV24):
@@ -6783,6 +6825,9 @@ def _at_bool(v) -> bool:
 
 
 def _at_log_event(event: str, *, trade_id=None, signal_id=None, symbol=None, detail=""):
+    if signal_id is not None and telemetry_p0._chain.get() is not None:
+        telemetry_p0.safe(telemetry_p0.decision,db_connect,signal_id,symbol,
+            str(autotrade_cfg.get('mode','OFF')).upper(),event,{'reason':detail,'trade_id':trade_id})
     conn = db_connect()
     try:
         conn.execute(
@@ -7180,6 +7225,7 @@ def _at_close_trade(trade_id: int, reason: str, exit_price: float, realized_pnl:
     return daily
 
 
+@telemetry_p0.audit_premium
 async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict, plan: dict):
     mode=str(autotrade_cfg.get("mode","OFF")).upper()
     if mode == "OFF": return
