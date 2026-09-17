@@ -20,15 +20,19 @@ def batches(view):
     return [cards[i:i+CARDS_PER_PAGE] for i in range(0, len(cards), CARDS_PER_PAGE)] or [[]]
 
 
+def _card_height(card):
+    return max(310, 82 + len(card.get('lines', []))*40)
+
+
 def render(view, cards, page, count):
-    # Optional import deliberately inside rendering: a broken/missing imaging
-    # installation must never prevent bot startup or the text fallback.
     from PIL import Image, ImageDraw, ImageFont
     font_path = str(Path(__file__).with_name('fonts')/'OpenSans.ttf')
     fonts = {size: ImageFont.truetype(font_path, size) for size in (20, 23, 26, 30, 38)}
     width = 1000
     header = 170 + len(view['summary'])*34
-    height = header + max(1, len(cards))*330 + 55
+    heights = [_card_height(card) for card in cards] or [310]
+    gap = 20
+    height = header + sum(heights) + gap*max(0, len(heights)-1) + 32
     im = Image.new('RGB', (width, height), '#091426')
     draw = ImageDraw.Draw(im)
     def line(text, x, y, size=26, color='#edf3fc', max_width=900):
@@ -45,15 +49,14 @@ def render(view, cards, page, count):
     line(view['date'], 40, 82, 23, '#94aac6')
     line(f'{page} / {count}', 860, 85, 23)
     for i, value in enumerate(view['summary']): line(value, 40, 125+i*34, 23)
-    for i, card in enumerate(cards):
-        y = header+i*330
+    y = header
+    for card, card_height in zip(cards, heights):
         color = '#36e1a0' if card.get('pnl') is not None and card['pnl'] > 0 else '#ff7288' if card.get('pnl') is not None and card['pnl'] < 0 else '#84b8ff'
-        draw.rounded_rectangle((26,y,974,y+310), radius=18, fill='#13243b', outline=color, width=2)
-        draw.rounded_rectangle((26,y,34,y+310), radius=4, fill=color)
+        draw.rounded_rectangle((26,y,974,y+card_height-20), radius=18, fill='#13243b', outline=color, width=2)
+        draw.rounded_rectangle((26,y,34,y+card_height-20), radius=4, fill=color)
         for j, value in enumerate(card['lines']):
             text = value
             if j == 1:
-                # Draw recognizable source pictograms without relying on host emoji fonts.
                 source = card.get('source', MANUAL_LIVE)
                 x, top = 50, y+61
                 if source == BOT_DRY:
@@ -68,8 +71,8 @@ def render(view, cards, page, count):
                 text = source.split(' ',1)[1]; line(text, 88, y+54, 23, '#c6d4e8')
                 continue
             line(text, 50, y+14+j*40, 30 if j==0 else 23, color if j==0 else '#edf3fc', 872)
+        y += card_height + gap
     if not cards: line('Gösterilecek kayıt yok.', 50, header+45, 26)
-    line('Ayrıntılar / bilinmeyen alanlar: metin açıklamasında', 40, height-43, 20, '#94aac6')
     output = BytesIO(); im.save(output, format='PNG')
     result = output.getvalue()
     if len(result) > 9_000_000 or width+height > 10000: raise ValueError('photo exceeds safe bounds')
@@ -80,7 +83,8 @@ async def send_photo(bot, session, png, caption, chat_id):
     if session is None or not bot.get('TELEGRAM_BOT_TOKEN') or not chat_id: return False
     form = aiohttp.FormData()
     form.add_field('chat_id', str(chat_id))
-    form.add_field('caption', caption)
+    if caption:
+        form.add_field('caption', caption)
     form.add_field('photo', png, filename='positions.png', content_type='image/png')
     async with bot['telegram_send_lock']:
         async with session.post('https://api.telegram.org/bot'+bot['TELEGRAM_BOT_TOKEN']+'/sendPhoto',
@@ -98,11 +102,12 @@ async def deliver(bot, session, view, chat_id, raw=False):
         if not raw:
             try:
                 png = await asyncio.to_thread(render, view, cards, i, len(chunks))
-                labels = sorted({c.get('source', MANUAL_LIVE) for c in cards})
-                caption = '\n'.join([view['title'], f'{i}/{len(chunks)}', *labels, *view.get('notices',[])])
-                # Captions have a separate 1024-character bound. Full notices are
-                # also available in raw output; do not split a surrogate pair.
-                while len(caption.encode('utf-16-le'))//2 > 1000: caption = caption[:-1]
+                if view.get('caption', True):
+                    labels = sorted({c.get('source', MANUAL_LIVE) for c in cards})
+                    caption = '\n'.join([view['title'], f'{i}/{len(chunks)}', *labels, *view.get('notices',[])])
+                    while len(caption.encode('utf-16-le'))//2 > 1000: caption = caption[:-1]
+                else:
+                    caption = ''
                 sent = await send_photo(bot, session, png, caption, chat_id)
             except asyncio.CancelledError: raise
             except Exception as error:
