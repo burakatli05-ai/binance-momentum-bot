@@ -29,19 +29,68 @@ def summary(records, opened=False):
     return lines
 
 
+def _duration(start_ms, end_ms):
+    if start_ms is None or end_ms is None or end_ms < start_ms:
+        return '—'
+    seconds = int((end_ms-start_ms)/1000)
+    hours, rem = divmod(seconds, 3600)
+    minutes, sec = divmod(rem, 60)
+    if hours:
+        return f'{hours}sa {minutes}dk'
+    if minutes:
+        return f'{minutes}dk {sec}sn'
+    return f'{sec}sn'
+
+
+def _move_pct(r):
+    if r.get('price_return_pct') is not None:
+        return r.get('price_return_pct')
+    entry, price = r.get('entry_price'), r.get('exit_price')
+    if not entry or not price:
+        return None
+    direction = 1 if r.get('side') == 'LONG' else -1
+    return (price/entry-1)*100*direction
+
+
+def _known_value(r, *names):
+    for name in names:
+        if r.get(name) is not None:
+            return r.get(name)
+    return None
+
+
 def card(r, opened=False):
     source = ownership(r.get('ownership'))
     provenance = r.get('provenance','BOT_LEDGER')
     evidence = {'ANCHORED_COMPLETE_FILLS':'Fill ve miktar eşleştirmesi tamam',
         'OPEN_BEFORE_LOOKBACK':'Açılış, erişilen geçmişten önce', 'UNANCHORED_CLOSE_RECORD':'Eksik geçmiş / kapanış kaydı',
-        'CURRENT_ACCOUNT_SNAPSHOT':'Güncel hesap verisi', 'BOT_LEDGER':'Bot işlem kaydı'}.get(provenance,provenance)
-    title = f'{r["symbol"]}  •  {r.get("side") or "—"}  •  {number(r.get("leverage"),"x")}'
-    return dict(source=source, pnl=r.get('net_pnl'), provenance=provenance, fill_ids=r.get('fill_ids',[]), lines=[title, source,
+        'CURRENT_ACCOUNT_SNAPSHOT':'Güncel hesap verisi', 'BOT_LEDGER':'Bot işlem kaydı',
+        'OPEN_OBSERVED':'Canlı açılış gözlemi', 'OPEN_OBSERVED_ONLY':'Açılış gözlemi; kapanış döngüsü eşleşmedi'}.get(provenance,provenance)
+    status = 'AÇIK' if opened else 'KAPALI'
+    title_parts = [r['symbol'], r.get('side') or '—']
+    if r.get('leverage') is not None: title_parts.append(number(r.get('leverage'),'x'))
+    title_parts.append(status)
+    title = '  •  '.join(title_parts)
+    end_ts = r.get('current_ts_ms') if opened else r.get('closed_ts_ms')
+    move = _move_pct(r)
+    notional = _known_value(r, 'notional', 'notional_usdt')
+    margin = r.get('margin_usdt')
+    fees = _known_value(r, 'commission', 'fees_usdt')
+    slippage = r.get('slippage_cost')
+
+    lines = [title, source,
         f'Açılış: {timestamp(r.get("opened_ts_ms"))}' + ('' if opened else f'  |  Kapanış: {timestamp(r.get("closed_ts_ms"))}'),
         f'Entry: {number(r.get("entry_price"))}  |  {"Anlık" if opened else "Exit"}: {number(r.get("exit_price"))}',
-        f'P/L: {number(r.get("net_pnl")," USDT",True)}  |  ROE: {number(r.get("roe"),"%",True)}',
-        f'Notional: {number(r.get("notional")," USDT")}' if opened else f'Kapanış nedeni: {r.get("close_reason") or "—"}',
-        'Veri: '+evidence])
+        f'Hareket: {number(move,"%",True)}  |  Süre: {_duration(r.get("opened_ts_ms"), end_ts)}',
+        f'P/L: {number(r.get("net_pnl")," USDT",True)}  |  ROE: {number(r.get("roe"),"%",True)}']
+    if notional is not None or margin is not None:
+        lines.append(f'Notional: {number(notional," USDT")}  |  Margin: {number(margin," USDT")}')
+    if fees is not None or slippage is not None:
+        lines.append(f'Ücret: {number(fees," USDT")}  |  Slippage: {number(slippage," USDT")}')
+    if not opened:
+        lines.append(f'Kapanış nedeni: {r.get("close_reason") or "—"}')
+    lines.append('Veri: '+evidence)
+    return dict(source=source, pnl=r.get('net_pnl'), provenance=provenance, fill_ids=r.get('fill_ids',[]), lines=lines)
 
 
 async def closed(bot, session):
@@ -49,6 +98,8 @@ async def closed(bot, session):
     with closing(bot['db_connect']()) as c:
         ledger = daytrades.rows(c, 'SELECT * FROM autotrade_trades')
     records = daytrades.dry_rows(ledger, start, now)
+    for r in records:
+        r.setdefault('notional', r.get('notional_usdt'))
     notices = []; live_available = True
     async def request(path, params):
         if path not in ('/fapi/v3/positionRisk','/fapi/v1/income','/fapi/v1/userTrades','/fapi/v1/order'):
@@ -69,7 +120,8 @@ async def closed(bot, session):
         totals = [s if 'LIVE' not in s else s.split(':')[0]+': — (alınamadı)' for s in totals]
         totals[0] = 'Yalnız DRY kayıtları • LIVE toplamı bilinmiyor'
     return dict(title='BUGÜN KAPANAN İŞLEMLER', date=datetime.fromtimestamp(now/1000, IST).strftime('%d.%m.%Y'),
-                summary=totals, cards=[card(r) for r in sorted(records,key=lambda r:r.get('closed_ts_ms') or 0)], notices=notices)
+                summary=totals, cards=[card(r) for r in sorted(records,key=lambda r:r.get('closed_ts_ms') or 0)],
+                notices=notices, caption=False)
 
 
 async def opened(bot, session, cache):
@@ -82,12 +134,12 @@ async def opened(bot, session, cache):
         price = state.last_price if state and state.last_trade_receive_ms and 0 <= now-state.last_trade_receive_ms <= 10000 else None
         entry = tr.get('entry_price'); lev = tr.get('leverage')
         ret = (price/entry-1)*(1 if tr.get('side') == 'LONG' else -1) if price and entry else None
-        # Current remaining quantity only; do not reuse original notional after a partial close.
         qty = tr.get('expected_qty') if tr.get('expected_qty') is not None else (tr.get('qty') if tr.get('status') == 'OPEN' else None)
         pnl = ret*entry*qty if ret is not None and qty is not None else None
         records.append(dict(tr, ownership='BOT DRY', exit_price=price, net_pnl=pnl,
             roe=ret*lev*100 if ret is not None and lev else None,
-            notional=abs(qty*price) if qty is not None and price else None))
+            notional=abs(qty*price) if qty is not None and price else None,
+            current_ts_ms=now))
     async def request(session, method, path):
         if method != 'GET' or path not in ('/fapi/v3/positionRisk','/fapi/v1/symbolConfig'): raise ValueError('read-only positions required')
         return await asyncio.wait_for(bot['binance_signed_request'](session, method, path), 15)
@@ -111,7 +163,7 @@ async def opened(bot, session, cache):
             source = bot['_po_bot_source'](p['symbol'], side)
             records.append(dict(symbol=p['symbol'], side=direction, ownership=source, leverage=lev,
                 entry_price=entry, exit_price=mark, net_pnl=pnl, roe=roe, notional=abs(amount*mark),
-                opened_ts_ms=None, provenance='CURRENT_ACCOUNT_SNAPSHOT'))
+                opened_ts_ms=None, current_ts_ms=now, provenance='CURRENT_ACCOUNT_SNAPSHOT'))
     except Exception:
         live_available = False
         records = records[:dry_count]
