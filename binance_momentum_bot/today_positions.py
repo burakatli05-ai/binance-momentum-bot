@@ -8,7 +8,7 @@ import daytrades
 import position_cycles
 import trade_views
 from position_observer import roe_values
-from telegram_cards import IST, ownership, number
+from telegram_cards import IST, number
 
 OPEN_STATUSES = ('OPEN', 'PARTIAL', 'PROTECTIVE_PARTIAL')
 
@@ -37,27 +37,32 @@ def _dry_record(bot, trade, now):
         result['net_pnl'] = ret * entry * qty if ret is not None and entry and qty is not None else None
         result['roe'] = ret * lev * 100 if ret is not None and lev else None
         result['notional'] = abs(qty * price) if qty is not None and price else trade.get('notional_usdt')
+        result['current_ts_ms'] = now
     else:
         result['notional'] = trade.get('notional_usdt')
     result['price_return_pct'] = _price_return(result)
     return result
 
 
-def _observer_openings(c, start, now):
+def _observer_events(c, start, now):
     c.row_factory = __import__('sqlite3').Row
-    rows = []
+    openings = []
+    closes = {}
     for row in c.execute("""SELECT * FROM position_observer_events
-        WHERE event='OPEN_OBSERVED' AND event_time_ms BETWEEN ? AND ?
+        WHERE event IN ('OPEN_OBSERVED','CLOSE_OBSERVED') AND event_time_ms BETWEEN ? AND ?
         ORDER BY event_time_ms""", (start, now)):
         item = dict(row)
+        if item.get('event') == 'CLOSE_OBSERVED':
+            closes[item.get('position_instance_id')] = item
+            continue
         try:
             detail = json.loads(item.get('detail_json') or '{}')
         except Exception:
             detail = {}
         if detail.get('adopted'):
             continue
-        rows.append(item)
-    return rows
+        openings.append(item)
+    return openings, closes
 
 
 def _active_states(c):
@@ -74,7 +79,7 @@ def _match_closed(open_event, closed):
     if not candidates:
         return None
     event_ts = int(open_event['event_time_ms'])
-    near = [r for r in candidates if 0 <= event_ts-int(r['opened_ts_ms']) <= 120000]
+    near = [r for r in candidates if abs(event_ts-int(r['opened_ts_ms'])) <= 120000]
     return min(near, key=lambda r: abs(event_ts-int(r['opened_ts_ms']))) if near else None
 
 
@@ -83,7 +88,7 @@ async def build(bot, session, cache):
     start = daytrades.local_start(now)
     with closing(bot['db_connect']()) as c:
         ledger = daytrades.rows(c, 'SELECT * FROM autotrade_trades')
-        observer = _observer_openings(c, start, now)
+        observer, observer_closes = _observer_events(c, start, now)
         active_states = _active_states(c)
 
     records = [_dry_record(bot, tr, now) for tr in ledger
@@ -132,27 +137,30 @@ async def build(bot, session, cache):
             direction = 'LONG' if side == 'LONG' or side == 'BOTH' and amount > 0 else 'SHORT'
             lev, _ = cache.get(p['symbol'])
             roe, pnl, _ = roe_values(p, direction, entry, mark, lev)
+            margin = float(p.get('positionInitialMargin') or 0) or None
             record = dict(symbol=p['symbol'], position_side=side, side=direction,
                 ownership=opening.get('source') or state.get('source'), leverage=lev,
-                opened_ts_ms=opening['event_time_ms'], closed_ts_ms=None,
+                opened_ts_ms=opening['event_time_ms'], closed_ts_ms=None, current_ts_ms=now,
                 entry_price=entry, exit_price=mark, net_pnl=pnl, roe=roe,
-                notional=abs(amount*mark), is_open=True,
+                notional=abs(amount*mark), margin_usdt=margin, is_open=True,
                 provenance='OPEN_OBSERVED', price_return_pct=None)
             record['price_return_pct'] = _price_return(record)
             records.append(record)
     except Exception:
         notices.append('LIVE açık pozisyonlar alınamadı; bugün açık kalan bazı LIVE pozisyonlar eksik olabilir.')
 
-    represented = {(r.get('symbol'), r.get('position_side') or 'BOTH') for r in records if not r.get('is_open')}
     for opening in observer:
+        if _match_closed(opening, closed_live):
+            continue
         key = (opening.get('symbol'), opening.get('position_side') or 'BOTH')
-        if key in represented or _match_closed(opening, closed_live):
+        active = active_states.get(key)
+        if active and active.get('position_instance_id') == opening.get('position_instance_id'):
             continue
-        if key in active_states:
-            continue
+        close_event = observer_closes.get(opening.get('position_instance_id'))
         records.append(dict(symbol=opening['symbol'], position_side=opening.get('position_side') or 'BOTH',
             side=opening.get('direction'), ownership=opening.get('source'), leverage=opening.get('leverage'),
-            opened_ts_ms=opening.get('event_time_ms'), closed_ts_ms=None,
+            opened_ts_ms=opening.get('event_time_ms'),
+            closed_ts_ms=(close_event or {}).get('event_time_ms'),
             entry_price=opening.get('entry_price'), exit_price=None, net_pnl=None, roe=None,
             notional=None, is_open=False, provenance='OPEN_OBSERVED_ONLY'))
 
