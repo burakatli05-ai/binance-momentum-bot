@@ -7,6 +7,7 @@ import secrets
 
 import daytrades
 import trade_views
+import today_positions
 import visual_cards
 from position_observer import LeverageCache, roe_values
 from telegram_cards import ownership, number, pages, timestamp
@@ -14,11 +15,14 @@ from telegram_cards import ownership, number, pages, timestamp
 MENU = (
     ('📊 Durum', '/status'), ('📈 Açık Pozisyonlar', '/positions'),
     ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
-    ('🔥 Isınan Coinler', '/top'), ('🧪 ALT Shadow', '/altstats'),
-    ('⚙️ Ayarlar', '/settings'), ('❓ Yardım', '/help'),
+    ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),
+    ('🧪 ALT Shadow', '/altstats'), ('⚙️ Ayarlar', '/settings'),
+    ('❓ Yardım', '/help'),
 )
 ALIASES = {label.casefold(): command for label, command in MENU}
-ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu', '/daytrade': '/daytrades'})
+ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu',
+                '/daytrade': '/daytrades', '/todayopened': '/todaypositions',
+                '/todayposition': '/todaypositions'})
 leverage_cache = LeverageCache()
 pending_modes = {}
 
@@ -29,6 +33,7 @@ async def observer_open(bot, session, message):
     record = dict(symbol=event['symbol'], ownership=event.get('source'), side=event.get('direction'),
         entry_price=event.get('entry_price'), exit_price=event.get('current_price'),
         leverage=event.get('leverage'), net_pnl=detail.get('pnl'), roe=event.get('roe'),
+        opened_ts_ms=event.get('event_time_ms'), current_ts_ms=event.get('event_time_ms'),
         provenance='Gözlem: '+timestamp(event.get('event_time_ms')))
     view = dict(title='🟢 POZİSYON AÇILDI', date=timestamp(event.get('event_time_ms')), summary=[],
         cards=[trade_views.card(record,True)], notices=['Açılış gözlemidir; kesin emir/fill zamanı değildir.'])
@@ -136,10 +141,17 @@ async def show_positions(bot, session):
 
 
 async def handle(bot, session, text, chat_id, user_id):
-    if text not in ('/menu', '/help', '/daytradeslist', '/positions', '/reportstatus', '/daytradesraw', '/positionsraw'): return False
+    supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',
+                 '/daytradesraw', '/positionsraw', '/todaypositionsraw')
+    if text not in supported: return False
     if not bot['_at_admin_allowed'](chat_id, user_id): return True
-    if text in ('/positions','/positionsraw','/daytradeslist','/daytradesraw'):
-        view = await trade_views.opened(bot,session,leverage_cache) if text.startswith('/positions') else await trade_views.closed(bot,session)
+    if text in ('/positions','/positionsraw','/daytradeslist','/daytradesraw','/todaypositions','/todaypositionsraw'):
+        if text.startswith('/positions'):
+            view = await trade_views.opened(bot,session,leverage_cache)
+        elif text.startswith('/todaypositions'):
+            view = await today_positions.build(bot,session,leverage_cache)
+        else:
+            view = await trade_views.closed(bot,session)
         await visual_cards.deliver(bot,session,view,chat_id,raw=text.endswith('raw'))
         return True
     if text == '/menu':
@@ -148,7 +160,10 @@ async def handle(bot, session, text, chat_id, user_id):
         return True
     if text == '/help':
         message = '❓ YARDIM\n'+'\n'.join(f'{label} — {command}' for label, command in MENU)
-        message += '\n/menu — ana menü\n/daytrade — /daytrades kısayolu\n/reportstatus — araştırma paketi durumu\n\nGelişmiş: /latestexport, /latestexportfull, /riskstatus, /analiz COIN, /daytradesraw, /positionsraw\n🔒 LIVE kilitli. Ayar değişiklikleri onay gerektirir.'
+        message += ('\n/menu — ana menü\n/daytrade — /daytrades kısayolu\n'
+                    '/reportstatus — araştırma paketi durumu\n\nGelişmiş: /latestexport, /latestexportfull, '
+                    '/riskstatus, /analiz COIN, /daytradesraw, /positionsraw, /todaypositionsraw\n'
+                    '🔒 LIVE kilitli. Ayar değişiklikleri onay gerektirir.')
     elif text == '/positions': message = await show_positions(bot, session)
     elif text == '/reportstatus':
         try: message = await asyncio.to_thread(report_status, bot['export_worker'])
