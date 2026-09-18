@@ -88,12 +88,26 @@ class ForwardTests(unittest.TestCase):
         self.engine.tick('X',100,100001,100001,101,90000,90000)
         self.engine.tick('X',100,100000,104000)
         self.engine.tick('X',100,100002,104000)
+        with p0.connection(self.connect) as c:
+            self.engine._flush_gaps(c,104000,force=True)
         recovered=p0.Telemetry(self.connect)
         recovered.expire(3800000)
         kinds={r['kind'] for r in self.rows('SELECT kind FROM p0_gap_events')}
         self.assertTrue({'STALE_ASK','LATE_EVENT','RESTART_GAP','MISSING_HORIZON'}<=kinds)
         self.assertEqual(5,len(self.rows('SELECT * FROM p0_forward_outcomes')))
         self.assertEqual('NEXT_TRADE_PROXY',self.rows('SELECT fill_source FROM p0_forward')[0]['fill_source'])
+
+    def test_gap_events_are_batched_before_sqlite_flush(self):
+        self.engine.arm('x','X','FAST',100000,100)
+        x=self.engine.active['x']
+        for i in range(1000):
+            self.engine._gap(x,'LATE_EVENT',100001+i)
+        self.assertEqual([],self.rows("SELECT * FROM p0_gap_events WHERE kind='LATE_EVENT'"))
+        with p0.connection(self.connect) as c:
+            self.engine._flush_gaps(c,101001,force=True)
+        rows=self.rows("SELECT * FROM p0_gap_events WHERE kind='LATE_EVENT'")
+        self.assertEqual(1,len(rows))
+        self.assertEqual(1000,rows[0]['count'])
 
     def test_migration_preserves_existing_rows(self):
         self.engine.arm('x','X','FAST',100000,100)
