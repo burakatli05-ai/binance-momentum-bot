@@ -322,7 +322,7 @@ class Telemetry:
                     target=x['decision']+h*1000
                     late=event_ms-target > 5000
                     if late:
-                        self._gap(c,x,'MISSING_HORIZON',observed_ms,{'horizon_s':h})
+                        self._gap(x,'MISSING_HORIZON',observed_ms,{'horizon_s':h})
                     path=previous if event_ms>target else x
                     missing='LATE_HORIZON' if late else 'NO_FILL' if x['fill'] is None else None
                     ret=None if missing else (price/x['fill']-1)*100
