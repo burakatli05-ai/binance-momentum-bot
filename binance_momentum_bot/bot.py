@@ -7719,7 +7719,9 @@ async def telegram_command_loop(session):
     while not stop_event.is_set():
         try:
             params = {"timeout": 20, "offset": telegram_offset, "allowed_updates": json.dumps(["message","chat_join_request","callback_query"])}
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30, connect=6, sock_read=25)) as r:
+            # Keep a wide socket-read margin over Telegram's 20s long poll.
+            # Brief event-loop pressure must not turn a healthy poll into a false timeout.
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=50, connect=6, sock_read=45)) as r:
                 raw = await r.text()
                 if r.status != 200:
                     log.warning("Telegram getUpdates HTTP %s body=%s", r.status, raw[:1000])
@@ -7735,7 +7737,10 @@ async def telegram_command_loop(session):
                     log.warning("Telegram getUpdates ok=false body=%s", raw[:1000])
                     await asyncio.sleep(3)
                     continue
-            for upd in data.get("result", []):
+            updates = data.get("result", [])
+            if updates:
+                log.info("Telegram command poll received updates=%d", len(updates))
+            for upd in updates:
                 telegram_offset = max(telegram_offset, int(upd.get("update_id", 0)) + 1)
                 if upd.get("chat_join_request"):
                     await handle_join_request(session, upd["chat_join_request"])

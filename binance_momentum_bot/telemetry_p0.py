@@ -181,6 +181,8 @@ class Telemetry:
         self.active = {}
         self.by_symbol = defaultdict(set)
         self.counters = defaultdict(int)
+        self.pending_gaps = {}
+        self.last_gap_flush_ms = int(time.time()*1000)
         self.last_summary = int(time.time()*1000)
         with connection(connect) as c:
             c.row_factory = sqlite3.Row
@@ -189,16 +191,44 @@ class Telemetry:
                 x['gap'] = 1
                 self.active[x['key']] = x
                 self.by_symbol[x['symbol']].add(x['key'])
-                self._gap(c, x, 'RESTART_GAP', int(time.time()*1000))
+                self._gap(x, 'RESTART_GAP', int(time.time()*1000))
                 self._save(c, x)
+            self._flush_gaps(c, int(time.time()*1000), force=True)
         log.info('P0_TELEMETRY_READY version=%s recovered=%d shadow_only=1', EXPERIMENT.version, len(self.active))
 
-    def _gap(self, c, x, kind, observed, detail=None):
+    def _gap(self, x, kind, observed, detail=None):
+        """Aggregate high-frequency gap telemetry in memory and persist in batches."""
         x['gap'] = 1
         self.counters['gap_events'] += 1
-        c.execute('''INSERT INTO p0_gap_events VALUES (?,?,?,?,1,?)
-          ON CONFLICT(source_key,kind) DO UPDATE SET last_observed_ts_ms=excluded.last_observed_ts_ms,count=count+1''',
-                  (x['key'], kind, observed, observed, json.dumps(detail or {})))
+        key = (x['key'], kind)
+        pending = self.pending_gaps.get(key)
+        if pending is None:
+            self.pending_gaps[key] = {
+                'first': observed, 'last': observed, 'count': 1,
+                'detail': detail or {},
+            }
+        else:
+            pending['last'] = observed
+            pending['count'] += 1
+            if detail:
+                pending['detail'] = detail
+
+    def _flush_gaps(self, c, observed_ms, force=False):
+        if not self.pending_gaps:
+            return
+        if not force and observed_ms - self.last_gap_flush_ms < 5000:
+            return
+        rows = list(self.pending_gaps.items())
+        self.pending_gaps.clear()
+        for (source_key, kind), item in rows:
+            c.execute('''INSERT INTO p0_gap_events VALUES (?,?,?,?,?,?)
+              ON CONFLICT(source_key,kind) DO UPDATE SET
+                last_observed_ts_ms=excluded.last_observed_ts_ms,
+                count=count+excluded.count,
+                detail_json=excluded.detail_json''',
+                      (source_key, kind, item['first'], item['last'],
+                       item['count'], json.dumps(item['detail'])))
+        self.last_gap_flush_ms = observed_ms
 
     def _save(self, c, x, status='OPEN'):
         c.execute('''UPDATE p0_forward SET fill_price=?,fill_event_ts_ms=?,fill_observed_ts_ms=?,fill_source=?,status=?,state_json=? WHERE source_key=?''',
@@ -250,9 +280,7 @@ class Telemetry:
             if event_ms <= x['decision']:
                 continue
             if event_ms > observed_ms or observed_ms-event_ms > 3000 or (x['last_event'] is not None and event_ms < x['last_event']):
-                flags.append('LATE_EVENT')
-                with connection(self.connect) as c:
-                    self._gap(c,x,'LATE_EVENT',observed_ms)
+                self._gap(x,'LATE_EVENT',observed_ms)
                 continue
             if event_ms == x['last_event']:
                 # Millisecond timestamps are not unique trade identifiers.
@@ -289,12 +317,12 @@ class Telemetry:
         with connection(self.connect) as c:
             for x,previous,due,flags in dirty:
                 for kind in flags:
-                    self._gap(c,x,kind,observed_ms)
+                    self._gap(x,kind,observed_ms)
                 for h in due:
                     target=x['decision']+h*1000
                     late=event_ms-target > 5000
                     if late:
-                        self._gap(c,x,'MISSING_HORIZON',observed_ms,{'horizon_s':h})
+                        self._gap(x,'MISSING_HORIZON',observed_ms,{'horizon_s':h})
                     path=previous if event_ms>target else x
                     missing='LATE_HORIZON' if late else 'NO_FILL' if x['fill'] is None else None
                     ret=None if missing else (price/x['fill']-1)*100
@@ -316,6 +344,9 @@ class Telemetry:
         if now-self.last_summary >= 60000:
             log.info('P0_TELEMETRY_COUNTS shadow_only=1 active=%d counts=%s',len(self.active),json.dumps(dict(self.counters),sort_keys=True))
             self.last_summary = now
+        if self.pending_gaps and now-self.last_gap_flush_ms >= 5000:
+            with connection(self.connect) as c:
+                self._flush_gaps(c, now)
         overdue=[x for x in self.active.values() if any(h not in x['horizons'] and now>x['decision']+h*1000+5000 for h in HORIZONS)]
         if not overdue:
             return
@@ -324,7 +355,7 @@ class Telemetry:
                 for h in HORIZONS:
                     due=x['decision']+h*1000
                     if h not in x['horizons'] and now>due+5000:
-                        self._gap(c,x,'MISSING_HORIZON',now,{'horizon_s':h})
+                        self._gap(x,'MISSING_HORIZON',now,{'horizon_s':h})
                         c.execute('INSERT OR IGNORE INTO p0_forward_outcomes(source_key,horizon_s,due_ts_ms,observed_ts_ms,gap,missing_reason) VALUES (?,?,?,?,1,?)',
                                   (x['key'],h,due,now,'NO_OBSERVATION'))
                         x['horizons'].append(h)
@@ -334,3 +365,4 @@ class Telemetry:
                 if done:
                     self.active.pop(x['key'],None)
                     self.by_symbol[x['symbol']].discard(x['key'])
+            self._flush_gaps(c, now, force=True)
