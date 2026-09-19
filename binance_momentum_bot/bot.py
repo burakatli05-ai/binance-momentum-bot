@@ -8534,9 +8534,13 @@ async def main():
     if ALT_SHADOW_ENABLED:
         alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
     if RESEARCH_EXPORT_ENABLED:
-        export_worker=research_export.Exporter(DB_PATH,os.getenv('RESEARCH_EXPORT_DIR',os.path.join(os.path.dirname(DB_PATH),'research_exports')),
-            version=BOT_VERSION,deployment=os.getenv('RAILWAY_DEPLOYMENT_ID','UNKNOWN'),
-            config={'models':alt_shadow.MODELS,'fee_pct':audit.DRY_FEE_PCT,'slippage_pct':audit.DRY_SLIPPAGE_PCT,'alt_enabled':ALT_SHADOW_ENABLED})
+        try:
+            export_worker=research_export.Exporter(DB_PATH,os.getenv('RESEARCH_EXPORT_DIR',os.path.join(os.path.dirname(DB_PATH),'research_exports')),
+                version=BOT_VERSION,deployment=os.getenv('RAILWAY_DEPLOYMENT_ID','UNKNOWN'),
+                config={'models':alt_shadow.MODELS,'fee_pct':audit.DRY_FEE_PCT,'slippage_pct':audit.DRY_SLIPPAGE_PCT,'alt_enabled':ALT_SHADOW_ENABLED})
+        except Exception as exc:
+            export_worker=None
+            log.error('Research exporter disabled after initialization failure; production continues: %s',type(exc).__name__)
     x_watcher=XWatcher(db_connect,_x_market,_observer_send,_x_photo)
     load_autotrade_settings()
     timeout = aiohttp.ClientTimeout(total=30)

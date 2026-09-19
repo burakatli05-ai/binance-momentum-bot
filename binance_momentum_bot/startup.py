@@ -116,12 +116,16 @@ def main():
     export_enabled = os.getenv('RESEARCH_EXPORT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
     if export_enabled:
         export_output = os.getenv('RESEARCH_EXPORT_DIR', '/data/research_exports')
-        subprocess.Popen(
-            [sys.executable, '-u', 'research_export.py', '--source', str(target),
-             '--output', export_output, '--loop'],
-            env=os.environ.copy(),
-        )
-        print(json.dumps({'research_exporter': 'started', 'output': export_output}), flush=True)
+        try:
+            subprocess.Popen(
+                [sys.executable, '-u', 'research_export.py', '--source', str(target),
+                 '--output', export_output, '--loop'],
+                env=os.environ.copy(),
+            )
+            print(json.dumps({'research_exporter': 'started', 'output': export_output}), flush=True)
+        except Exception as exc:
+            print(json.dumps({'research_exporter': 'launch_failed', 'error': type(exc).__name__,
+                              'production_continues': True}), flush=True)
     else:
         print(json.dumps({'research_exporter': 'disabled'}), flush=True)
 
