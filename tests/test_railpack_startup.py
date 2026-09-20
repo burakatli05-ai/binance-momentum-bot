@@ -90,7 +90,7 @@ class RailpackStartupTests(unittest.TestCase):
             execute.assert_not_called()
             self.assertEqual(list(root.iterdir()), [])
 
-    def test_verified_start_keeps_live_locked_and_boot_off(self):
+    def test_verified_start_passes_capability_and_keeps_boot_off(self):
         for overrides in ({}, {'AUTO_TRADE_LIVE_ALLOWED': '1', 'AUTO_TRADE_BOOT_MODE': 'LIVE'}):
             with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
                 root = Path(directory).resolve()
@@ -103,7 +103,7 @@ class RailpackStartupTests(unittest.TestCase):
                 stack.enter_context(patch.object(startup.os, 'chdir'))
 
                 def intercept_exec(*args):
-                    self.assertEqual(os.environ['AUTO_TRADE_LIVE_ALLOWED'], '0')
+                    self.assertEqual(os.environ['AUTO_TRADE_LIVE_ALLOWED'], overrides.get('AUTO_TRADE_LIVE_ALLOWED', '0'))
                     self.assertEqual(os.environ['AUTO_TRADE_BOOT_MODE'], 'OFF')
                     self.assertEqual(os.environ['PYTHON_DOTENV_DISABLED'], '1')
                     raise StopStartup
