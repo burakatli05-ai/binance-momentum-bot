@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'binance_momentum_bot'))
 # Tests never read operator dotenv/secrets or start main/network loops.
 os.environ['PYTHON_DOTENV_DISABLED']='1'
-os.environ['AUTO_TRADE_LIVE_ALLOWED']='1'  # even hostile inherited env must stay locked
+os.environ['AUTO_TRADE_LIVE_ALLOWED']='0'  # default capability stays locked; opt-in is tested separately
 os.environ['AUTO_TRADE_BOOT_MODE']='LIVE'
 import bot
 import research_v5135 as audit
@@ -65,7 +65,7 @@ class DatabaseCase(unittest.TestCase):
         self.assertEqual(before,self.rows('SELECT * FROM autotrade_trades'))
         self.assertEqual(1,len(self.rows('SELECT * FROM measurement_migrations')))
 
-    def test_live_locked_regardless_env(self):
+    def test_live_locked_by_default(self):
         self.assertFalse(bot.AUTO_TRADE_LIVE_ALLOWED)
         self.assertEqual('OFF',bot.AUTO_TRADE_BOOT_MODE)
 

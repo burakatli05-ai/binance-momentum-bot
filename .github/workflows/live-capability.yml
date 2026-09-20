@@ -1,0 +1,19 @@
+name: LIVE capability safety
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r binance_momentum_bot/requirements.txt
+      - run: python -m compileall -q binance_momentum_bot tests
+      - run: python -m unittest discover -s tests -p 'test_live_capability.py' -v
+      - run: python -m unittest discover -s tests -p 'test_startup.py' -v
+      - run: python -m unittest discover -s tests -p 'test_railpack_startup.py' -v

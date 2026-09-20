@@ -93,7 +93,8 @@ def main():
     backup = mount / 'restore-source.db'
     counts = prepare_db(target, backup, manifest)
     os.environ['DB_PATH'] = str(target)
-    os.environ['AUTO_TRADE_LIVE_ALLOWED'] = '0'
+    live_allowed = os.getenv('AUTO_TRADE_LIVE_ALLOWED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+    os.environ['AUTO_TRADE_LIVE_ALLOWED'] = '1' if live_allowed else '0'
     os.environ['AUTO_TRADE_BOOT_MODE'] = 'OFF'
     os.environ['PYTHON_DOTENV_DISABLED'] = '1'
     # Shadow Telegram delivery requires explicit opt-in, including at boot.
@@ -106,7 +107,7 @@ def main():
         os.environ['X_WATCHER_ENABLED'] = '0'
     print(json.dumps({'startup': 'verified', 'db_path': str(target),
                       'legacy_tables': len(counts), 'counts': counts,
-                      'live_allowed': 0, 'boot_mode': 'OFF',
+                      'live_allowed': int(live_allowed), 'boot_mode': 'OFF',
                       'runner_score_v1_notify': int(runner_notify)}), flush=True)
     os.chdir(Path(__file__).resolve().parent)
 

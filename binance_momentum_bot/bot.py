@@ -300,10 +300,8 @@ AUTO_TRADE_RISK_FEE_PCT = max(0.0, float(os.getenv("AUTO_TRADE_RISK_FEE_PCT", "0
 # LIVE can never start automatically after a deploy/restart. The default path is OFF -> DRY -> explicit LIVE confirmation.
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "").strip()
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "").strip()
-AUTO_TRADE_LIVE_ALLOWED = False  # V5.13.5 release lock; env cannot authorize LIVE entries.
-AUTO_TRADE_BOOT_MODE = os.getenv("AUTO_TRADE_BOOT_MODE", "OFF").strip().upper()
-if AUTO_TRADE_BOOT_MODE not in ("OFF", "DRY"):
-    AUTO_TRADE_BOOT_MODE = "OFF"  # never boot LIVE
+AUTO_TRADE_LIVE_ALLOWED = os.getenv("AUTO_TRADE_LIVE_ALLOWED", "0").strip().lower() in ("1", "true", "yes", "on")
+AUTO_TRADE_BOOT_MODE = "OFF"  # every process start requires an explicit Telegram mode selection
 AUTO_TRADE_MARGIN_USDT_DEFAULT = float(os.getenv("AUTO_TRADE_MARGIN_USDT", "200"))
 AUTO_TRADE_LEVERAGE_DEFAULT = int(os.getenv("AUTO_TRADE_LEVERAGE", "10"))
 AUTO_TRADE_MAX_OPEN_POSITIONS_DEFAULT = int(os.getenv("AUTO_TRADE_MAX_OPEN_POSITIONS", "3"))
@@ -6880,9 +6878,10 @@ def load_autotrade_settings():
     if autotrade_cfg["exit_profile"] not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
         autotrade_cfg["exit_profile"] = "CURRENT_TP2"
     # Never resume LIVE after a deploy/restart. Existing live positions are still reconciled/managed.
-    persisted_mode = str(autotrade_cfg.get("mode", "OFF")).upper()
-    autotrade_cfg["mode"] = "DRY" if persisted_mode == "DRY" and AUTO_TRADE_BOOT_MODE == "DRY" else "OFF"
+    autotrade_cfg["mode"] = "OFF"
+    autotrade_live_confirm.clear()
     _at_save_setting("mode", autotrade_cfg["mode"])
+    log.info("AutoTrade startup: live_allowed=%s boot_mode=%s mode=%s", int(AUTO_TRADE_LIVE_ALLOWED), AUTO_TRADE_BOOT_MODE, autotrade_cfg["mode"])
     recover_autotrade_active()
     _at_repair_daily_from_trade_history("DRY")
     _at_repair_daily_from_trade_history("LIVE")
@@ -7592,7 +7591,10 @@ async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
     elif action=="mode" and len(parts)>=3:
         target=parts[2].upper()
         if target=="LIVE":
-            await telegram_send(session,"🔒 LIVE: KİLİTLİ / İZİN YOK — V5.13.5 sürüm kilidi.",chat_id=chat_id)
+            if not _at_admin_allowed(chat_id,uid,require_user_id=True):
+                await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id,"text":"LIVE için TELEGRAM_ADMIN_USER_ID gerekli.","show_alert":True}); return True
+            code=f"{secrets.randbelow(1000000):06d}"; autotrade_live_confirm[uid]=(code,time.time()+120)
+            await telegram_send(session,f"🔴 LIVE aktivasyon isteği\n\nKod: {code}\n120 saniye içinde şu komutu yaz:\n/autotrade confirm {code}\n\nRailway'de AUTO_TRADE_LIVE_ALLOWED=1 ve Binance API anahtarları yoksa LIVE yine açılmaz.",chat_id=chat_id)
         else:
             await telegram_ux.confirm_mode(globals(),session,target,chat_id,uid)
     elif action=="set" and len(parts)>=4:
@@ -7612,7 +7614,21 @@ async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
 
 
 async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) -> str:
-    return "🔒 LIVE: KİLİTLİ / İZİN YOK — V5.13.5 sürüm kilidi."
+    if not _at_admin_allowed(chat_id,user_id,require_user_id=True): return "❌ LIVE için yetkili kullanıcı ID'si eşleşmiyor."
+    p=autotrade_live_confirm.pop(user_id,None)
+    if not p or p[1]<time.time() or p[0]!=code: return "❌ LIVE onay kodu geçersiz veya süresi dolmuş."
+    if not AUTO_TRADE_LIVE_ALLOWED: return "❌ Railway'de AUTO_TRADE_LIVE_ALLOWED=1 değil. LIVE kilitli."
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET: return "❌ Binance API Key/Secret Railway Variables içinde yok."
+    allowed,why=_at_risk_allowed("LIVE")
+    if not allowed: return f"❌ Risk kilidi nedeniyle LIVE açılamadı: {why}"
+    try:
+        cfg,usdt,positions=await _at_account_snapshot(session)
+        _at_cache_account_balance(usdt)
+        if not cfg.get("canTrade",False): return "❌ Binance API canTrade=false. Futures trading izni açık değil."
+        _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
+    except Exception as e: return f"❌ Binance bağlantı testi başarısız: {e}"
+    autotrade_cfg["mode"]="LIVE"; _at_save_setting("mode","LIVE")
+    return "🔴 AUTOTRADE LIVE AÇILDI. Yeni uygun Premiumlar gerçek Futures emrine dönüşebilir. Deploy/restart olursa tekrar OFF'a döner."
 
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
@@ -7668,7 +7684,10 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
         if cmd in ("off","dry"):
             await telegram_ux.confirm_mode(globals(),session,cmd.upper(),chat_id,user_id); return True
         if cmd=="live":
-            await telegram_send(session,"🔒 LIVE: KİLİTLİ / İZİN YOK — V5.13.5 sürüm kilidi.",chat_id=chat_id); return True
+            if not _at_admin_allowed(chat_id,user_id,require_user_id=True):
+                await telegram_send(session,"❌ LIVE aktivasyonu için Railway'de TELEGRAM_ADMIN_USER_ID tanımlı olmalı.",chat_id=chat_id); return True
+            code=f"{secrets.randbelow(1000000):06d}"; autotrade_live_confirm[user_id]=(code,time.time()+120)
+            await telegram_send(session,f"🔴 LIVE onay kodu: {code}\n120 sn içinde /autotrade confirm {code}",chat_id=chat_id); return True
         if cmd=="confirm" and len(parts)>=3:
             await telegram_send(session,await _at_try_live_enable(session,chat_id,user_id,parts[2]),chat_id=chat_id); return True
         return True

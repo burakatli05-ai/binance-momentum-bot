@@ -46,8 +46,9 @@
     "TREND_BUILDUP_MIN_SCORE": "314ccdc3891f71141f8afc2cb9f480396ed704b102dd3978f6a7b19231f271f4"
   },
   "files": {
-    "binance_momentum_bot/startup.py": "027e156d64c16d98ffe94293c3865c9d6482c3d5b6c6a44822e9af60f5c881a2",
+    "binance_momentum_bot/startup.py": "2da57131c324ad5edb012b5152abeda2f1f0ac02df1f219af1ed6657ae3457ba",
     "binance_momentum_bot/x_watcher.py": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9",
     "binance_momentum_bot/railway.toml": "02451811c0186e8d6b87195a5d9c8942c13ec2aa0982d5f30cbc1ea3c9f106e5"
-  }
+  },
+  "startup_live_capability_note": "Only startup.py fingerprint updated for explicit env normalization/logging; all strategy, risk, order and other file baselines remain unchanged."
 }
