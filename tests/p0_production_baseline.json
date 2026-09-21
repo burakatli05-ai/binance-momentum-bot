@@ -15,8 +15,8 @@
     "_at_place_algo": "fa8b3fe5aa69bec79a5a655f83164a46862625568691c09d33a54b1365d4c903",
     "_at_insert_trade": "00837b1ee3af6f69e22d89b79ed9c75ed662b065bde1b2c49c8440170e79155a",
     "_at_close_trade": "5b39f47695cb6b56429459976e5259ece7e1539a2f116e6e02eef2d059d7c004",
-    "autotrade_handle_premium": "fb6ab4db999c4cc0cf1e309e203736c206f4271d70380bb73ebfc10302a64d29",
-    "autotrade_on_tick": "4a7e2de76290e8dbfbe05a0bf9d001202c6ef8131cfbf24fa374bf8bf233d0dd"
+    "autotrade_handle_premium": "a70af585f15ca96ec754ccc1948043504f71a5dba6c7ffdaecd4771ccc811f98",
+    "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
   },
   "constants": {
     "EARLY_SCORE": "a36a69a1d40e50e7f3ae4d757c52b3adc4c3ad01b462820c35421548c419e5e9",
