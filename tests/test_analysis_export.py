@@ -200,14 +200,52 @@ class AnalysisExportCase(unittest.TestCase):
         self.seed()
         with patch.object(bot, 'TELEGRAM_ADMIN_CHAT_ID', '123'), patch.object(bot, 'TELEGRAM_ADMIN_USER_ID', '123'), patch.object(bot, 'TELEGRAM_BOT_TOKEN', 'fake-token'), patch.object(bot, 'export_worker', self.worker), patch.object(bot, 'telegram_send', new_callable=AsyncMock) as notify:
             session = LatestExportCase().response(413, {'ok': False})
-            with patch.object(bot, 'TELEGRAM_DOCUMENT_MAX_BYTES', 1):
+            with patch.object(bot, 'TELEGRAM_DOCUMENT_MAX_BYTES', 1024):
                 asyncio.run(bot._at_command(session, '/analysisexport', '123', '123'))
-                session.post.assert_not_called()
-                self.assertIn('Telegram dosya limiti', notify.await_args.args[1])
-                self.assertIn('bayt', notify.await_args.args[1])
+                session.post.assert_called_once()
+                self.assertIn('Gönderim tamamlanmadı', notify.await_args.args[1])
             asyncio.run(bot._at_command(session, '/analysisexport', '123', '123'))
-            self.assertIn('HTTP 413', notify.await_args.args[1])
+            self.assertTrue(any('HTTP 413' in call.args[1] for call in notify.await_args_list))
             self.assertEqual([], list(self.worker.root.iterdir()))
+
+    def test_split_delivery_reassembles_exact_archive_and_cleans_parts(self):
+        self.seed()
+        for limit in (1024, 49_000_000):
+            received = []
+            original = []
+
+            async def upload(session, path, caption, chat_id):
+                path = Path(path)
+                self.assertLessEqual(path.stat().st_size, limit)
+                self.assertEqual('123', chat_id)
+                self.assertIn('alındı', notify.await_args_list[0].args[1])
+                received.append(path.read_bytes())
+                if not original:
+                    original.append((path.parent / 'analysis-export.zip').read_bytes())
+                return True
+
+            with patch.object(bot, 'TELEGRAM_ADMIN_CHAT_ID', '123'), patch.object(bot, 'TELEGRAM_ADMIN_USER_ID', '123'), patch.object(bot, 'export_worker', self.worker), patch.object(bot, 'TELEGRAM_DOCUMENT_MAX_BYTES', limit), patch.object(bot, 'telegram_send', new_callable=AsyncMock, return_value=True) as notify, patch.object(bot, 'telegram_send_document', side_effect=upload):
+                asyncio.run(bot._at_command(None, '/analysisexport', '123', '123'))
+            self.assertEqual(original[0], b''.join(received))
+            self.assertEqual((len(original[0]) + limit - 1) // limit, len(received))
+            self.assertIn('export gönderildi', notify.await_args.args[1])
+            self.assertEqual([], list(self.worker.root.iterdir()))
+
+    def test_false_upload_result_stops_parts_without_success(self):
+        self.seed()
+        with patch.object(bot, 'TELEGRAM_ADMIN_CHAT_ID', '123'), patch.object(bot, 'TELEGRAM_ADMIN_USER_ID', '123'), patch.object(bot, 'export_worker', self.worker), patch.object(bot, 'TELEGRAM_DOCUMENT_MAX_BYTES', 1024), patch.object(bot, 'telegram_send', new_callable=AsyncMock, return_value=True) as notify, patch.object(bot, 'telegram_send_document', new_callable=AsyncMock, side_effect=[True, False]) as send:
+            asyncio.run(bot._at_command(None, '/analysisexport', '123', '123'))
+            self.assertEqual(2, send.await_count)
+            self.assertIn('parça 2/', notify.await_args.args[1])
+            self.assertFalse(any('export gönderildi' in call.args[1] for call in notify.await_args_list))
+            self.assertEqual([], list(self.worker.root.iterdir()))
+        self.assertFalse(exports._LOCK.locked())
+
+    def test_failed_ack_does_not_start_expensive_export(self):
+        self.seed()
+        with patch.object(bot, 'TELEGRAM_ADMIN_CHAT_ID', '123'), patch.object(bot, 'TELEGRAM_ADMIN_USER_ID', '123'), patch.object(bot, 'export_worker', self.worker), patch.object(bot, 'telegram_send', new_callable=AsyncMock, return_value=False), patch.object(exports, 'package') as create:
+            asyncio.run(bot._at_command(None, '/analysisexport', '123', '123'))
+            create.assert_not_called()
 
     def test_stale_snapshot_reports_empty_window_without_reading_live(self):
         self.seed()

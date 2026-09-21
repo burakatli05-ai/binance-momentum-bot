@@ -47,7 +47,7 @@ table statistics and SQLite quick/integrity checks.
 Source size/hash describe the consistent snapshot; hashing a concurrently
 changing production DB would not establish snapshot identity.
 
-The Telegram caption reports source → analysis → ZIP byte sizes. The existing
+The command acknowledges receipt before building and logs acceptance, package size, each successful upload and completion. If the acknowledgement cannot be delivered, it does not begin expensive disk work. The Telegram caption reports source → analysis → ZIP byte sizes. Packages over 49,000,000 bytes are sent as numbered binary volumes (`analysis-export.zip.001`, `.002`, etc.), each under the Telegram ceiling. Save every volume in one directory and open `.zip.001` with 7-Zip, or concatenate the volumes in numeric order to recreate the original ZIP. The message includes the SHA256 of that original ZIP; no rows or columns are dropped. One temporary volume at a time bounds extra disk usage. A false upload result stops delivery and reports the failed part; success is reported only after every document is accepted. The existing
 `sendDocument` helper enforces the Telegram limit and reports upload failures.
 One export/upload runs at a time per bot process; another request fails clearly.
 Temporary files are removed after success, failure or cancellation. Existing
