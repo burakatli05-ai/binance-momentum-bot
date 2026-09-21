@@ -311,8 +311,15 @@ AUTO_TRADE_STOP_COOLDOWN_MINUTES_DEFAULT = int(os.getenv("AUTO_TRADE_STOP_COOLDO
 AUTO_TRADE_SIM_BALANCE_USDT = float(os.getenv("AUTO_TRADE_SIM_BALANCE_USDT", "2000"))
 AUTO_TRADE_MARGIN_TYPE_DEFAULT = os.getenv("AUTO_TRADE_MARGIN_TYPE", "ISOLATED").strip().upper()
 AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT", "0.30"))
-AUTO_TRADE_RECONCILE_SECONDS = max(2, int(os.getenv("AUTO_TRADE_RECONCILE_SECONDS", "5")))
+AUTO_TRADE_RECONCILE_SECONDS = max(2, int(os.getenv("AUTO_TRADE_RECONCILE_SECONDS", "2")))
+# Legacy conditional-TP fallback is retained only for already-open trades created before the
+# resting-limit migration. New CURRENT_TP2 trades never use this timer.
 AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS = max(0.5, min(15.0, float(os.getenv("AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS", "2.0"))))
+# New CURRENT_TP2 execution: a normal GTC limit rests at TP2 from entry. If TP2 has been
+# observed and the still-open remainder retraces this far, the bot cancels the limit,
+# re-reads the live position and market-closes only the verified remainder.
+AUTO_TRADE_TP_RETRACE_FALLBACK_PCT = max(0.05, min(1.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_FALLBACK_PCT", "0.15"))))
+AUTO_TRADE_TP_RETRACE_MIN_SECONDS = max(0.0, min(30.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_MIN_SECONDS", "1.0"))))
 AUTO_TRADE_EXIT_PROFILE_DEFAULT = os.getenv("AUTO_TRADE_EXIT_PROFILE", "CURRENT_TP2").strip().upper()
 if AUTO_TRADE_EXIT_PROFILE_DEFAULT not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
     AUTO_TRADE_EXIT_PROFILE_DEFAULT = "CURRENT_TP2"
@@ -1377,6 +1384,7 @@ def init_db():
                entry_order_id TEXT, entry_client_id TEXT,
                tp1_algo_id TEXT, tp1_client_id TEXT,
                tp2_algo_id TEXT, tp2_client_id TEXT,
+               tp2_order_id TEXT, tp2_order_client_id TEXT, tp2_target_seen_ts_ms INTEGER,
                stop_algo_id TEXT, stop_client_id TEXT,
                opened_ts_ms INTEGER, closed_ts_ms INTEGER, close_reason TEXT, exit_price REAL,
                realized_pnl REAL DEFAULT 0, commission REAL DEFAULT 0, net_pnl REAL DEFAULT 0,
@@ -1397,6 +1405,9 @@ def init_db():
            )"""
     )
 
+    ensure_column(conn, "autotrade_trades", "tp2_order_id", "TEXT")
+    ensure_column(conn, "autotrade_trades", "tp2_order_client_id", "TEXT")
+    ensure_column(conn, "autotrade_trades", "tp2_target_seen_ts_ms", "INTEGER")
     ensure_column(conn, "notification_log", "telegram_message_id", "INTEGER")
     ensure_column(conn, "notification_log", "live_bid", "REAL")
     ensure_column(conn, "notification_log", "live_ask", "REAL")
@@ -7139,6 +7150,44 @@ async def _at_place_market_entry(session, symbol: str, qty: float, position_side
         raise e
 
 
+async def _at_place_limit_exit(session, symbol: str, qty: float, price: float, position_side: str, client_id: str):
+    params = {"symbol":symbol,"side":"SELL","type":"LIMIT","quantity":qty,"price":price,
+              "timeInForce":"GTC","newClientOrderId":client_id,"newOrderRespType":"RESULT"}
+    if position_side == "BOTH":
+        params["reduceOnly"] = "true"
+    else:
+        params["positionSide"] = position_side
+    try:
+        return await binance_signed_request(session, "POST", "/fapi/v1/order", params, timeout_s=20)
+    except Exception as e:
+        # Same uncertainty rule as entry: never duplicate an order after a timeout.
+        q = await _at_query_order_by_client(session, symbol, client_id)
+        if q and str(q.get("status") or "").upper() in ("NEW","PARTIALLY_FILLED","FILLED"):
+            return q
+        raise e
+
+
+async def _at_query_normal_order(session, symbol: str, order_id):
+    if not order_id:
+        return None
+    try:
+        return await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"orderId":order_id})
+    except Exception:
+        return None
+
+
+def _at_tp_retrace_fallback_due(tr: dict, current_price: float, now_ms_value: Optional[int] = None) -> bool:
+    seen_ms = int(tr.get("tp2_target_seen_ts_ms") or 0)
+    target = float(tr.get("tp2_price") or 0)
+    current = float(current_price or 0)
+    if seen_ms <= 0 or target <= 0 or current <= 0:
+        return False
+    current_ms = int(now_ms_value if now_ms_value is not None else now_ms())
+    if current_ms - seen_ms < int(AUTO_TRADE_TP_RETRACE_MIN_SECONDS * 1000):
+        return False
+    return current <= target * (1.0 - AUTO_TRADE_TP_RETRACE_FALLBACK_PCT / 100.0)
+
+
 async def _at_place_algo(session, *, symbol: str, order_type: str, trigger_price: float, position_side: str,
                          client_id: str, quantity: Optional[float] = None, close_position: bool = False,
                          limit_price: Optional[float] = None, time_in_force: Optional[str] = None):
@@ -7195,6 +7244,9 @@ async def _at_cancel_algo(session, algo_id):
 
 
 async def _at_cancel_trade_algos(session, tr: dict):
+    # Cancel the resting TP2 normal order as well as legacy/stop conditional algos.
+    if tr.get("tp2_order_id"):
+        await _at_cancel_normal_order(session, str(tr.get("symbol") or ""), tr.get("tp2_order_id"))
     for k in ("tp1_algo_id","tp2_algo_id","stop_algo_id"):
         await _at_cancel_algo(session, tr.get(k))
 
@@ -7366,13 +7418,14 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
                 c2=_at_client("R",signal_id); o2=await _at_place_algo(session,symbol=symbol,order_type="TAKE_PROFIT_MARKET",trigger_price=levels["runner"],position_side=position_side,client_id=c2,quantity=runner_qty)
                 _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
         else:
-            # Profit-taking is price-priority: trigger at TP2, then place a GTC limit at TP2.
-            # STOP remains STOP_MARKET because loss protection prioritizes guaranteed exit.
-            c2=_at_client("T2",signal_id); o2=await _at_place_algo(
-                session,symbol=symbol,order_type="TAKE_PROFIT",trigger_price=levels["tp2"],
-                position_side=position_side,client_id=c2,quantity=exec_qty,
-                limit_price=levels["tp2"],time_in_force="GTC")
-            _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
+            # Rest the profit order in the book from entry instead of waiting for a trigger.
+            # This gives the order queue priority before a fast spike reaches TP2. STOP remains
+            # STOP_MARKET because loss protection prioritizes guaranteed exit.
+            c2=_at_client("T2L",signal_id)
+            o2=await _at_place_limit_exit(session,symbol,exec_qty,levels["tp2"],position_side,c2)
+            _at_update_trade(tid,tp2_order_id=str(o2.get("orderId") or ""),tp2_order_client_id=c2)
+            _at_log_event("TP2_LIMIT_PLACED",trade_id=tid,signal_id=signal_id,symbol=symbol,
+                          detail=f"order_id={o2.get('orderId')}; target={levels['tp2']}; qty={exec_qty}")
     except Exception as e:
         _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=f"TP_CREATE_FAILED {e}")
         await telegram_send(session,f"⚠️ {symbol} pozisyonu açık ve STOP korumalı; TP emri kurulamadı. Manuel kontrol gerekli. {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
@@ -7385,14 +7438,25 @@ def autotrade_on_tick(symbol: str, price: float, tick_ts: float):
     if not ids: return
     for tid in ids:
         tr=autotrade_active.get(tid)
-        if not tr or tr.get("mode") != "DRY" or tr.get("status") not in ("OPEN","PARTIAL"): continue
-        entry=float(tr.get("entry_price") or 0); qty=float(tr.get("qty") or 0); expected=float(tr.get("expected_qty") or qty)
-        stop=float(tr.get("stop_price") or 0); tp1=float(tr.get("tp1_price") or 0); tp2=float(tr.get("tp2_price") or 0); runner=float(tr.get("runner_price") or 0)
+        if not tr or tr.get("status") not in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL"): continue
+        tp2=float(tr.get("tp2_price") or 0)
         profile=str(tr.get("exit_profile") or "CURRENT_TP2")
+        # LIVE: record the first real-time TP2 touch once. This is one DB write per trade,
+        # not per tick, so it does not recreate the old telemetry hot-path backpressure.
+        if tr.get("mode") == "LIVE":
+            if profile=="CURRENT_TP2" and tr.get("tp2_order_id") and tp2 and price>=tp2 and not int(tr.get("tp2_target_seen_ts_ms") or 0):
+                seen_ms=int(float(tick_ts)*1000)
+                _at_update_trade(tid,tp2_target_seen_ts_ms=seen_ms)
+                _at_log_event("TP2_TARGET_SEEN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=symbol,
+                              detail=f"target={tp2}; tick={price}; ts_ms={seen_ms}")
+            continue
+        if tr.get("mode") != "DRY" or tr.get("status") not in ("OPEN","PARTIAL"): continue
+        entry=float(tr.get("entry_price") or 0); qty=float(tr.get("qty") or 0); expected=float(tr.get("expected_qty") or qty)
+        stop=float(tr.get("stop_price") or 0); tp1=float(tr.get("tp1_price") or 0); runner=float(tr.get("runner_price") or 0)
         if stop and price <= stop:
             partial=float(tr.get("partial_realized_pnl") or 0)
             pnl=partial + expected*(price-entry)
-            daily=_at_close_trade(tid,"STOP",price,pnl,0)
+            _at_close_trade(tid,"STOP",price,pnl,0)
             continue
         if profile == "PARTIAL_RUNNER":
             if not int(tr.get("tp1_hit") or 0) and tp1 and price >= tp1:
@@ -7507,13 +7571,27 @@ async def autotrade_reconcile_loop(session):
                     actual=abs(float(posmap.get((sym,ps),0.0)))
                     expected=abs(float(tr.get("expected_qty") or tr.get("qty") or 0))
                     if actual <= 1e-12:
-                        stopst=await _at_algo_state(session,tr.get("stop_algo_id")); tp2st=await _at_algo_state(session,tr.get("tp2_algo_id")); tp1st=await _at_algo_state(session,tr.get("tp1_algo_id"))
+                        stopst=await _at_algo_state(session,tr.get("stop_algo_id"))
+                        tp2st=await _at_algo_state(session,tr.get("tp2_algo_id"))
+                        tp1st=await _at_algo_state(session,tr.get("tp1_algo_id"))
+                        normal_tp2=await _at_query_normal_order(session,sym,tr.get("tp2_order_id")) if tr.get("tp2_order_id") else None
                         reason="MANUAL_CLOSE"; exit_order=None
-                        for name,st in (("STOP",stopst),("RUNNER" if tr.get("exit_profile")=="PARTIAL_RUNNER" else "TP2",tp2st),("TP1",tp1st)):
-                            if st and int(st.get("triggerTime",0) or 0)>0 and st.get("actualOrderId"):
-                                reason=name; exit_order=st.get("actualOrderId")
-                                if name != "TP1": break
-                        if reason=="MANUAL_CLOSE":
+                        normal_tp2_status=str((normal_tp2 or {}).get("status") or "").upper()
+                        # New resting-limit path: a fully filled TP2 order is decisive.
+                        if normal_tp2_status=="FILLED":
+                            reason="TP2"; exit_order=tr.get("tp2_order_id")
+                        elif stopst and int(stopst.get("triggerTime",0) or 0)>0 and stopst.get("actualOrderId"):
+                            reason="STOP"; exit_order=stopst.get("actualOrderId")
+                        else:
+                            for name,st in (("RUNNER" if tr.get("exit_profile")=="PARTIAL_RUNNER" else "TP2",tp2st),("TP1",tp1st)):
+                                if st and int(st.get("triggerTime",0) or 0)>0 and st.get("actualOrderId"):
+                                    reason=name; exit_order=st.get("actualOrderId")
+                                    if name != "TP1": break
+                        if tr.get("tp2_order_id"):
+                            # A resting TP may fill partially before another exit path closes the
+                            # remainder. Window accounting captures every exit fill exactly once.
+                            realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
+                        elif reason=="MANUAL_CLOSE":
                             realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
                         else:
                             realized,comm,exit_px=await _at_order_net_pnl(session,sym,exit_order)
@@ -7523,33 +7601,96 @@ async def autotrade_reconcile_loop(session):
                         daily=_at_close_trade(tid,reason,exit_px,realized,comm)
                         await telegram_send(session,f"{'🛑' if reason=='STOP' else '✅'} AutoTrade kapandı — {sym} | {reason}\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT | stop serisi {daily['consecutive_stops']}/{autotrade_cfg['max_consecutive_stops']}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
                         continue
-                    # CURRENT_TP2 uses a TAKE_PROFIT limit at the exact target. If the trigger
-                    # fires but the spawned limit remains open/partial beyond the short grace
-                    # window, cancel only that spawned order and market-close the verified
-                    # remaining position. This avoids normal TP market slippage while still
-                    # preventing a touched target from turning into an unmanaged reversal.
-                    if str(tr.get("exit_profile") or "CURRENT_TP2") == "CURRENT_TP2" and tr.get("tp2_algo_id"):
+
+                    # New CURRENT_TP2 path: the GTC limit has been resting in the book since
+                    # entry. We only use market fallback after TP2 was actually observed and
+                    # price has subsequently retraced by the configured amount.
+                    if str(tr.get("exit_profile") or "CURRENT_TP2") == "CURRENT_TP2" and tr.get("tp2_order_id"):
+                        tp2ord=await _at_query_normal_order(session,sym,tr.get("tp2_order_id"))
+                        status=str((tp2ord or {}).get("status") or "").upper()
+                        if status=="FILLED":
+                            # PositionRisk can lag the order endpoint briefly.
+                            continue
+                        if status=="PARTIALLY_FILLED":
+                            if not int(tr.get("tp2_target_seen_ts_ms") or 0):
+                                seen_ms=now_ms()
+                                _at_update_trade(tid,tp2_target_seen_ts_ms=seen_ms)
+                                _at_log_event("TP2_TARGET_SEEN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"source=partial_fill; target={tr.get('tp2_price')}; ts_ms={seen_ms}")
+                                tr=dict(tr); tr["tp2_target_seen_ts_ms"]=seen_ms
+                            orig_qty=float((tp2ord or {}).get("origQty") or tr.get("qty") or 0)
+                            exec_out=float((tp2ord or {}).get("executedQty") or 0)
+                            bot_expected=max(0.0,orig_qty-exec_out)
+                            qty_tol=max(float(exchange_filters.get(sym,{}).get("step_size") or 0)*1.5,max(expected,1e-12)*0.01)
+                            if abs(actual-bot_expected)<=qty_tol and abs(expected-bot_expected)>qty_tol:
+                                _at_update_trade(tid,expected_qty=bot_expected)
+                                tr=dict(tr); tr["expected_qty"]=bot_expected; expected=bot_expected
+                        current_px=float(states.get(sym).last_price if states.get(sym) else 0) or float(states.get(sym).mark_price if states.get(sym) else 0)
+                        if status in ("NEW","PARTIALLY_FILLED") and _at_tp_retrace_fallback_due(tr,current_px):
+                            cancelled=await _at_cancel_normal_order(session,sym,tr.get("tp2_order_id"))
+                            if not cancelled:
+                                _at_log_event("TP2_LIMIT_CANCEL_UNCERTAIN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"order_id={tr.get('tp2_order_id')}; fallback_deferred=1")
+                                continue
+                            # Re-read account state after cancellation so a concurrent fill can
+                            # never make the fallback order over-close or flip the position.
+                            _, _, fresh_positions = await _at_account_snapshot(session)
+                            remaining=0.0
+                            for fp in fresh_positions:
+                                if str(fp.get("symbol") or "")!=sym:
+                                    continue
+                                fps=str(fp.get("positionSide") or "BOTH")
+                                if fps!=ps:
+                                    continue
+                                remaining += abs(float(fp.get("positionAmt",0) or 0))
+                            if remaining<=1e-12:
+                                # The resting limit may have completed during the cancellation race.
+                                # Do not call that a fallback and, most importantly, do not send a
+                                # second exit order.
+                                _at_log_event("TP2_LIMIT_FILLED_DURING_CANCEL",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"target={tr.get('tp2_price')}; current={current_px}; remaining=0")
+                                realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
+                                await _at_cancel_trade_algos(session,tr)
+                                daily=_at_close_trade(tid,"TP2",exit_px,realized,comm)
+                                await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                continue
+                            await _at_emergency_close(session,sym,remaining,ps,int(tr.get("signal_id") or 0))
+                            _at_log_event("TP2_RETRACE_FALLBACK",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                          detail=f"target={tr.get('tp2_price')}; current={current_px}; retrace_pct={AUTO_TRADE_TP_RETRACE_FALLBACK_PCT}; remaining={remaining}")
+                            realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
+                            await _at_cancel_trade_algos(session,tr)
+                            daily=_at_close_trade(tid,"TP2_RETRACE_FALLBACK",exit_px,realized,comm)
+                            await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2 RETRACE/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            continue
+                        if status in ("CANCELED","EXPIRED","REJECTED") and actual>1e-12:
+                            # Never run a live position without either its resting TP or an alert.
+                            err=f"TP2_LIMIT_{status}"
+                            if str(tr.get("last_error") or "") != err:
+                                _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=err)
+                                _at_log_event("TP2_LIMIT_MISSING",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"order_id={tr.get('tp2_order_id')}; status={status}; position={actual}")
+                                await telegram_send(session,f"⚠️ {sym} TP2 limit emri {status}. STOP hâlâ aktif; pozisyon için manuel kontrol gerekli.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            continue
+                        if status=="":
+                            # Query uncertainty is fail-closed: keep protection and never guess.
+                            continue
+
+                    # Legacy migration path for positions opened before the resting-limit deploy.
+                    elif str(tr.get("exit_profile") or "CURRENT_TP2") == "CURRENT_TP2" and tr.get("tp2_algo_id"):
                         tp2st=await _at_algo_state(session,tr.get("tp2_algo_id"))
                         if tp2st and int(tp2st.get("triggerTime",0) or 0)>0:
                             actual_order_id=tp2st.get("actualOrderId")
                             if actual_order_id:
-                                try:
-                                    actual_order=await binance_signed_request(session,"GET","/fapi/v1/order",{"symbol":sym,"orderId":actual_order_id})
-                                except Exception:
-                                    actual_order=None
+                                actual_order=await _at_query_normal_order(session,sym,actual_order_id)
                                 status=str((actual_order or {}).get("status") or "").upper()
                                 if status=="FILLED":
-                                    # Position snapshot may be a few seconds stale; let the next
-                                    # reconcile cycle close the ledger from the real fills.
                                     continue
                                 if status in ("NEW","PARTIALLY_FILLED") and _at_tp_limit_fallback_due(tp2st):
                                     cancelled=await _at_cancel_normal_order(session,sym,actual_order_id)
                                     if not cancelled:
                                         _at_log_event("TP2_LIMIT_CANCEL_UNCERTAIN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
-                                                      detail=f"order_id={actual_order_id}; fallback_deferred=1")
+                                                      detail=f"order_id={actual_order_id}; legacy=1; fallback_deferred=1")
                                         continue
-                                    # Re-read account state after cancellation so a concurrent fill
-                                    # cannot make the fallback market order over-close the position.
                                     _, _, fresh_positions = await _at_account_snapshot(session)
                                     remaining=0.0
                                     for fp in fresh_positions:
@@ -7561,15 +7702,13 @@ async def autotrade_reconcile_loop(session):
                                         remaining += abs(float(fp.get("positionAmt",0) or 0))
                                     if remaining>1e-12:
                                         await _at_emergency_close(session,sym,remaining,ps,int(tr.get("signal_id") or 0))
-                                        _at_log_event("TP2_LIMIT_FALLBACK",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
-                                                      detail=f"target={tr.get('tp2_price')}; remaining={remaining}; grace_s={AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS}")
+                                    _at_log_event("TP2_LIMIT_FALLBACK",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                                  detail=f"target={tr.get('tp2_price')}; remaining={remaining}; grace_s={AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS}; legacy=1")
                                     realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
                                     await _at_cancel_trade_algos(session,tr)
                                     daily=_at_close_trade(tid,"TP2_LIMIT_FALLBACK",exit_px,realized,comm)
-                                    await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2 LIMIT/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                    await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | LEGACY TP2 LIMIT/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
                                     continue
-                                # Once TP2 has triggered, do not misclassify a partial/stale
-                                # position snapshot as manual intervention while the limit settles.
                                 if status in ("NEW","PARTIALLY_FILLED",""):
                                     continue
                     tol=max(float(exchange_filters.get(sym,{}).get("step_size") or 0)*1.5, expected*0.01)
