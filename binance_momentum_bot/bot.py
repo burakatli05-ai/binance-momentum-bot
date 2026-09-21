@@ -7643,8 +7643,18 @@ async def autotrade_reconcile_loop(session):
                                 if fps!=ps:
                                     continue
                                 remaining += abs(float(fp.get("positionAmt",0) or 0))
-                            if remaining>1e-12:
-                                await _at_emergency_close(session,sym,remaining,ps,int(tr.get("signal_id") or 0))
+                            if remaining<=1e-12:
+                                # The resting limit may have completed during the cancellation race.
+                                # Do not call that a fallback and, most importantly, do not send a
+                                # second exit order.
+                                _at_log_event("TP2_LIMIT_FILLED_DURING_CANCEL",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"target={tr.get('tp2_price')}; current={current_px}; remaining=0")
+                                realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
+                                await _at_cancel_trade_algos(session,tr)
+                                daily=_at_close_trade(tid,"TP2",exit_px,realized,comm)
+                                await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                continue
+                            await _at_emergency_close(session,sym,remaining,ps,int(tr.get("signal_id") or 0))
                             _at_log_event("TP2_RETRACE_FALLBACK",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
                                           detail=f"target={tr.get('tp2_price')}; current={current_px}; retrace_pct={AUTO_TRADE_TP_RETRACE_FALLBACK_PCT}; remaining={remaining}")
                             realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
@@ -7654,10 +7664,12 @@ async def autotrade_reconcile_loop(session):
                             continue
                         if status in ("CANCELED","EXPIRED","REJECTED") and actual>1e-12:
                             # Never run a live position without either its resting TP or an alert.
-                            _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=f"TP2_LIMIT_{status}")
-                            _at_log_event("TP2_LIMIT_MISSING",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
-                                          detail=f"order_id={tr.get('tp2_order_id')}; status={status}; position={actual}")
-                            await telegram_send(session,f"⚠️ {sym} TP2 limit emri {status}. STOP hâlâ aktif; pozisyon için manuel kontrol gerekli.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            err=f"TP2_LIMIT_{status}"
+                            if str(tr.get("last_error") or "") != err:
+                                _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=err)
+                                _at_log_event("TP2_LIMIT_MISSING",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                              detail=f"order_id={tr.get('tp2_order_id')}; status={status}; position={actual}")
+                                await telegram_send(session,f"⚠️ {sym} TP2 limit emri {status}. STOP hâlâ aktif; pozisyon için manuel kontrol gerekli.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
                             continue
                         if status=="":
                             # Query uncertainty is fail-closed: keep protection and never guess.
