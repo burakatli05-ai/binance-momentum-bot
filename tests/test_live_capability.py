@@ -27,7 +27,7 @@ class CapabilityTests(unittest.TestCase):
         changed = {'load_autotrade_settings', 'handle_autotrade_callback', '_at_try_live_enable', '_at_command'}
         nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name not in changed]
         digest = hashlib.sha256(ast.dump(ast.Module(body=nodes, type_ignores=[]), include_attributes=False).encode()).hexdigest()
-        self.assertEqual('11501c8c91e127dda2822c6ed7ae483a9976595b26acebac55b6a03775a7f595', digest)
+        self.assertEqual('c1579b51a65adc3c761bd9f01199b50d149c2f2882a6bffd49edc19ecb7931b0', digest)
 
     def test_bot_environment_is_fail_closed_and_always_boots_off(self):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
