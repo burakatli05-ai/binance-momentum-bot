@@ -55,6 +55,14 @@ class TpLimitExecutionTests(unittest.TestCase):
         self.assertNotIn('price',params)
         self.assertNotIn('timeInForce',params)
 
+    def test_cancel_failure_is_fail_closed_until_order_state_is_definitive(self):
+        uncertain=AsyncMock(side_effect=[RuntimeError('timeout'),{'status':'NEW'}])
+        with patch.object(bot,'binance_signed_request',uncertain):
+            self.assertFalse(asyncio.run(bot._at_cancel_normal_order(None,'BTCUSDT','77')))
+        closed=AsyncMock(side_effect=[RuntimeError('timeout'),{'status':'FILLED'}])
+        with patch.object(bot,'binance_signed_request',closed):
+            self.assertTrue(asyncio.run(bot._at_cancel_normal_order(None,'BTCUSDT','77')))
+
     def test_fallback_only_after_trigger_and_grace(self):
         old=bot.AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS
         try:
@@ -94,7 +102,7 @@ class TpLimitFallbackReconcileTests(unittest.TestCase):
              patch.object(bot,'_at_account_snapshot',new=AsyncMock(side_effect=snapshots)), \
              patch.object(bot,'_at_algo_state',new=AsyncMock(return_value={'triggerTime':trigger_ms,'actualOrderId':'77'})), \
              patch.object(bot,'binance_signed_request',new=AsyncMock(side_effect=signed)), \
-             patch.object(bot,'_at_cancel_normal_order',new=AsyncMock()) as cancel_normal, \
+             patch.object(bot,'_at_cancel_normal_order',new=AsyncMock(return_value=True)) as cancel_normal, \
              patch.object(bot,'_at_emergency_close',new=AsyncMock(return_value={'status':'FILLED'})) as market_close, \
              patch.object(bot,'_at_window_net_pnl',new=AsyncMock(return_value=(12.0,0.5,101.9))), \
              patch.object(bot,'_at_cancel_trade_algos',new=AsyncMock()), \
