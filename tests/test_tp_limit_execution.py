@@ -67,5 +67,48 @@ class TpLimitExecutionTests(unittest.TestCase):
             bot.AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS=old
 
 
+class TpLimitFallbackReconcileTests(unittest.TestCase):
+    def setUp(self):
+        from test_v5135 import DatabaseCase
+        DatabaseCase.setUp(self)
+        self.rows=DatabaseCase.rows.__get__(self, type(self))
+        bot.autotrade_cfg.update(mode='LIVE',exit_profile='CURRENT_TP2')
+
+    def test_triggered_partial_limit_cancels_then_closes_verified_remainder(self):
+        tid=bot._at_insert_trade(
+            9001,'XUSDT','LIVE',100,100,10,
+            dict(stop=99,tp1=101,tp2=102,runner=105),{},position_side='BOTH',entry_order_id='entry')
+        bot._at_update_trade(tid,tp2_algo_id='tp-algo',tp2_client_id='tp-client')
+        trigger_ms=bot.now_ms()-3000
+        snapshots=[
+            ({'canTrade':True},{'balance':'1000'},[{'symbol':'XUSDT','positionSide':'BOTH','positionAmt':'10'}]),
+            ({'canTrade':True},{'balance':'1000'},[{'symbol':'XUSDT','positionSide':'BOTH','positionAmt':'4'}]),
+        ]
+        async def signed(session,method,path,params=None,**kwargs):
+            if method=='GET' and path=='/fapi/v1/order':
+                return {'status':'PARTIALLY_FILLED','orderId':77}
+            return {}
+        with patch.object(bot,'AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS',2.0), \
+             patch.object(bot,'_at_account_snapshot',new=AsyncMock(side_effect=snapshots)), \
+             patch.object(bot,'_at_algo_state',new=AsyncMock(return_value={'triggerTime':trigger_ms,'actualOrderId':'77'})), \
+             patch.object(bot,'binance_signed_request',new=AsyncMock(side_effect=signed)), \
+             patch.object(bot,'_at_cancel_normal_order',new=AsyncMock()) as cancel_normal, \
+             patch.object(bot,'_at_emergency_close',new=AsyncMock(return_value={'status':'FILLED'})) as market_close, \
+             patch.object(bot,'_at_window_net_pnl',new=AsyncMock(return_value=(12.0,0.5,101.9))), \
+             patch.object(bot,'_at_cancel_trade_algos',new=AsyncMock()), \
+             patch.object(bot,'telegram_send',new=AsyncMock()), \
+             patch.object(bot.asyncio,'sleep',new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(bot.autotrade_reconcile_loop(None))
+        cancel_normal.assert_awaited_once_with(None,'XUSDT','77')
+        market_close.assert_awaited_once()
+        self.assertAlmostEqual(4.0,float(market_close.await_args.args[2]))
+        row=self.rows('SELECT status,close_reason,exit_price,net_pnl FROM autotrade_trades WHERE id=?',(tid,))[0]
+        self.assertEqual('CLOSED',row['status'])
+        self.assertEqual('TP2_LIMIT_FALLBACK',row['close_reason'])
+        self.assertAlmostEqual(101.9,row['exit_price'])
+        self.assertAlmostEqual(11.5,row['net_pnl'])
+
+
 if __name__=='__main__':
     unittest.main()
