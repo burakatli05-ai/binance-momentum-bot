@@ -7167,13 +7167,23 @@ def _at_tp_limit_fallback_due(algo_state: Optional[dict], now_ms_value: Optional
     return current_ms - trigger_ms >= int(AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS * 1000)
 
 
-async def _at_cancel_normal_order(session, symbol: str, order_id):
+async def _at_cancel_normal_order(session, symbol: str, order_id) -> bool:
     if not order_id:
-        return
+        return True
     try:
         await binance_signed_request(session, "DELETE", "/fapi/v1/order", {"symbol":symbol,"orderId":order_id})
+        return True
     except Exception as e:
+        # Fail closed: never market-close while a profit-limit order may still be live.
+        # If cancellation response was lost, query the order and proceed only when it
+        # is definitively no longer open.
         log.debug("AutoTrade cancel normal order %s/%s: %r", symbol, order_id, e)
+        try:
+            state=await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"orderId":order_id})
+            status=str((state or {}).get("status") or "").upper()
+            return status in ("CANCELED","FILLED","EXPIRED","REJECTED")
+        except Exception:
+            return False
 
 
 async def _at_cancel_algo(session, algo_id):
@@ -7533,7 +7543,11 @@ async def autotrade_reconcile_loop(session):
                                     # reconcile cycle close the ledger from the real fills.
                                     continue
                                 if status in ("NEW","PARTIALLY_FILLED") and _at_tp_limit_fallback_due(tp2st):
-                                    await _at_cancel_normal_order(session,sym,actual_order_id)
+                                    cancelled=await _at_cancel_normal_order(session,sym,actual_order_id)
+                                    if not cancelled:
+                                        _at_log_event("TP2_LIMIT_CANCEL_UNCERTAIN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
+                                                      detail=f"order_id={actual_order_id}; fallback_deferred=1")
+                                        continue
                                     # Re-read account state after cancellation so a concurrent fill
                                     # cannot make the fallback market order over-close the position.
                                     _, _, fresh_positions = await _at_account_snapshot(session)
