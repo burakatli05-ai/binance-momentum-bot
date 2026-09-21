@@ -270,15 +270,68 @@ def package(worker, now_ms=None):
         _LOCK.release()
 
 
+def _write_part(bundle, part, offset, length):
+    """Copy only one upload part, with bounded memory, inside our temporary dir."""
+    with bundle.open('rb') as source, part.open('wb') as target:
+        source.seek(offset)
+        while length:
+            data = source.read(min(length, 1024 * 1024))
+            if not data:
+                raise OSError('Unexpected end of analysis archive')
+            target.write(data)
+            length -= len(data)
+
+
+async def _deliver(bot, session, bundle, caption, chat_id, notify):
+    size = bundle.stat().st_size
+    limit = min(bot['TELEGRAM_DOCUMENT_MAX_BYTES'], 49_000_000)
+    if limit <= 0:
+        raise ValueError('Invalid document size limit')
+    count = max(1, (size + limit - 1) // limit)
+    digest = await asyncio.to_thread(sha256, bundle)
+    bot['log'].info('Analysis export ready bytes=%d parts=%d sha256=%s', size, count, digest)
+    if count > 1:
+        await notify(f'📦 Analiz paketi {size / 1_000_000:.2f} MB; {count} parça gönderilecek. '
+                     'Tüm .zip.001, .002… dosyalarını aynı klasöre kaydedin; '
+                     '.zip.001 dosyasını 7-Zip ile açıp içindekileri çıkarın. '
+                     'Parçalar tek başına ZIP değildir. Analiz için tüm parçalar gereklidir.\n'
+                     f'Birleştirilmiş ZIP SHA256: {digest}')
+    for index in range(count):
+        path = bundle
+        part_caption = caption
+        if count > 1:
+            path = bundle.with_name(f'{bundle.name}.{index + 1:03d}')
+            await asyncio.to_thread(_write_part, bundle, path, index * limit, min(limit, size - index * limit))
+            part_caption = f'Analysis export parça {index + 1}/{count} | ZIP SHA256: {digest}'
+        delivered = await bot['telegram_send_document'](session, str(path), part_caption, chat_id=chat_id)
+        if not delivered:
+            bot['log'].error('Analysis export upload failed part=%d total=%d', index + 1, count)
+            await notify(f'❌ Analiz dosyası gönderilemedi (parça {index + 1}/{count}). '
+                         'Gönderim tamamlanmadı; /analysisexport ile tekrar deneyin.')
+            return False
+        bot['log'].info('Analysis export delivered part=%d total=%d', index + 1, count)
+        if path != bundle:
+            # Only our temporary upload copy; source/scheduler snapshots are untouched.
+            await asyncio.to_thread(path.unlink)
+    await notify(f'✅ Analiz export gönderildi ({count} dosya).')
+    bot['log'].info('Analysis export complete parts=%d', count)
+    return True
+
+
 async def handle(bot, session, chat_id, user_id):
     """Private admin command; all blocking export work runs off the event loop."""
     async def notify(message):
         try:
-            await bot['telegram_send'](session, message, chat_id=chat_id)
+            sent = await bot['telegram_send'](session, message, chat_id=chat_id)
+            if not sent:
+                bot['log'].error('Analysis export notification was not delivered')
+            return bool(sent)
         except Exception as exc:
             bot['log'].error('Analysis export notification failed: %s', type(exc).__name__)
+            return False
 
     if not bot['_at_admin_allowed'](chat_id, user_id):
+        bot['log'].warning('Analysis export rejected: unauthorized')
         return True
     # Telegram private chat IDs are positive and equal to the sender's user ID.
     if not str(chat_id).isdigit() or int(chat_id) <= 0 or str(chat_id) != str(user_id):
@@ -287,6 +340,10 @@ async def handle(bot, session, chat_id, user_id):
     worker = bot['export_worker']
     if worker is None:
         await notify('Export kapalı: RESEARCH_EXPORT_ENABLED=0.')
+        return True
+    bot['log'].info('Analysis export accepted: private admin; export enabled')
+    if not await notify('⏳ /analysisexport alındı. Son 7 gün + bugünün analiz paketi hazırlanıyor; '
+                        'büyük veride birkaç dakika sürebilir. Hazır olunca dosyaları göndereceğim.'):
         return True
     context = package(worker)
     build = asyncio.create_task(asyncio.to_thread(context.__enter__))
@@ -305,7 +362,7 @@ async def handle(bot, session, chat_id, user_id):
         caption = ('Runner analysis: analysis.db + manifest + README | '
                    f"{manifest['source_size_bytes']:,} → {manifest['analysis_size_bytes']:,} "
                    f'→ {bundle.stat().st_size:,} bayt (source → analysis → ZIP)')
-        await bot['telegram_send_document'](session, str(bundle), caption, chat_id=chat_id)
+        await _deliver(bot, session, bundle, caption, chat_id, notify)
     except Exception as exc:
         bot['log'].error('Analysis export failed: %s', type(exc).__name__)
         await notify(f'❌ Analysis export paketi hazırlanamadı/gönderilemedi: {type(exc).__name__}. '
