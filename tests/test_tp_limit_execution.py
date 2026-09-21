@@ -175,6 +175,37 @@ class TpLimitFallbackReconcileTests(unittest.TestCase):
         self.assertAlmostEqual(101.79,row['exit_price'])
         self.assertAlmostEqual(16.5,row['net_pnl'])
 
+    def test_fill_during_cancel_never_sends_second_market_exit(self):
+        tid=bot._at_insert_trade(
+            9003,'XUSDT','LIVE',100,100,10,
+            dict(stop=99,tp1=101,tp2=102,runner=105),{},position_side='BOTH',entry_order_id='entry')
+        bot._at_update_trade(tid,tp2_order_id='79',tp2_order_client_id='tp-client',
+                             tp2_target_seen_ts_ms=bot.now_ms()-5000)
+        bot.states['XUSDT'].last_price=101.80
+        snapshots=[
+            ({'canTrade':True},{'balance':'1000'},[{'symbol':'XUSDT','positionSide':'BOTH','positionAmt':'10'}]),
+            ({'canTrade':True},{'balance':'1000'},[]),
+        ]
+        with patch.object(bot,'AUTO_TRADE_TP_RETRACE_FALLBACK_PCT',0.15), \
+             patch.object(bot,'AUTO_TRADE_TP_RETRACE_MIN_SECONDS',1.0), \
+             patch.object(bot,'BINANCE_API_KEY','test'), patch.object(bot,'BINANCE_API_SECRET','test'), \
+             patch.object(bot,'_at_account_snapshot',new=AsyncMock(side_effect=snapshots)), \
+             patch.object(bot,'_at_query_normal_order',new=AsyncMock(return_value={'status':'NEW','orderId':'79','origQty':'10','executedQty':'0'})), \
+             patch.object(bot,'_at_algo_state',new=AsyncMock(return_value=None)), \
+             patch.object(bot,'_at_cancel_normal_order',new=AsyncMock(return_value=True)), \
+             patch.object(bot,'_at_emergency_close',new=AsyncMock()) as market_close, \
+             patch.object(bot,'_at_window_net_pnl',new=AsyncMock(return_value=(20.0,1.5,102.0))), \
+             patch.object(bot,'_at_cancel_trade_algos',new=AsyncMock()), \
+             patch.object(bot,'telegram_send',new=AsyncMock()), \
+             patch.object(bot.asyncio,'sleep',new=AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(bot.autotrade_reconcile_loop(None))
+        market_close.assert_not_awaited()
+        row=self.rows('SELECT status,close_reason,net_pnl FROM autotrade_trades WHERE id=?',(tid,))[0]
+        self.assertEqual('CLOSED',row['status'])
+        self.assertEqual('TP2',row['close_reason'])
+        self.assertAlmostEqual(18.5,row['net_pnl'])
+
     def test_no_retrace_fallback_before_target_seen_even_when_below_target(self):
         tid=bot._at_insert_trade(
             9002,'XUSDT','LIVE',100,100,10,
