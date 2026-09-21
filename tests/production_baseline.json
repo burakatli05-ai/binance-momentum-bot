@@ -8,7 +8,7 @@
     "premium_trade_guard": "d5687eac6aae893cdcca2f2ba021e81ab38425459c9e3d5ce4b0313139910945",
     "estimate_trade_plan": "2af605700e2c600226f7bb0c783f57b0d9870821b6fbd554d4b9c70038693b75",
     "_at_levels_from_fill": "b0ae426ace9e22a22a9f79cec5a8b18dc089a7f25cf76af4152551f5753d6b1b",
-    "autotrade_on_tick": "4a7e2de76290e8dbfbe05a0bf9d001202c6ef8131cfbf24fa374bf8bf233d0dd"
+    "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
   },
   "constants": {
     "EARLY_SCORE": "a36a69a1d40e50e7f3ae4d757c52b3adc4c3ad01b462820c35421548c419e5e9",
