@@ -311,8 +311,15 @@ AUTO_TRADE_STOP_COOLDOWN_MINUTES_DEFAULT = int(os.getenv("AUTO_TRADE_STOP_COOLDO
 AUTO_TRADE_SIM_BALANCE_USDT = float(os.getenv("AUTO_TRADE_SIM_BALANCE_USDT", "2000"))
 AUTO_TRADE_MARGIN_TYPE_DEFAULT = os.getenv("AUTO_TRADE_MARGIN_TYPE", "ISOLATED").strip().upper()
 AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_MAX_ENTRY_SLIPPAGE_PCT", "0.30"))
-AUTO_TRADE_RECONCILE_SECONDS = max(2, int(os.getenv("AUTO_TRADE_RECONCILE_SECONDS", "5")))
+AUTO_TRADE_RECONCILE_SECONDS = max(2, int(os.getenv("AUTO_TRADE_RECONCILE_SECONDS", "2")))
+# Legacy conditional-TP fallback is retained only for already-open trades created before the
+# resting-limit migration. New CURRENT_TP2 trades never use this timer.
 AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS = max(0.5, min(15.0, float(os.getenv("AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS", "2.0"))))
+# New CURRENT_TP2 execution: a normal GTC limit rests at TP2 from entry. If TP2 has been
+# observed and the still-open remainder retraces this far, the bot cancels the limit,
+# re-reads the live position and market-closes only the verified remainder.
+AUTO_TRADE_TP_RETRACE_FALLBACK_PCT = max(0.05, min(1.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_FALLBACK_PCT", "0.15"))))
+AUTO_TRADE_TP_RETRACE_MIN_SECONDS = max(0.0, min(30.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_MIN_SECONDS", "1.0"))))
 AUTO_TRADE_EXIT_PROFILE_DEFAULT = os.getenv("AUTO_TRADE_EXIT_PROFILE", "CURRENT_TP2").strip().upper()
 if AUTO_TRADE_EXIT_PROFILE_DEFAULT not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
     AUTO_TRADE_EXIT_PROFILE_DEFAULT = "CURRENT_TP2"
@@ -1377,6 +1384,7 @@ def init_db():
                entry_order_id TEXT, entry_client_id TEXT,
                tp1_algo_id TEXT, tp1_client_id TEXT,
                tp2_algo_id TEXT, tp2_client_id TEXT,
+               tp2_order_id TEXT, tp2_order_client_id TEXT, tp2_target_seen_ts_ms INTEGER,
                stop_algo_id TEXT, stop_client_id TEXT,
                opened_ts_ms INTEGER, closed_ts_ms INTEGER, close_reason TEXT, exit_price REAL,
                realized_pnl REAL DEFAULT 0, commission REAL DEFAULT 0, net_pnl REAL DEFAULT 0,
@@ -1397,6 +1405,9 @@ def init_db():
            )"""
     )
 
+    ensure_column(conn, "autotrade_trades", "tp2_order_id", "TEXT")
+    ensure_column(conn, "autotrade_trades", "tp2_order_client_id", "TEXT")
+    ensure_column(conn, "autotrade_trades", "tp2_target_seen_ts_ms", "INTEGER")
     ensure_column(conn, "notification_log", "telegram_message_id", "INTEGER")
     ensure_column(conn, "notification_log", "live_bid", "REAL")
     ensure_column(conn, "notification_log", "live_ask", "REAL")
@@ -7139,6 +7150,44 @@ async def _at_place_market_entry(session, symbol: str, qty: float, position_side
         raise e
 
 
+async def _at_place_limit_exit(session, symbol: str, qty: float, price: float, position_side: str, client_id: str):
+    params = {"symbol":symbol,"side":"SELL","type":"LIMIT","quantity":qty,"price":price,
+              "timeInForce":"GTC","newClientOrderId":client_id,"newOrderRespType":"RESULT"}
+    if position_side == "BOTH":
+        params["reduceOnly"] = "true"
+    else:
+        params["positionSide"] = position_side
+    try:
+        return await binance_signed_request(session, "POST", "/fapi/v1/order", params, timeout_s=20)
+    except Exception as e:
+        # Same uncertainty rule as entry: never duplicate an order after a timeout.
+        q = await _at_query_order_by_client(session, symbol, client_id)
+        if q and str(q.get("status") or "").upper() in ("NEW","PARTIALLY_FILLED","FILLED"):
+            return q
+        raise e
+
+
+async def _at_query_normal_order(session, symbol: str, order_id):
+    if not order_id:
+        return None
+    try:
+        return await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"orderId":order_id})
+    except Exception:
+        return None
+
+
+def _at_tp_retrace_fallback_due(tr: dict, current_price: float, now_ms_value: Optional[int] = None) -> bool:
+    seen_ms = int(tr.get("tp2_target_seen_ts_ms") or 0)
+    target = float(tr.get("tp2_price") or 0)
+    current = float(current_price or 0)
+    if seen_ms <= 0 or target <= 0 or current <= 0:
+        return False
+    current_ms = int(now_ms_value if now_ms_value is not None else now_ms())
+    if current_ms - seen_ms < int(AUTO_TRADE_TP_RETRACE_MIN_SECONDS * 1000):
+        return False
+    return current <= target * (1.0 - AUTO_TRADE_TP_RETRACE_FALLBACK_PCT / 100.0)
+
+
 async def _at_place_algo(session, *, symbol: str, order_type: str, trigger_price: float, position_side: str,
                          client_id: str, quantity: Optional[float] = None, close_position: bool = False,
                          limit_price: Optional[float] = None, time_in_force: Optional[str] = None):
@@ -7195,6 +7244,9 @@ async def _at_cancel_algo(session, algo_id):
 
 
 async def _at_cancel_trade_algos(session, tr: dict):
+    # Cancel the resting TP2 normal order as well as legacy/stop conditional algos.
+    if tr.get("tp2_order_id"):
+        await _at_cancel_normal_order(session, str(tr.get("symbol") or ""), tr.get("tp2_order_id"))
     for k in ("tp1_algo_id","tp2_algo_id","stop_algo_id"):
         await _at_cancel_algo(session, tr.get(k))
 
@@ -7366,13 +7418,14 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
                 c2=_at_client("R",signal_id); o2=await _at_place_algo(session,symbol=symbol,order_type="TAKE_PROFIT_MARKET",trigger_price=levels["runner"],position_side=position_side,client_id=c2,quantity=runner_qty)
                 _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
         else:
-            # Profit-taking is price-priority: trigger at TP2, then place a GTC limit at TP2.
-            # STOP remains STOP_MARKET because loss protection prioritizes guaranteed exit.
-            c2=_at_client("T2",signal_id); o2=await _at_place_algo(
-                session,symbol=symbol,order_type="TAKE_PROFIT",trigger_price=levels["tp2"],
-                position_side=position_side,client_id=c2,quantity=exec_qty,
-                limit_price=levels["tp2"],time_in_force="GTC")
-            _at_update_trade(tid,tp2_algo_id=str(o2.get("algoId") or ""),tp2_client_id=c2)
+            # Rest the profit order in the book from entry instead of waiting for a trigger.
+            # This gives the order queue priority before a fast spike reaches TP2. STOP remains
+            # STOP_MARKET because loss protection prioritizes guaranteed exit.
+            c2=_at_client("T2L",signal_id)
+            o2=await _at_place_limit_exit(session,symbol,exec_qty,levels["tp2"],position_side,c2)
+            _at_update_trade(tid,tp2_order_id=str(o2.get("orderId") or ""),tp2_order_client_id=c2)
+            _at_log_event("TP2_LIMIT_PLACED",trade_id=tid,signal_id=signal_id,symbol=symbol,
+                          detail=f"order_id={o2.get('orderId')}; target={levels['tp2']}; qty={exec_qty}")
     except Exception as e:
         _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=f"TP_CREATE_FAILED {e}")
         await telegram_send(session,f"⚠️ {symbol} pozisyonu açık ve STOP korumalı; TP emri kurulamadı. Manuel kontrol gerekli. {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
@@ -7385,14 +7438,25 @@ def autotrade_on_tick(symbol: str, price: float, tick_ts: float):
     if not ids: return
     for tid in ids:
         tr=autotrade_active.get(tid)
-        if not tr or tr.get("mode") != "DRY" or tr.get("status") not in ("OPEN","PARTIAL"): continue
-        entry=float(tr.get("entry_price") or 0); qty=float(tr.get("qty") or 0); expected=float(tr.get("expected_qty") or qty)
-        stop=float(tr.get("stop_price") or 0); tp1=float(tr.get("tp1_price") or 0); tp2=float(tr.get("tp2_price") or 0); runner=float(tr.get("runner_price") or 0)
+        if not tr or tr.get("status") not in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL"): continue
+        tp2=float(tr.get("tp2_price") or 0)
         profile=str(tr.get("exit_profile") or "CURRENT_TP2")
+        # LIVE: record the first real-time TP2 touch once. This is one DB write per trade,
+        # not per tick, so it does not recreate the old telemetry hot-path backpressure.
+        if tr.get("mode") == "LIVE":
+            if profile=="CURRENT_TP2" and tr.get("tp2_order_id") and tp2 and price>=tp2 and not int(tr.get("tp2_target_seen_ts_ms") or 0):
+                seen_ms=int(float(tick_ts)*1000)
+                _at_update_trade(tid,tp2_target_seen_ts_ms=seen_ms)
+                _at_log_event("TP2_TARGET_SEEN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=symbol,
+                              detail=f"target={tp2}; tick={price}; ts_ms={seen_ms}")
+            continue
+        if tr.get("mode") != "DRY" or tr.get("status") not in ("OPEN","PARTIAL"): continue
+        entry=float(tr.get("entry_price") or 0); qty=float(tr.get("qty") or 0); expected=float(tr.get("expected_qty") or qty)
+        stop=float(tr.get("stop_price") or 0); tp1=float(tr.get("tp1_price") or 0); runner=float(tr.get("runner_price") or 0)
         if stop and price <= stop:
             partial=float(tr.get("partial_realized_pnl") or 0)
             pnl=partial + expected*(price-entry)
-            daily=_at_close_trade(tid,"STOP",price,pnl,0)
+            _at_close_trade(tid,"STOP",price,pnl,0)
             continue
         if profile == "PARTIAL_RUNNER":
             if not int(tr.get("tp1_hit") or 0) and tp1 and price >= tp1:
