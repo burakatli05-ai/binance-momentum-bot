@@ -1,5 +1,9 @@
 # PROJECT_STATE — V5.13.5
 
+## 2026-09-21 Quality shadow research
+
+Additive quality_shadow recorder and strict purged-forward research added. All three requested model slots explicitly abstain until feature-source-validated fits exist; no fabricated probabilities or production promotion. Existing runner candidate remains an unvalidated historical research reference. See research/SHADOW_PROTOCOL.md for evidence limits and frozen 28-day acceptance gates. Production strategy, execution and startup OFF behavior unchanged. This request authorizes safe shadow-only merge/deployment conditional on validation; older authorization statements below describe their original changes.
+
 ## Production contract
 
 Current production baseline: `8d9754860fb85d308fd70181951c9080979abf78`, V5.13.5, including information-only X, durable Observer retries and persistent DB startup guards. Strategy ancestry remains `fd37b56` / V5.13.4. This branch adds independent research; it is not a production strategy revision.

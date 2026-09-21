@@ -26,6 +26,7 @@ load_dotenv()
 
 import research_v5135 as audit
 import telemetry_p0
+import quality_shadow
 import alt_shadow
 import research_reports
 import research_export
@@ -40,6 +41,7 @@ measurements = None
 x_watcher = None
 alt_engine = None
 export_worker = None
+quality_recorder = None
 ALT_SHADOW_ENABLED = audit.flag('ALT_SHADOW_ENABLED', True)
 RESEARCH_EXPORT_ENABLED = audit.flag('RESEARCH_EXPORT_ENABLED', False)
 
@@ -5873,6 +5875,7 @@ async def evaluate(session, symbol: str):
                     st.active_radar_notified = True
                     m["daily_notice_no"] = next_daily_notice_no(symbol, "EARLY")
                     mark_radar_notified(st.active_radar_id, m["daily_notice_no"])
+                    quality_arm('EARLY', st.active_radar_id, symbol, st.episode_id, m)
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
                     _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
@@ -5993,6 +5996,7 @@ async def evaluate(session, symbol: str):
         save_candidate_event(symbol, "premium_signal", m, score, st,
                              f"quality={quality}; rise={rise_score}; runup={runup:.2f}; oi_regime={m.get('oi_regime')}; exec={m['execution']['status']}")
         signal_id = save_signal(m)
+        quality_arm('PREMIUM', signal_id, symbol, st.episode_id, m)
         save_signal_meta(signal_id, m)
         save_premium_context(signal_id, m)
         link_notification_to_signal(symbol, "PREMIUM", m.get("daily_notice_no"), signal_id)
@@ -6242,6 +6246,9 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                     if not st.episode_id and st.prev_meaningful_ts:
                         st.prev_meaningful_low_price = min(st.prev_meaningful_low_price or price, price)
                     update_pending_tick(sym, price, ts / 1000.0)
+                    if quality_recorder:
+                        telemetry_p0.safe(quality_recorder.tick, sym, price, int(ts), now_ms(),
+                                          st.bid_price, st.ask_price, st.last_book_event_ms, st.last_book_receive_ms)
                     autotrade_on_tick(sym, price, ts / 1000.0)
                     if measurements:
                         try:
@@ -8717,6 +8724,104 @@ async def telegram_command_loop(session):
             await asyncio.sleep(3)
 
 
+def quality_features(symbol, original=None):
+    """Read-only, unconditional research snapshot. No production queue pruning."""
+    st = states.get(symbol)
+    if st is None:
+        return {}
+    stamp = now_ms()
+    f = dict(original or {})
+    trades = tuple(st.trades)
+    for seconds in (10,30,60):
+        window = [t for t in trades if stamp-seconds*1000 <= t.ts_ms <= stamp]
+        q = sum(t.quote for t in window)
+        f['q'+str(seconds)] = q if window else None
+        f['buy'+str(seconds)] = sum(t.quote for t in window if t.aggressive_buy)/q if q else None
+        f['chg'+str(seconds)] = pct_change(window[-1].price,window[0].price) if len(window)>1 else None
+    candles = tuple(st.candles)
+    avg = mean(c.quote_volume for c in candles[-20:]) if len(candles)>=15 else None
+    for seconds in (10,30,60):
+        q=f['q'+str(seconds)]
+        f['flow'+str(seconds)]=q/(avg*seconds/60) if avg and q is not None else None
+    f['price']=st.last_price
+    f['chg5']=pct_change(st.last_price,candles[-5].close) if len(candles)>=5 else None
+    f['compression_ratio']=compression_context(st)[0] if len(candles)>=15 else None
+    denom=st.bid_price*st.bid_qty+st.ask_price*st.ask_qty
+    f['book_imbalance']=st.bid_price*st.bid_qty/denom if denom else None
+    mid=(st.bid_price+st.ask_price)/2
+    f['spread']=100*(st.ask_price-st.bid_price)/mid if mid and st.bid_price and st.ask_price else None
+    f.update(phase_context(st))
+    f['bid']=st.bid_price or None;f['ask']=st.ask_price or None
+    f['qv24']=st.quote_volume24
+    f.update(_p0_oi_observations.get(symbol,{}))
+    rank=gainers_prev_rank.get(symbol);hist=gainers_rank_history.get(symbol)
+    f['gainer_rank']=rank
+    f['rank_velocity']=rank_velocity_per_min(symbol,rank) if rank is not None and hist and len(hist)>1 else None
+    f['candidate_runup']=pct_change(st.last_price,st.candidate_prices[0]) if st.candidate_prices else None
+    btc=states.get('BTCUSDT');bt=tuple(btc.trades) if btc else ()
+    bw=[t for t in bt if stamp-30000<=t.ts_ms<=stamp]
+    f['btc30']=pct_change(bw[-1].price,bw[0].price) if len(bw)>1 else None
+    f['rel30']=f['chg30']-f['btc30'] if f['chg30'] is not None and f['btc30'] is not None else None
+    f['_sources']={}
+    for name in ('chg10','chg30','chg60','chg5','q10','q30','q60','flow10','flow30','flow60','buy10','buy30','buy60','candidate_runup',
+                 'distance_from_episode_low_pct','dist_episode_peak_pct','seconds_since_episode_peak','episode_age_s'):
+        f['_sources'][name]=dict(source_ms=st.last_trade_event_ms,received_ms=st.last_trade_receive_ms,available_ms=stamp,
+                                 age_ms=stamp-st.last_trade_event_ms,max_age_ms=3000)
+    for name in ('book_imbalance','spread','bid','ask'):
+        f['_sources'][name]=dict(source_ms=st.last_book_event_ms,received_ms=st.last_book_receive_ms,available_ms=stamp,
+                                 age_ms=stamp-st.last_book_event_ms,max_age_ms=3000)
+    for name in ('oi5','oi_accel5'):
+        f['_sources'][name]=dict(source_ms=f.get('oi_source_ts_ms'),received_ms=f.get('oi_received_ts_ms'),available_ms=stamp,max_age_ms=360000)
+    for name in ('gainer_rank','rank_velocity'):
+        f['_sources'][name]=dict(source_ms=int(hist[-1][0]*1000) if hist else None,available_ms=stamp,max_age_ms=60000)
+    # Candle, BTC and ticker dependencies remain explicit; missing provenance is not a fresh value.
+    f['_sources']['compression_ratio']=dict(source_ms=candles[-1].open_time+60000 if candles else None,available_ms=stamp,max_age_ms=120000)
+    f['_sources']['rel30']=dict(source_ms=min(st.last_trade_event_ms,btc.last_trade_event_ms) if btc else None,available_ms=stamp,max_age_ms=3000)
+    ready=now_ms()
+    for source in f['_sources'].values():
+        source['available_ms']=ready
+    if not st.episode_started_ts:f['episode_age_s']=None
+    if not st.episode_low_price:f['distance_from_episode_low_pct']=None
+    if not st.episode_peak_price:f['dist_episode_peak_pct']=None
+    if not st.episode_peak_ts:f['seconds_since_episode_peak']=None
+    f['feature_ready_ts_ms']=ready
+    return f
+
+
+def quality_arm(kind,identity,symbol,episode_id,m):
+    if quality_recorder:
+        features=telemetry_p0.safe(quality_features,symbol,m) or {}
+        telemetry_p0.safe(quality_recorder.arm,kind,identity,symbol,episode_id,m.get('price'),now_ms(),features)
+
+
+async def quality_shadow_loop():
+    global quality_recorder
+    try:
+        quality_recorder=await asyncio.to_thread(quality_shadow.Recorder,db_connect)
+    except Exception:
+        log.exception('QUALITY_SHADOW_INIT_FAILED; production unchanged')
+        return
+    retry=[];last_discovery=0
+    while not stop_event.is_set():
+        try:
+            stamp=now_ms()
+            if stamp-last_discovery>=30000:
+                for kind,identity,symbol,episode_id,price,ts in await asyncio.to_thread(quality_recorder.discover,stamp):
+                    quality_recorder.arm(kind,identity,symbol,episode_id,price,int(ts*1000),recovered=True)
+                last_discovery=stamp
+            features={s:telemetry_p0.safe(quality_features,s) or {} for s in quality_recorder.due_symbols(stamp)}
+            quality_recorder.sample(now_ms(),features)
+            if not retry:retry=quality_recorder.take_batch()
+            await asyncio.to_thread(quality_recorder.flush,retry)
+            retry=[]
+        except Exception:
+            log.exception('QUALITY_SHADOW_FLUSH_RETRY; production unchanged')
+        await asyncio.sleep(1)
+    if retry:
+        await asyncio.to_thread(quality_recorder.flush,retry)
+    await asyncio.to_thread(quality_recorder.flush,quality_recorder.take_batch())
+
+
 def measurement_call(method,*args,**kwargs):
     try:
         return getattr(measurements,method)(*args,**kwargs) if measurements else None
@@ -8836,7 +8941,7 @@ async def main():
             outcome_loop(session), reset_levels_loop(), telegram_command_loop(session), gainers_loop(session), autotrade_reconcile_loop(session), position_observer_loop(session), x_watcher.run(session,stop_event), measurement_maintenance_loop(),
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
-        tasks.extend((alt_shadow_loop(),research_export_loop()))
+        tasks.extend((alt_shadow_loop(),research_export_loop(),quality_shadow_loop()))
         await asyncio.gather(*tasks)
 
 
