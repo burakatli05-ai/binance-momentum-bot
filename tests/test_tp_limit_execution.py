@@ -89,6 +89,8 @@ class TpLimitFallbackReconcileTests(unittest.TestCase):
                 return {'status':'PARTIALLY_FILLED','orderId':77}
             return {}
         with patch.object(bot,'AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS',2.0), \
+             patch.object(bot,'BINANCE_API_KEY','test'), \
+             patch.object(bot,'BINANCE_API_SECRET','test'), \
              patch.object(bot,'_at_account_snapshot',new=AsyncMock(side_effect=snapshots)), \
              patch.object(bot,'_at_algo_state',new=AsyncMock(return_value={'triggerTime':trigger_ms,'actualOrderId':'77'})), \
              patch.object(bot,'binance_signed_request',new=AsyncMock(side_effect=signed)), \
