@@ -13,6 +13,7 @@ from position_observer import LeverageCache, roe_values
 from telegram_cards import ownership, number, pages, timestamp
 
 MENU = (
+    ("⚡ Early AutoTrader V2", "/earlyv2"), ("🤖 Premium AutoTrader", "/autotrade"),
     ('📊 Durum', '/status'), ('📈 Açık Pozisyonlar', '/positions'),
     ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
     ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),

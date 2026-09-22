@@ -1,5 +1,6 @@
 """LIVE opt-in safety: no real network, orders, or production database."""
 import ast
+from early_v2_compat import StripEarlyHooks
 import asyncio
 from contextlib import ExitStack
 import io
@@ -24,6 +25,7 @@ import startup
 class CapabilityTests(unittest.TestCase):
     def test_execution_risk_scanner_and_signal_functions_match_deployed_base(self):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
+        tree = StripEarlyHooks().visit(tree)
         changed = {'load_autotrade_settings', 'handle_autotrade_callback', '_at_try_live_enable', '_at_command'}
         # Strip only additive shadow hooks; keep the original production digest.
         class StripQualityHooks(ast.NodeTransformer):

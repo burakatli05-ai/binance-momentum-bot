@@ -1,0 +1,63 @@
+{
+  "baseline": {
+    "tests": 255,
+    "failures": [
+      "test_export_integrity_unchanged_bad_and_hourly_daily (test_alt_research.AltCase.test_export_integrity_unchanged_bad_and_hourly_daily)",
+      "test_current_baseline_and_no_shadow_production_consumers (test_alt_research.ExtendedInvariants.test_current_baseline_and_no_shadow_production_consumers)",
+      "test_latest_valid_uses_snapshot_not_live_even_with_invalid_newer_pointer (test_analysis_export.AnalysisExportCase.test_latest_valid_uses_snapshot_not_live_even_with_invalid_newer_pointer)",
+      "test_missing_table_fails_explicitly_without_partial_bundle_or_source_change (test_analysis_export.AnalysisExportCase.test_missing_table_fails_explicitly_without_partial_bundle_or_source_change)",
+      "test_stale_snapshot_reports_empty_window_without_reading_live (test_analysis_export.AnalysisExportCase.test_stale_snapshot_reports_empty_window_without_reading_live)",
+      "test_pointer_traversal_rejected (test_export_safety.ExportSafetyTests.test_pointer_traversal_rejected)",
+      "test_both_bundles_still_reject_corrupt_snapshot (test_latestexport_hotfix.LatestExportCase.test_both_bundles_still_reject_corrupt_snapshot)",
+      "test_default_small_missing_summary_is_explicit (test_latestexport_hotfix.LatestExportCase.test_default_small_missing_summary_is_explicit)",
+      "test_small_and_full_members_and_metadata (test_latestexport_hotfix.LatestExportCase.test_small_and_full_members_and_metadata)",
+      "test_aliases_and_keyboard_commands (test_telegram_ux.MenuTests.test_aliases_and_keyboard_commands)",
+      "test_production_and_startup_research_baselines_unchanged (test_telegram_ux.MenuTests.test_production_and_startup_research_baselines_unchanged)"
+    ],
+    "errors": [
+      "test_export_new_mature_summary_and_source_unchanged (test_alt_research.AltCase.test_export_new_mature_summary_and_source_unchanged)",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=None)",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='0')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='invalid')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=' OFF ')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='1')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=' True ')"
+    ],
+    "skipped": 8
+  },
+  "pilot": {
+    "tests": 371,
+    "failures": [
+      "test_export_integrity_unchanged_bad_and_hourly_daily (test_alt_research.AltCase.test_export_integrity_unchanged_bad_and_hourly_daily)",
+      "test_current_baseline_and_no_shadow_production_consumers (test_alt_research.ExtendedInvariants.test_current_baseline_and_no_shadow_production_consumers)",
+      "test_latest_valid_uses_snapshot_not_live_even_with_invalid_newer_pointer (test_analysis_export.AnalysisExportCase.test_latest_valid_uses_snapshot_not_live_even_with_invalid_newer_pointer)",
+      "test_missing_table_fails_explicitly_without_partial_bundle_or_source_change (test_analysis_export.AnalysisExportCase.test_missing_table_fails_explicitly_without_partial_bundle_or_source_change)",
+      "test_stale_snapshot_reports_empty_window_without_reading_live (test_analysis_export.AnalysisExportCase.test_stale_snapshot_reports_empty_window_without_reading_live)",
+      "test_both_bundles_still_reject_corrupt_snapshot (test_latestexport_hotfix.LatestExportCase.test_both_bundles_still_reject_corrupt_snapshot)",
+      "test_default_small_missing_summary_is_explicit (test_latestexport_hotfix.LatestExportCase.test_default_small_missing_summary_is_explicit)",
+      "test_small_and_full_members_and_metadata (test_latestexport_hotfix.LatestExportCase.test_small_and_full_members_and_metadata)",
+      "test_production_and_startup_research_baselines_unchanged (test_telegram_ux.MenuTests.test_production_and_startup_research_baselines_unchanged)"
+    ],
+    "errors": [
+      "test_export_new_mature_summary_and_source_unchanged (test_alt_research.AltCase.test_export_new_mature_summary_and_source_unchanged)",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=None)",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='0')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='invalid')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=' OFF ')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value='1')",
+      "test_startup_normalizes_notify_before_exec_and_logs_effective_value (test_runner_notify_safety.RunnerNotifySafetyTests.test_startup_normalizes_notify_before_exec_and_logs_effective_value) (value=' True ')"
+    ],
+    "skipped": 8
+  },
+  "added_failures": [],
+  "added_errors": [],
+  "focused": {
+    "pilot": 62,
+    "fallback": 24,
+    "position_management": 30,
+    "passed": 116
+  },
+  "method": "Same Python 3.12 runtime/dependencies; Windows; PYTHON_DOTENV_DISABLED=1; test-runner-only gc.collect() before TemporaryDirectory cleanup; production/test lifecycle unchanged."
+}
