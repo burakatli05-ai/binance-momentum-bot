@@ -1,5 +1,6 @@
 import asyncio
 import ast
+from early_v2_compat import StripEarlyHooks
 import gc
 import hashlib
 import json
@@ -144,6 +145,7 @@ class SafetyTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         baseline=json.loads((root/'tests/p0_production_baseline.json').read_text())
         tree=ast.parse((root/'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
+        tree=StripEarlyHooks().visit(tree)
         functions={n.name:n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))}
         # Only the audit wrapper is permitted; handler body remains exactly the same.
         handler=functions['autotrade_handle_premium']

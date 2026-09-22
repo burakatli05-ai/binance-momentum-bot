@@ -32,6 +32,7 @@ import research_reports
 import research_export
 import daytrades
 import telegram_ux
+import early_v2_adapter
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -42,6 +43,7 @@ x_watcher = None
 alt_engine = None
 export_worker = None
 quality_recorder = None
+early_v2 = None
 ALT_SHADOW_ENABLED = audit.flag('ALT_SHADOW_ENABLED', True)
 RESEARCH_EXPORT_ENABLED = audit.flag('RESEARCH_EXPORT_ENABLED', False)
 
@@ -5879,6 +5881,8 @@ async def evaluate(session, symbol: str):
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
                     _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
+                    if early_v2:
+                        early_v2.arm(st.active_radar_id, symbol, m, score)
                     await telegram_public_alert(session, build_early_message(m, score, st), symbol=symbol,
                                                 notification_kind="EARLY", notification_ordinal=m.get("daily_notice_no"), signal_price=m.get("price"))
         else:
@@ -6036,7 +6040,10 @@ async def evaluate(session, symbol: str):
                  symbol, score, rise_score, quality, runup, m.get("oi_regime"), m["execution"]["status"], st.episode_id)
         # AutoTrade is a separate execution layer. OFF does nothing; DRY records/simulates; LIVE is triple-locked.
         try:
-            await autotrade_handle_premium(session, signal_id, symbol, m, plan)
+            if early_v2:
+                await early_v2.premium(session, signal_id, symbol, m, plan)
+            else:
+                await autotrade_handle_premium(session, signal_id, symbol, m, plan)
         except Exception as e:
             _at_log_event("ENTRY_ERROR",signal_id=signal_id,symbol=symbol,detail=repr(e))
             log.error("AutoTrade premium handler %s: %r",symbol,e)
@@ -6250,6 +6257,8 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                         telemetry_p0.safe(quality_recorder.tick, sym, price, int(ts), now_ms(),
                                           st.bid_price, st.ask_price, st.last_book_event_ms, st.last_book_receive_ms)
                     autotrade_on_tick(sym, price, ts / 1000.0)
+                    if early_v2:
+                        early_v2.tick(sym, price, ts, recv_ms, d.get("a"))
                     if measurements:
                         try:
                             st_audit=states[sym]
@@ -8000,6 +8009,8 @@ async def telegram_command_loop(session):
                     await handle_join_request(session, upd["chat_join_request"])
                     continue
                 if upd.get("callback_query"):
+                    if early_v2 and await early_v2.callback(session, upd["callback_query"]):
+                        continue
                     handled = await handle_join_callback(session, upd["callback_query"])
                     if not handled:
                         handled = await handle_autotrade_callback(session, upd["callback_query"])
@@ -8019,9 +8030,13 @@ async def telegram_command_loop(session):
                         chat_id=chat_id,
                     )
                     continue
+                if early_v2 and raw_text and await early_v2.command(session, raw_text, chat_id, user_id):
+                    continue
                 if await _at_command(session, raw_text, chat_id, user_id):
                     continue
                 if text == "/status":
+                    if early_v2:
+                        await telegram_send(session, "Premium AutoTrader: " + autotrade_cfg["mode"] + "\n" + early_v2.status(), chat_id=chat_id)
                     age = lambda k: (time.time() - stream_health[k]) if stream_health[k] else 9999
                     agg_ages = [(time.time() - t) for t in agg_stream_health.values() if t]
                     agg_oldest = max(agg_ages) if agg_ages else 9999
@@ -8880,6 +8895,7 @@ async def _x_photo(session,url):
 
 
 async def main():
+    global early_v2
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
@@ -8896,6 +8912,7 @@ async def main():
             log.error('Research exporter disabled after initialization failure; production continues: %s',type(exc).__name__)
     x_watcher=XWatcher(db_connect,_x_market,_observer_send,_x_photo)
     load_autotrade_settings()
+    early_v2 = early_v2_adapter.Integration(globals())
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
@@ -8942,6 +8959,7 @@ async def main():
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         tasks.extend((alt_shadow_loop(),research_export_loop(),quality_shadow_loop()))
+        tasks.append(early_v2.run(session))
         await asyncio.gather(*tasks)
 
 

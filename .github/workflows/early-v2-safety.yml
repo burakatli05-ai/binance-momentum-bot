@@ -1,0 +1,19 @@
+name: Early V2 pilot safety
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  early-pilot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolated execution, fallback and profit lock safety
+        env:
+          PYTHON_DOTENV_DISABLED: '1'
+          PYTHONPATH: binance_momentum_bot:tests
+        run: python -m unittest -v test_early_autotrader_v2 test_early_fallback_tp test_position_management_v2

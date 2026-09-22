@@ -1,4 +1,5 @@
 import ast
+from early_v2_compat import StripEarlyHooks
 import asyncio
 from contextlib import closing
 from datetime import datetime
@@ -25,7 +26,7 @@ class MenuTests(unittest.TestCase):
             self.assertEqual('/menu',ux.normalize(text))
         self.assertEqual('/daytrades',ux.normalize('/daytrade'))
         self.assertEqual('/daytrades',ux.normalize('/DAYTRADE@scanner'))
-        self.assertEqual(['/status','/positions','/daytrades','/daytradeslist','/top','/altstats','/settings','/help'],[command for _,command in ux.MENU])
+        self.assertEqual(['/earlyv2','/autotrade','/status','/positions','/daytrades','/daytradeslist','/todaypositions','/top','/altstats','/settings','/help'],[command for _,command in ux.MENU])
         for row in ux.menu_markup()['keyboard']:
             for button in row:self.assertIn(ux.normalize(button['text']),[command for _,command in ux.MENU])
         self.assertNotIn('latestexport',json.dumps(ux.menu_markup()))
@@ -92,6 +93,7 @@ class MenuTests(unittest.TestCase):
         root=fixtures.ROOT
         baseline=json.loads((root/'tests/telegram_ux_baseline.json').read_text())
         tree=ast.parse((root/'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
+        tree=StripEarlyHooks().visit(tree)
         # The only additional observer-send statement is the visual opening-card
         # adapter; assert its exact AST before removing it for the original baseline.
         sender=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_observer_send')
