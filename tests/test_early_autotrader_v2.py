@@ -153,13 +153,22 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.ex.posts()),1)
         self.assertEqual(self.p.report('LIVE')['attempts'],1)
 
-    async def test_preorder_timeout_does_not_halt_or_count_attempt(self):
+    async def test_pre_reservation_timeout_does_not_halt_or_count_attempt(self):
         self.live()
-        self.ex.ask=AsyncMock(side_effect=TimeoutError('ask timeout'))
+        self.ex.filters=AsyncMock(side_effect=TimeoutError('filters timeout'))
         await self.enter()
         self.assertFalse(self.p.halted)
         self.assertEqual(self.p.report('LIVE')['attempts'],0)
         self.assertFalse(self.p.active)
+
+    async def test_post_reservation_ask_timeout_fails_closed_without_counting_attempt(self):
+        self.live()
+        self.ex.ask=AsyncMock(side_effect=TimeoutError('ask timeout'))
+        await self.enter()
+        self.assertTrue(self.p.halted)
+        self.assertEqual(self.p.report('LIVE')['attempts'],0)
+        self.assertTrue(self.p.unresolved())
+        self.assertIn('ENTRY_ASK:TimeoutError', self.p.last_error)
 
     async def test_live_ioc_partial_kept_protected_and_actual_vwap(self):
         self.live();self.ex.fill_price=99.99;await self.enter();t=self.trade()
