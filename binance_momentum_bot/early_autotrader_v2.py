@@ -246,7 +246,7 @@ class Pilot:
         return dict(mode=mode, date=today, attempts=len(attempted), closed=len(closed),
             net=sum(t['net'] for t in closed), loss=sum(max(0, -t['net']) for t in closed),
             wins=sum(t['net'] > 0 for t in closed),
-            last_attempt=max((stamp for _, stamp in attempted), default=0),
+            last_attempt=max((max(stamp, int(t.get('closed_ms') or 0)) for t, stamp in attempted), default=0),
             fill_count=sum(bool(t.get('qty')) for t, _ in attempted),
             partial_count=sum(bool(t.get('partial')) for t, _ in attempted),
             mean_slippage_pct=(sum(t.get('slippage_pct', 0) for t, _ in attempted if t.get('qty')) /
@@ -291,6 +291,7 @@ class Pilot:
     async def enter(self, signal, exchange, premium_busy=False):
         async with self.lock:
             tr = None
+            phase = 'PRE_RESERVATION'
             try:
                 if self.mode == 'OFF':
                     return
@@ -304,6 +305,7 @@ class Pilot:
                     raise Blocked('NOT_V2_QUALIFIED')
                 if not 0 <= self.clock() - signal['ts_ms'] <= self.cfg.signal_ttl_ms:
                     raise Blocked('STALE_SIGNAL')
+                phase = 'FILTERS'
                 filters = await exchange.filters(signal['symbol'])
                 plan = capped_plan(signal, asdict(self.cfg), filters)
                 self.risk(signal['symbol'], plan['risk'])
@@ -317,9 +319,11 @@ class Pilot:
                     order_attempted_ms=None, submit_count=0, blocked_reason=None)
                 self.save(tr)  # reservation precedes every exchange mutation
                 if tr['mode'] == 'LIVE':
+                    phase = 'PREFLIGHT'
                     self.still_entry_allowed(tr)
                     await exchange.preflight(tr)
                 for attempt in range(self.cfg.retry + 1):
+                    phase = 'ASK'
                     self.still_entry_allowed(tr)
                     ask = await exchange.ask(tr['symbol'])
                     price = marketable_price(ask, plan, filters['tick'])
@@ -344,7 +348,9 @@ class Pilot:
                     tr['pending_client'] = client
                     tr['status'] = 'SUBMITTING'
                     self.save(tr)
+                    phase = 'SUBMIT'
                     order = await submit_ioc(exchange, tr['symbol'], plan['qty'], price, client)
+                    phase = 'ORDER_ACK'
                     tr['orders'].append(order)
                     tr['pending_client'] = None
                     tr['status'] = 'RECONCILING'
@@ -367,20 +373,19 @@ class Pilot:
                 self.event('ENTRY_BLOCKED', {'signal_id': str(signal.get('id')), 'reason': str(exc),
                                              'attempted': bool(tr and tr.get('order_attempted_ms'))})
             except Exception as exc:
-                # Before the first exchange mutation a timeout/error is safe to
-                # classify as a blocked reservation: no quota/cooldown is burned.
-                # After a submit/fill starts the result may be ambiguous, so keep
-                # the durable reservation and fail closed exactly as before.
-                ambiguous = bool(tr and (tr.get('order_attempted_ms') or tr.get('pending_client') or tr.get('qty')))
-                if not ambiguous:
-                    if tr:
-                        tr['status'] = 'BLOCKED'
-                        tr['blocked_reason'] = 'PREORDER_' + type(exc).__name__ + ':' + str(exc)
-                        self.save(tr)
-                    self.event('ENTRY_PREORDER_FAILED', {'signal_id': str(signal.get('id')),
-                                                         'reason': type(exc).__name__ + ':' + str(exc)})
+                # Only failures before a durable reservation are known to be
+                # exchange-mutation-free. Once a reservation exists, preflight
+                # may already have changed leverage/margin mode and a submit can
+                # be ambiguous. Preserve fail-closed behavior there.
+                reason = 'ENTRY_' + phase + ':' + type(exc).__name__ + ':' + str(exc)
+                if tr is None:
+                    self.event('ENTRY_PRE_RESERVATION_FAILED', {
+                        'signal_id': str(signal.get('id')), 'phase': phase,
+                        'reason': type(exc).__name__ + ':' + str(exc)})
                     return
-                self.kill(type(exc).__name__ + ':' + str(exc))
+                tr['blocked_reason'] = reason
+                self.save(tr)
+                self.kill(reason)
 
     async def accept_fill(self, tr, order, exchange):
         qty = float(order['executedQty'])
