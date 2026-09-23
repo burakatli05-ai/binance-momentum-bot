@@ -141,6 +141,26 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_and_future_signals(self):
         self.p.set_mode('DRY');await self.enter(ts_ms=self.now-4000);await self.enter(ts_ms=self.now+1)
         self.assertFalse(self.p.active)
+    async def test_stale_after_reservation_does_not_burn_quota_or_cooldown(self):
+        self.live()
+        self.ex.kill_hook=lambda:setattr(self,'now',self.now+4000)
+        await self.enter()
+        self.assertFalse(self.p.halted)
+        self.assertEqual(self.p.report('LIVE')['attempts'],0)
+        self.assertEqual(self.ex.posts(),[])
+        self.ex.kill_hook=None
+        await self.enter(id=8,ts_ms=self.now)
+        self.assertEqual(len(self.ex.posts()),1)
+        self.assertEqual(self.p.report('LIVE')['attempts'],1)
+
+    async def test_preorder_timeout_does_not_halt_or_count_attempt(self):
+        self.live()
+        self.ex.ask=AsyncMock(side_effect=TimeoutError('ask timeout'))
+        await self.enter()
+        self.assertFalse(self.p.halted)
+        self.assertEqual(self.p.report('LIVE')['attempts'],0)
+        self.assertFalse(self.p.active)
+
     async def test_live_ioc_partial_kept_protected_and_actual_vwap(self):
         self.live();self.ex.fill_price=99.99;await self.enter();t=self.trade()
         self.assertEqual(t['vwap'],99.99);self.assertTrue(t['partial']);self.assertEqual(len(self.ex.posts()),1)
@@ -154,7 +174,9 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_never_resubmits_and_restart_reserves_symbol(self):
         self.p.configure('retry',1);self.ex.timeout=True;self.live();await self.enter()
         self.assertEqual(len(self.ex.posts()),1);self.assertTrue(self.p.halted)
+        self.assertEqual(self.p.report('LIVE')['attempts'],1)
         other=Pilot(self.connect,clock=lambda:self.now);self.assertEqual(len(other.active),1)
+        self.assertEqual(other.report('LIVE')['attempts'],1)
         with self.assertRaises(Blocked):other.set_mode('DRY')
     async def test_missing_fills_preserve_native_stop_and_halt(self):
         self.live();self.ex.incomplete=True;await self.enter()
