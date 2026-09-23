@@ -10,6 +10,7 @@ import os
 
 from early_autotrader_v2 import Pilot
 from execution_v2 import Blocked, Uncertain, positive, quantize
+import step_lock_shadow
 
 
 def flag(name):
@@ -293,6 +294,8 @@ class Integration:
         self.b = bot
         self.pilot = Pilot(bot['db_connect'], live_allowed=flag('EARLY_V2_LIVE_ALLOWED'),
             score_validated=flag('EARLY_V2_SCORE_VALIDATED'), profit_live_allowed=flag('EARLY_V2_PROFIT_LIVE_ALLOWED'))
+        step_enabled = os.getenv('STEP_LOCK_SHADOW_ENABLED', '1').strip().lower() not in ('0','false','no','off')
+        self.step_lock = step_lock_shadow.StepLockShadow(bot['db_connect']) if step_enabled else None
         for name in ('min_score','margin','leverage','daily_loss','daily_trades','retry','max_positions','fallback_tp_pct'):
             value = os.getenv('EARLY_V2_' + name.upper())
             if value is not None:
@@ -303,8 +306,16 @@ class Integration:
             self.pilot.mode, self.pilot.profit_mode, int(self.pilot.live_allowed),
             int(self.pilot.profit_live_allowed), self.pilot.cfg.fallback_tp_pct,
             bot.get('autotrade_cfg', {}).get('mode', 'UNKNOWN'))
+        logging.getLogger(__name__).info('Step Lock V1 shadow: %s | SL -2%% | final TP +5%% | no partial exits',
+                                         'ON' if self.step_lock else 'OFF')
 
     def arm(self, radar_id, symbol, m, base_score):
+        if self.step_lock:
+            try:
+                self.step_lock.arm(radar_id, symbol, float(m['price']), self.pilot.clock())
+            except Exception as exc:
+                self.pilot.event('STEP_LOCK_ARM_FAILED', {'signal_id': str(radar_id), 'symbol': symbol,
+                                                          'reason': type(exc).__name__})
         if self.pilot.mode == 'OFF':
             return
         try:
@@ -323,6 +334,11 @@ class Integration:
             return await self.b['autotrade_handle_premium'](session, signal_id, symbol, m, plan)
 
     def tick(self, symbol, price, event_ms, received_ms, trade_id):
+        if self.step_lock:
+            try:
+                self.step_lock.tick(symbol, float(price), int(event_ms), int(received_ms), int(trade_id))
+            except Exception as exc:
+                self.pilot.event('STEP_LOCK_TICK_FAILED', {'symbol': symbol, 'reason': type(exc).__name__})
         try:
             self.pilot.tick(symbol, price, event_ms, received_ms, trade_id)
         except Exception as exc:
