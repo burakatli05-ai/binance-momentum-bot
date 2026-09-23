@@ -33,7 +33,6 @@ import research_export
 import daytrades
 import telegram_ux
 import early_v2_adapter
-import step_lock_shadow
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -45,9 +44,7 @@ alt_engine = None
 export_worker = None
 quality_recorder = None
 early_v2 = None
-step_lock_shadow_engine = None
 ALT_SHADOW_ENABLED = audit.flag('ALT_SHADOW_ENABLED', True)
-STEP_LOCK_SHADOW_ENABLED = audit.flag('STEP_LOCK_SHADOW_ENABLED', True)
 RESEARCH_EXPORT_ENABLED = audit.flag('RESEARCH_EXPORT_ENABLED', False)
 
 
@@ -5884,11 +5881,6 @@ async def evaluate(session, symbol: str):
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
                     _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
-                    if step_lock_shadow_engine:
-                        try:
-                            step_lock_shadow_engine.arm(st.active_radar_id, symbol, float(m['price']), now_ms(), st.episode_id or None)
-                        except Exception as exc:
-                            log.warning('Step Lock shadow arm failed %s id=%s: %s', symbol, st.active_radar_id, type(exc).__name__)
                     if early_v2:
                         early_v2.arm(st.active_radar_id, symbol, m, score)
                     await telegram_public_alert(session, build_early_message(m, score, st), symbol=symbol,
@@ -6265,11 +6257,6 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                         telemetry_p0.safe(quality_recorder.tick, sym, price, int(ts), now_ms(),
                                           st.bid_price, st.ask_price, st.last_book_event_ms, st.last_book_receive_ms)
                     autotrade_on_tick(sym, price, ts / 1000.0)
-                    if step_lock_shadow_engine:
-                        try:
-                            step_lock_shadow_engine.tick(sym, price, int(ts), recv_ms, int(d.get('a')))
-                        except Exception as exc:
-                            log.warning('Step Lock shadow tick failed %s: %s', sym, type(exc).__name__)
                     if early_v2:
                         early_v2.tick(sym, price, ts, recv_ms, d.get("a"))
                     if measurements:
@@ -8908,7 +8895,7 @@ async def _x_photo(session,url):
 
 
 async def main():
-    global early_v2,step_lock_shadow_engine
+    global early_v2
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
@@ -8925,13 +8912,6 @@ async def main():
             log.error('Research exporter disabled after initialization failure; production continues: %s',type(exc).__name__)
     x_watcher=XWatcher(db_connect,_x_market,_observer_send,_x_photo)
     load_autotrade_settings()
-    if STEP_LOCK_SHADOW_ENABLED:
-        try:
-            step_lock_shadow_engine = step_lock_shadow.StepLockShadow(db_connect)
-            log.info('Early Step Lock V1 shadow enabled: SL -2%% | locks +0.20,+0.50,+0.75... | TP +5%%')
-        except Exception as exc:
-            step_lock_shadow_engine = None
-            log.error('Early Step Lock V1 shadow disabled after init failure: %s', type(exc).__name__)
     early_v2 = early_v2_adapter.Integration(globals())
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
