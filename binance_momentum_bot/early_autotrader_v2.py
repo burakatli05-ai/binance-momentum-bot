@@ -224,21 +224,33 @@ class Pilot:
     def day(self, stamp):
         return datetime.fromtimestamp(stamp / 1000, timezone(timedelta(hours=3))).date().isoformat()
 
+    def _attempt_stamp(self, tr):
+        """Return the first real entry-attempt timestamp, never a mere reservation."""
+        stamp = tr.get('order_attempted_ms')
+        if type(stamp) in (int, float) and not isinstance(stamp, bool) and math.isfinite(stamp) and stamp > 0:
+            return int(stamp)
+        if tr.get('orders') or tr.get('pending_client') or tr.get('qty'):
+            return int(tr.get('filled_ms') or tr.get('created_ms') or 0)
+        if tr.get('mode') == 'DRY' and tr.get('status') in ('OPEN', 'CLOSED'):
+            return int(tr.get('filled_ms') or tr.get('created_ms') or 0)
+        return 0
+
     def report(self, mode=None):
         mode = mode or ('LIVE' if self.mode == 'LIVE' else 'DRY')
         with closing(self.connect()) as db:
             rows = [json.loads(r[0]) for r in db.execute('SELECT payload FROM early_v2_trades WHERE mode=?', (mode,))]
         today = self.day(self.clock())
-        entered = [t for t in rows if self.day(t['created_ms']) == today and t['status'] != 'BLOCKED']
+        attempted = [(t, self._attempt_stamp(t)) for t in rows]
+        attempted = [(t, stamp) for t, stamp in attempted if stamp and self.day(stamp) == today]
         closed = [t for t in rows if t['status'] == 'CLOSED' and self.day(t['closed_ms']) == today]
-        return dict(mode=mode, date=today, attempts=len(entered), closed=len(closed),
+        return dict(mode=mode, date=today, attempts=len(attempted), closed=len(closed),
             net=sum(t['net'] for t in closed), loss=sum(max(0, -t['net']) for t in closed),
             wins=sum(t['net'] > 0 for t in closed),
-            last_attempt=max((max(t['created_ms'], t.get('closed_ms',0)) for t in rows), default=0),
-            fill_count=sum(bool(t.get('qty')) for t in entered),
-            partial_count=sum(bool(t.get('partial')) for t in entered),
-            mean_slippage_pct=(sum(t.get('slippage_pct', 0) for t in entered if t.get('qty')) /
-                               max(1, sum(bool(t.get('qty')) for t in entered))))
+            last_attempt=max((stamp for _, stamp in attempted), default=0),
+            fill_count=sum(bool(t.get('qty')) for t, _ in attempted),
+            partial_count=sum(bool(t.get('partial')) for t, _ in attempted),
+            mean_slippage_pct=(sum(t.get('slippage_pct', 0) for t, _ in attempted if t.get('qty')) /
+                               max(1, sum(bool(t.get('qty')) for t, _ in attempted))))
 
     def risk(self, symbol, proposed):
         if self.mode == 'OFF' or self.halted:
@@ -301,7 +313,8 @@ class Pilot:
                         raise Blocked('DUPLICATE_SIGNAL')
                 tr = dict(id=identity, signal_id=str(signal['id']), symbol=signal['symbol'], mode=self.mode,
                     status='RESERVED', created_ms=self.clock(), signal=signal, plan=plan, filters=filters,
-                    qty=0, orders=[], stops=[], classification='EARLY_V2', config=asdict(self.cfg), generation=self.generation)
+                    qty=0, orders=[], stops=[], classification='EARLY_V2', config=asdict(self.cfg), generation=self.generation,
+                    order_attempted_ms=None, submit_count=0, blocked_reason=None)
                 self.save(tr)  # reservation precedes every exchange mutation
                 if tr['mode'] == 'LIVE':
                     self.still_entry_allowed(tr)
@@ -316,11 +329,18 @@ class Pilot:
                     self.still_entry_allowed(tr)
                     tr['limit'] = price
                     if tr['mode'] == 'DRY':
+                        tr['order_attempted_ms'] = tr.get('order_attempted_ms') or self.clock()
+                        tr['submit_count'] = max(1, int(tr.get('submit_count') or 0))
                         tr.update(qty=plan['qty'], vwap=price, reference='DRY_ASK_PROXY', status='OPEN',
                                   stop=plan['stop'], filled_ms=self.clock(), fills=[], partial=False)
+                        self.save(tr)
                         self.opened(tr)
                         return
                     client = 'ev2-' + identity + '-' + str(attempt)
+                    if not tr.get('order_attempted_ms'):
+                        tr['order_attempted_ms'] = self.clock()
+                        self.event('ORDER_ATTEMPT', {'signal_id': tr['signal_id'], 'symbol': tr['symbol'], 'client': client})
+                    tr['submit_count'] = int(tr.get('submit_count') or 0) + 1
                     tr['pending_client'] = client
                     tr['status'] = 'SUBMITTING'
                     self.save(tr)
@@ -338,11 +358,28 @@ class Pilot:
                 self.save(tr)
             except Blocked as exc:
                 if tr and tr['status'] == 'RESERVED':
-                    tr['status'] = 'NO_FILL'
+                    if tr.get('order_attempted_ms'):
+                        tr['status'] = 'NO_FILL'
+                    else:
+                        tr['status'] = 'BLOCKED'
+                        tr['blocked_reason'] = str(exc)
                     self.save(tr)
-                self.event('ENTRY_BLOCKED', {'signal_id': str(signal.get('id')), 'reason': str(exc)})
+                self.event('ENTRY_BLOCKED', {'signal_id': str(signal.get('id')), 'reason': str(exc),
+                                             'attempted': bool(tr and tr.get('order_attempted_ms'))})
             except Exception as exc:
-                # Keep durable symbol reservation on every ambiguous result.
+                # Before the first exchange mutation a timeout/error is safe to
+                # classify as a blocked reservation: no quota/cooldown is burned.
+                # After a submit/fill starts the result may be ambiguous, so keep
+                # the durable reservation and fail closed exactly as before.
+                ambiguous = bool(tr and (tr.get('order_attempted_ms') or tr.get('pending_client') or tr.get('qty')))
+                if not ambiguous:
+                    if tr:
+                        tr['status'] = 'BLOCKED'
+                        tr['blocked_reason'] = 'PREORDER_' + type(exc).__name__ + ':' + str(exc)
+                        self.save(tr)
+                    self.event('ENTRY_PREORDER_FAILED', {'signal_id': str(signal.get('id')),
+                                                         'reason': type(exc).__name__ + ':' + str(exc)})
+                    return
                 self.kill(type(exc).__name__ + ':' + str(exc))
 
     async def accept_fill(self, tr, order, exchange):
