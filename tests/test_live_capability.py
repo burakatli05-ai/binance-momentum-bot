@@ -27,7 +27,7 @@ class CapabilityTests(unittest.TestCase):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
         tree = StripEarlyHooks().visit(tree)
         changed = {'load_autotrade_settings', 'handle_autotrade_callback', '_at_try_live_enable', '_at_command'}
-        # Strip only additive shadow hooks; keep the original production digest.
+        # Strip additive shadow hooks; this digest includes the intentional Telegram transport hotfix.
         class StripQualityHooks(ast.NodeTransformer):
             def visit_Expr(self, node):
                 if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == 'quality_arm':
@@ -43,7 +43,7 @@ class CapabilityTests(unittest.TestCase):
         changed |= {'quality_features', 'quality_arm', 'quality_shadow_loop'}
         nodes = [StripQualityHooks().visit(n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name not in changed]
         digest = hashlib.sha256(ast.dump(ast.Module(body=nodes, type_ignores=[]), include_attributes=False).encode()).hexdigest()
-        self.assertEqual('e210063b340d0bd6ee14104fa9b1a6bc56c2ed9fa0369934ed413800e3aee3b3', digest)
+        self.assertEqual('200e9f721c8b5279ad172a4db1d01081c51366032f938318ea42ddf695d83e34', digest)
 
     def test_bot_environment_is_fail_closed_and_always_boots_off(self):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
