@@ -311,6 +311,8 @@ class Integration:
             bot.get('autotrade_cfg', {}).get('mode', 'UNKNOWN'))
         logging.getLogger(__name__).info('Step Lock V1 shadow: %s | SL -2%% | final TP +5%% | no partial exits',
                                          'ON' if self.step_lock else 'OFF')
+        if self.step_lock:
+            self._log_step_lock_report()
 
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
