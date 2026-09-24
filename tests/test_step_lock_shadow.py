@@ -287,8 +287,8 @@ class StepLockShadowTests(unittest.TestCase):
             db.executemany(
                 """INSERT INTO quality_shadow_prices VALUES (?,?,?,?)""",
                 [
-                    ('EARLY:1',1000,1000,'{"high":100.05,"low":99.75}'),
-                    ('EARLY:1',2000,1000,'{"high":100.60,"low":99.90}'),
+                    ('EARLY:1',1000,1000,'{"open":100.0,"high":100.05,"low":99.75,"close":99.90}'),
+                    ('EARLY:1',2000,1000,'{"open":99.90,"high":100.60,"low":99.90,"close":100.50}'),
                 ],
             )
             db.commit()
@@ -303,7 +303,6 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(h['up_no_down'],1)
         self.assertEqual(h['both'],1)
         q=review['quality_exactish']['microcut_first_touch']['0.2']
-        print("DEBUG_HYBRID_Q", q)
         self.assertEqual(q['down_first'],1)
         self.assertEqual(q['down_first_later']['0.2'],1)
         self.assertEqual(q['down_first_later']['0.5'],1)
