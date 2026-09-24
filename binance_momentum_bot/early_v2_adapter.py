@@ -500,9 +500,48 @@ class Integration:
         )
         return report
 
+    def _write_daily_candidate_profit_review(self):
+        if not self.step_lock:
+            return None
+        trt = timezone(timedelta(hours=3))
+        now = datetime.now(trt)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        report = self.step_lock.daily_candidate_profit_review(
+            start_ms=int(start.timestamp() * 1000),
+            end_ms=int(now.timestamp() * 1000),
+            notional_usdt=2000.0,
+        )
+        report["local_date"] = start.date().isoformat()
+        report["generated_local"] = now.isoformat()
+        path = os.getenv(
+            "EARLY_DAILY_CANDIDATE_REVIEW_PATH",
+            "/data/daily_candidate_profit_review.json",
+        ).strip()
+        if path:
+            target = Path(path)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(
+                json.dumps(report, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+        logging.getLogger(__name__).info(
+            "EARLY_DAILY_CANDIDATE_REVIEW date=%s eligible=%s candidate_usdt=%s baseline_usdt=%s",
+            report["local_date"], report["eligible"],
+            report["all_to_now"]["candidate"]["net_usdt"],
+            report["all_to_now"]["baseline"]["net_usdt"],
+        )
+        return report
+
     async def run(self, session):
         exchange = Binance(self.b, session, self.pilot)
         if self.step_lock:
+            try:
+                await asyncio.to_thread(self._write_daily_candidate_profit_review)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "EARLY_DAILY_CANDIDATE_REVIEW_FAILED %s", type(exc).__name__
+                )
             try:
                 await asyncio.to_thread(self._write_historical_profit_review)
             except Exception as exc:
