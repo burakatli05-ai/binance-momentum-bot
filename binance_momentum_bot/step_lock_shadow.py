@@ -400,9 +400,21 @@ class StepLockShadow:
                           e.close60_price,e.completed_60m
                    FROM early_step_lock_shadow_v1 s
                    LEFT JOIN entry_stage_forward_shadow e
-                     ON e.symbol=s.symbol
-                    AND COALESCE(e.episode_id,0)=COALESCE(s.episode_id,0)
-                    AND e.stage='EARLY'
+                     ON e.id = (
+                        SELECT e2.id
+                        FROM entry_stage_forward_shadow e2
+                        WHERE e2.symbol=s.symbol
+                          AND e2.stage='EARLY'
+                          AND (
+                            (s.episode_id IS NOT NULL AND e2.episode_id=s.episode_id)
+                            OR ABS(e2.created_ts_ms-s.decision_ms) <= 5000
+                          )
+                        ORDER BY
+                          CASE WHEN s.episode_id IS NOT NULL AND e2.episode_id=s.episode_id THEN 0 ELSE 1 END,
+                          ABS(e2.created_ts_ms-s.decision_ms),
+                          e2.id DESC
+                        LIMIT 1
+                     )
                    WHERE s.status='CLOSED'
                      AND s.close_reason='STEP_LOCK'
                      AND ABS(COALESCE(s.exit_level_pct,999)-?) < 0.000001
