@@ -319,6 +319,11 @@ class Integration:
                 name="early-historical-profit-review",
                 daemon=True,
             ).start()
+            threading.Thread(
+                target=self._write_combined_optimizer_report,
+                name="early-combined-optimizer",
+                daemon=True,
+            ).start()
 
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
@@ -455,9 +460,6 @@ class Integration:
             return None
         report = self.step_lock.historical_profit_review(notional_usdt=2000.0)
         report["runner_filter_price_action"] = self.step_lock.runner_filter_price_action_review()
-        report["combined_profit_loss_optimizer"] = self.step_lock.combined_profit_loss_optimizer(
-            notional_usdt=2000.0
-        )
         path = os.getenv("EARLY_HISTORICAL_REVIEW_PATH", "/data/early_historical_profit_review.json").strip()
         if path:
             target = Path(path)
@@ -471,6 +473,30 @@ class Integration:
             "EARLY_HISTORICAL_PROFIT_REVIEW rows=%s quality_paths=%s",
             report["full_history"]["completed_60m"],
             report["quality_exactish"]["price_path_count"],
+        )
+        return report
+
+    def _write_combined_optimizer_report(self):
+        if not self.step_lock:
+            return None
+        report = self.step_lock.combined_profit_loss_optimizer(notional_usdt=2000.0)
+        path = os.getenv(
+            "EARLY_COMBINED_OPTIMIZER_PATH",
+            "/data/combined_profit_loss_optimizer.json"
+        ).strip()
+        if path:
+            target = Path(path)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(
+                json.dumps(report, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+        logging.getLogger(__name__).info(
+            "EARLY_COMBINED_OPTIMIZER train=%s test=%s delta_usdt=%s",
+            report["cohort"]["train"],
+            report["cohort"]["test"],
+            report["profitability"]["test_delta_vs_baseline_usdt"],
         )
         return report
 
