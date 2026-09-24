@@ -7,6 +7,7 @@ import json
 import math
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 from early_autotrader_v2 import Pilot
 from execution_v2 import Blocked, Uncertain, positive, quantize
@@ -360,6 +361,83 @@ class Integration:
                 self.pilot.kill('WORKER:' + type(exc).__name__)
             await asyncio.sleep(1)
 
+    @staticmethod
+    def _step_level(value):
+        if value is None:
+            return "yok"
+        sign = "+" if float(value) >= 0 else ""
+        return f"{sign}%{float(value):g}"
+
+    def step_lock_report_text(self, report, *, include_recent=False):
+        closed = int(report["closed"])
+        net_usdt = float(report["closed_net_usdt"])
+        avg_usdt = report["closed_net_usdt_avg"]
+        avg_pct = report["closed_net_pct_avg"]
+        latest_ms = int(report.get("latest_ms") or 0)
+        latest = "veri yok"
+        if latest_ms:
+            latest = datetime.fromtimestamp(
+                latest_ms / 1000, timezone(timedelta(hours=3))
+            ).strftime("%d.%m %H:%M:%S TRT")
+        exits = report.get("exit_level_counts") or {}
+        exit_text = ", ".join(
+            f"{self._step_level(level)}:{count}"
+            for level,count in sorted(exits.items(), key=lambda item: float(item[0]))
+            if count
+        ) or "henüz kapanış yok"
+        locks = report.get("open_lock_counts") or {}
+        open_text = ", ".join(
+            f"{self._step_level(level)}:{count}"
+            for level,count in sorted(locks.items(), key=lambda item: -999 if item[0] is None else float(item[0]))
+            if count
+        ) or "açık işlem yok"
+        reached = report.get("reached_level_counts") or {}
+        selected = (0.20,0.50,0.75,1.00,1.50,2.00,3.00,4.00,5.00)
+        reached_text = " | ".join(
+            f"{self._step_level(level)} {int(reached.get(level, 0))}"
+            for level in selected
+        )
+        reasons = report.get("close_reason_counts") or {}
+        quality = report.get("flag_counts") or {}
+        quality_text = ", ".join(
+            f"{name}:{count}" for name,count in
+            sorted(quality.items(), key=lambda item: (-item[1], item[0]))[:4]
+        ) or "temiz"
+        avg_line = "—" if avg_usdt is None else f"{avg_usdt:+.2f} USDT / {float(avg_pct):+.3f}%"
+        lines = [
+            "📊 STEP LOCK V1 — SHADOW",
+            "",
+            f"Toplam Early: {report['total']} | Kapalı: {closed} | Açık: {report['open']}",
+            f"Kapanış: STEP {int(reasons.get('STEP_LOCK',0))} | -%2 SL {int(reasons.get('INITIAL_SL',0))} | +%5 TP {int(reasons.get('FINAL_TP',0))}",
+            f"Net (yalnız kapananlar, 200×10): {net_usdt:+.2f} USDT",
+            f"Ortalama kapanan: {avg_line}",
+            "",
+            "🎯 Ulaşılan seviye (peak):",
+            reached_text,
+            "",
+            f"🚪 Çıkış seviyeleri: {exit_text}",
+            f"🔒 Açıkların mevcut kilidi: {open_text}",
+            "",
+            f"🧪 Veri bayraklı sinyal: {report['flagged_signals']}/{report['total']} | {quality_text}",
+            f"🕒 Son gözlem: {latest}",
+            "ℹ️ Açık işlemler toplam P/L'ye dahil değildir; bu rapor yalnız read-only shadow verisidir.",
+        ]
+        if include_recent:
+            recent = report.get("recent") or []
+            lines.extend(["", "🧾 Son sinyaller:"])
+            for row in recent[:10]:
+                ts = datetime.fromtimestamp(
+                    row["decision_ms"] / 1000, timezone(timedelta(hours=3))
+                ).strftime("%H:%M:%S")
+                if row["status"] == "CLOSED":
+                    state = f"{row.get('close_reason') or 'CLOSED'} {self._step_level(row.get('exit_level_pct'))} net {float(row.get('net_pct') or 0):+.3f}%"
+                else:
+                    state = f"OPEN kilit {self._step_level(row.get('current_lock_pct'))}"
+                lines.append(
+                    f"{ts} {row['symbol']} | peak {row['peak_pct']:+.2f}% / dip {row['trough_pct']:+.2f}% | {state}"
+                )
+        return "\n".join(lines)
+
     def status(self):
         p = self.pilot
         return (f'⚡ Early AutoTrader V2: {p.mode} | {p.cfg.margin:g} USDT × {p.cfg.leverage}x | '
@@ -392,10 +470,27 @@ class Integration:
         return True
 
     async def command(self, session, raw, chat, user):
-        if not raw.strip() or raw.split(maxsplit=1)[0].lower() != '/earlyv2':
+        if not raw.strip():
+            return False
+        root = raw.split(maxsplit=1)[0].lower()
+        if root not in ('/earlyv2', '/steplock'):
             return False
         if not self.b['_at_admin_allowed'](chat,user,require_user_id=True):
-            await self.show(session, chat, 'Yetkili kullanıcı ID gerekli.')
+            if root == '/steplock':
+                await self.b['telegram_send'](session, 'Yetkili kullanıcı ID gerekli.', chat_id=chat)
+            else:
+                await self.show(session, chat, 'Yetkili kullanıcı ID gerekli.')
+            return True
+        if root == '/steplock':
+            if not self.step_lock:
+                await self.b['telegram_send'](session, 'Step Lock shadow kapalı.', chat_id=chat)
+                return True
+            parts = raw.split()[1:]
+            include_recent = bool(parts and parts[0].lower() in ('recent','son','detay'))
+            report = self.step_lock.summary(notional_usdt=2000.0, recent_limit=10 if include_recent else 0)
+            await self.b['telegram_send'](
+                session, self.step_lock_report_text(report, include_recent=include_recent), chat_id=chat
+            )
             return True
         p = self.pilot
         parts = raw.split()[1:]
