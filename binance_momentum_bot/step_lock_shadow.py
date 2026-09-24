@@ -1806,6 +1806,248 @@ class StepLockShadow:
         )
 
 
+
+    def daily_candidate_profit_review(self, *, start_ms, end_ms, notional_usdt=2000.0):
+        """Read-only replay of the current candidate architecture for a bounded day."""
+        start_ms = int(start_ms)
+        end_ms = int(end_ms)
+        notional_usdt = _finite(notional_usdt, "notional_usdt", True)
+        if end_ms <= start_ms:
+            raise ValueError("end_ms must be after start_ms")
+
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            cohorts = db.execute(
+                """SELECT key,symbol,decision_ms,anchor_price,recovery_gap,signal_id,radar_id
+                   FROM quality_shadow_cohorts
+                   WHERE kind='EARLY' AND decision_ms>=? AND decision_ms<?
+                   ORDER BY decision_ms""",
+                (start_ms,end_ms),
+            ).fetchall()
+            keys=[str(r[0]) for r in cohorts]
+            path_rows=[]
+            snap_rows=[]
+            gap_keys=set()
+            if keys:
+                ph=",".join("?" for _ in keys)
+                path_rows=db.execute(
+                    f"""SELECT key,bucket_ms,width_ms,payload
+                        FROM quality_shadow_prices
+                        WHERE key IN ({ph})
+                        ORDER BY key,bucket_ms""",
+                    tuple(keys),
+                ).fetchall()
+                snap_rows=db.execute(
+                    f"""SELECT key,horizon_ms,payload
+                        FROM quality_shadow_snapshots
+                        WHERE key IN ({ph}) AND horizon_ms=180000""",
+                    tuple(keys),
+                ).fetchall()
+                try:
+                    gap_keys={str(r[0]) for r in db.execute(
+                        f"""SELECT DISTINCT key FROM quality_shadow_gaps
+                            WHERE key IN ({ph})""", tuple(keys)
+                    ).fetchall()}
+                except sqlite3.OperationalError:
+                    gap_keys=set()
+
+        by_key={}
+        for key,symbol,decision,anchor_price,recovery_gap,signal_id,radar_id in cohorts:
+            if anchor_price is None or float(anchor_price) <= 0:
+                continue
+            by_key[str(key)]=dict(
+                key=str(key),symbol=symbol,decision_ms=int(decision),anchor=float(anchor_price),
+                recovery_gap=bool(recovery_gap),signal_id=signal_id,radar_id=radar_id,
+                buckets=[],snapshot180=None,
+            )
+        for key,bucket_ms,width_ms,payload_json in path_rows:
+            item=by_key.get(str(key))
+            if not item:
+                continue
+            try:
+                p=json.loads(payload_json or "{}")
+                op,hi,lo,cl=map(float,(p.get("open"),p.get("high"),p.get("low"),p.get("close")))
+                if min(op,hi,lo,cl) <= 0:
+                    continue
+                max_gap=int(p.get("max_gap_ms") or 0)
+            except Exception:
+                continue
+            a=item["anchor"]
+            item["buckets"].append(dict(
+                bucket_ms=int(bucket_ms),width_ms=int(width_ms),
+                open_pct=100.0*(op/a-1.0),high_pct=100.0*(hi/a-1.0),
+                low_pct=100.0*(lo/a-1.0),close_pct=100.0*(cl/a-1.0),
+                max_gap_ms=max_gap,
+            ))
+        for key,horizon,payload_json in snap_rows:
+            item=by_key.get(str(key))
+            if not item:
+                continue
+            try:
+                p=json.loads(payload_json or "{}")
+                raw=p.get("raw_features") or {}
+                source=p.get("feature_source_flags") or {}
+                def valid(name):
+                    v=raw.get(name)
+                    if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(float(v)):
+                        return None
+                    sf=source.get(name)
+                    if sf is not None and sf!="OK":
+                        return None
+                    return float(v)
+                price=raw.get("price")
+                price_ret=None
+                if isinstance(price,(int,float)) and math.isfinite(float(price)) and float(price)>0:
+                    price_ret=100.0*(float(price)/item["anchor"]-1.0)
+                item["snapshot180"]=dict(
+                    chg60=valid("chg60"),buy30=valid("buy30"),price_ret=price_ret,
+                    gap_flags=list(p.get("gap_flags") or []),
+                )
+            except Exception:
+                continue
+
+        rungs=list(STEP_LEVELS)
+
+        def bucket_points(b):
+            op,hi,lo,cl=b["open_pct"],b["high_pct"],b["low_pct"],b["close_pct"]
+            return (op,lo,hi,cl) if cl>=op else (op,hi,lo,cl)
+
+        def simulate(item, *, lag, failure_filter):
+            state=dict(
+                closed=False,gross=None,reason=None,stop=None,peak=-999.0,
+                runner_confirmed=False,failure_watch=False,
+            )
+            trigger_ms=item["decision_ms"]+180000
+            filter_checked=False
+            filter_missing=False
+            for b in item["buckets"]:
+                if state["closed"]:
+                    break
+                if failure_filter and not filter_checked and b["bucket_ms"]>=trigger_ms:
+                    filter_checked=True
+                    snap=item["snapshot180"]
+                    if state["failure_watch"] and not state["runner_confirmed"]:
+                        if not snap or snap["chg60"] is None or snap["buy30"] is None or snap["price_ret"] is None:
+                            filter_missing=True
+                        elif snap["chg60"] <= -0.2779087712 + EPS and snap["buy30"] <= 0.2985399946 + EPS:
+                            state.update(
+                                closed=True,gross=float(snap["price_ret"]),
+                                reason="FAILURE_FILTER",
+                            )
+                            break
+                for ret in bucket_points(b):
+                    if state["closed"]:
+                        break
+                    stop=state["stop"]
+                    if stop is not None and ret <= stop + EPS:
+                        state.update(
+                            closed=True,gross=float(stop),
+                            reason="PROFIT_STOP_%.2f" % float(stop),
+                        )
+                        break
+                    if not state["runner_confirmed"] and ret <= -2.0 + EPS:
+                        state.update(closed=True,gross=-2.0,reason="INITIAL_SL")
+                        break
+                    if ret + EPS >= 5.0:
+                        state.update(closed=True,gross=5.0,reason="FINAL_TP")
+                        break
+                    state["peak"]=max(state["peak"],ret)
+                    if not state["runner_confirmed"] and ret <= -0.20 + EPS:
+                        state["failure_watch"]=True
+                    if ret + EPS >= 0.20:
+                        state["runner_confirmed"]=True
+                    reached=[i for i,x in enumerate(rungs) if ret+EPS>=x]
+                    if reached and state["runner_confirmed"]:
+                        idx=max(reached)-int(lag)
+                        if idx>=0:
+                            new=float(rungs[idx])
+                            if state["stop"] is None or new>state["stop"]+EPS:
+                                state["stop"]=new
+            if not state["closed"]:
+                last=item["buckets"][-1]["close_pct"]
+                state.update(closed=True,gross=float(last),reason="MARK_60M" if item["complete60"] else "MARK_NOW")
+            net=float(state["gross"])-self.cost_pct
+            return dict(
+                gross_pct=float(state["gross"]),net_pct=net,reason=state["reason"],
+                failure_filter_missing=filter_missing,
+            )
+
+        items=[]
+        for item in by_key.values():
+            if not item["buckets"]:
+                continue
+            last=item["buckets"][-1]
+            item["complete60"]=(last["bucket_ms"]+last["width_ms"] >= item["decision_ms"]+3600000)
+            item["data_gap"]=bool(
+                item["recovery_gap"] or item["key"] in gap_keys
+                or any(b["max_gap_ms"]>2000 for b in item["buckets"])
+            )
+            baseline=simulate(item,lag=0,failure_filter=False)
+            lag1=simulate(item,lag=1,failure_filter=False)
+            candidate=simulate(item,lag=1,failure_filter=True)
+            items.append(dict(
+                key=item["key"],symbol=item["symbol"],signal_id=item["signal_id"],
+                radar_id=item["radar_id"],decision_ms=item["decision_ms"],
+                complete60=item["complete60"],data_gap=item["data_gap"],
+                snapshot180=item["snapshot180"],
+                baseline=baseline,profit_only_lag1=lag1,candidate=candidate,
+                delta_candidate_vs_baseline_pct=candidate["net_pct"]-baseline["net_pct"],
+                delta_candidate_vs_lag1_pct=candidate["net_pct"]-lag1["net_pct"],
+            ))
+
+        def aggregate(rows,field):
+            vals=[r[field] for r in rows]
+            n=len(vals)
+            net_sum=sum(v["net_pct"] for v in vals)
+            wins=sum(v["net_pct"]>EPS for v in vals)
+            losses=sum(v["net_pct"]<-EPS for v in vals)
+            reasons={}
+            for v in vals:
+                reasons[v["reason"]]=reasons.get(v["reason"],0)+1
+            return dict(
+                n=n,net_pct_sum=net_sum,net_usdt=net_sum*notional_usdt/100.0,
+                avg_net_pct=(net_sum/n if n else None),
+                avg_net_usdt=(net_sum*notional_usdt/100.0/n if n else None),
+                wins=wins,losses=losses,win_rate=(wins/n if n else None),
+                reasons=reasons,
+            )
+
+        complete=[r for r in items if r["complete60"]]
+        changed=[r for r in items if abs(r["candidate"]["net_pct"]-r["baseline"]["net_pct"])>EPS]
+        return dict(
+            version="daily-candidate-profit-review-v1",
+            start_ms=start_ms,end_ms=end_ms,notional_usdt=notional_usdt,
+            eligible=len(items),complete60=len(complete),incomplete=len(items)-len(complete),
+            data_gap_count=sum(r["data_gap"] for r in items),
+            missing_failure_features=sum(r["candidate"]["failure_filter_missing"] for r in items),
+            all_to_now=dict(
+                baseline=aggregate(items,"baseline"),
+                profit_only_lag1=aggregate(items,"profit_only_lag1"),
+                candidate=aggregate(items,"candidate"),
+            ),
+            complete60_only=dict(
+                baseline=aggregate(complete,"baseline"),
+                profit_only_lag1=aggregate(complete,"profit_only_lag1"),
+                candidate=aggregate(complete,"candidate"),
+            ),
+            delta_all_candidate_vs_baseline_usdt=sum(
+                r["delta_candidate_vs_baseline_pct"] for r in items
+            )*notional_usdt/100.0,
+            delta_all_candidate_vs_lag1_usdt=sum(
+                r["delta_candidate_vs_lag1_pct"] for r in items
+            )*notional_usdt/100.0,
+            changed_vs_baseline=changed,
+            items=items,
+            caveats=[
+                "PUBLIC_EARLY quality-shadow paths only.",
+                "Directional OHLC ordering is used inside buckets.",
+                "Incomplete signals are marked at the latest observed close in all_to_now; complete60_only excludes them.",
+                "Failure filter requires a prior -0.20 touch, no +0.20 confirmation by 180s, and valid 180s chg60/buy30/price.",
+                "Modeled exits assume threshold fills and %.2fpp round-trip cost." % self.cost_pct,
+            ],
+        )
+
+
     def get(self, signal_id):
         with closing(self.connect()) as db:
             row = db.execute(
