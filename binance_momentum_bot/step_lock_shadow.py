@@ -1191,6 +1191,196 @@ class StepLockShadow:
         )
 
 
+
+    def runner_filter_price_action_review(self):
+        """Read-only search for early-dip filters that preserve later runners."""
+        waits = (15, 30, 45, 60, 90, 120, 180, 300)
+        cut_prices = (-0.20, -0.15, -0.10, -0.05, 0.0, 0.05)
+        depth_levels = (-0.30, -0.40, -0.50, -0.75, -1.00)
+        reclaim_levels = (-0.10, -0.05, 0.0, 0.05)
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute(
+                """SELECT c.key,c.anchor_price,c.decision_ms,
+                          p.bucket_ms,p.width_ms,p.payload
+                   FROM quality_shadow_cohorts c
+                   JOIN quality_shadow_prices p ON p.key=c.key
+                   WHERE c.kind='EARLY'
+                     AND p.bucket_ms>=c.decision_ms
+                     AND p.bucket_ms<c.decision_ms+3600000
+                   ORDER BY c.key,p.bucket_ms"""
+            ).fetchall()
+        paths = {}
+        for key,anchor,decision,bucket_ms,width_ms,payload_json in rows:
+            key = str(key)
+            try:
+                p = json.loads(payload_json or "{}")
+                op,hi,lo,cl = map(float,(p.get("open"),p.get("high"),p.get("low"),p.get("close")))
+                if min(op,hi,lo,cl,float(anchor)) <= 0:
+                    continue
+                max_gap = int(p.get("max_gap_ms") or 0)
+            except Exception:
+                continue
+            a=float(anchor)
+            rec=dict(
+                bucket_ms=int(bucket_ms), width_ms=int(width_ms),
+                open_pct=100.0*(op/a-1.0), high_pct=100.0*(hi/a-1.0),
+                low_pct=100.0*(lo/a-1.0), close_pct=100.0*(cl/a-1.0),
+                max_gap_ms=max_gap,
+            )
+            item=paths.setdefault(key,dict(anchor=a,decision_ms=int(decision),buckets=[]))
+            item["buckets"].append(rec)
+
+        cohorts=[]
+        for key,item in paths.items():
+            bs=item["buckets"]
+            first_down=None
+            first_up=None
+            ambiguous=False
+            mfe=-999.0
+            mae=999.0
+            max_gap_5m=0
+            for idx,b in enumerate(bs):
+                mfe=max(mfe,b["high_pct"])
+                mae=min(mae,b["low_pct"])
+                if b["bucket_ms"] < item["decision_ms"]+300000:
+                    max_gap_5m=max(max_gap_5m,b["max_gap_ms"])
+                hit_d=b["low_pct"] <= -0.20 + EPS
+                hit_u=b["high_pct"] >= 0.20 - EPS
+                if first_down is None and first_up is None and hit_d and hit_u:
+                    ambiguous=True
+                    break
+                if first_down is None and hit_d:
+                    first_down=idx
+                if first_up is None and hit_u:
+                    first_up=idx
+                if first_down is not None or first_up is not None:
+                    # We only need the first touch order; continue scanning for MFE/MAE.
+                    pass
+            if ambiguous or first_down is None:
+                continue
+            if first_up is not None and first_up < first_down:
+                continue
+            down_bucket=bs[first_down]
+            down_ms=down_bucket["bucket_ms"]
+            later_up = first_up is not None and first_up > first_down
+            true_bad = not later_up
+            runner1 = later_up and mfe >= 1.0 - EPS
+            runner2 = later_up and mfe >= 2.0 - EPS
+            cohorts.append(dict(
+                key=key,buckets=bs,down_idx=first_down,down_ms=down_ms,
+                first_up_idx=first_up,true_bad=true_bad,recover=later_up,
+                runner1=runner1,runner2=runner2,mfe=mfe,mae=mae,
+                max_gap_5m=max_gap_5m,
+            ))
+
+        totals=dict(
+            early_dip=len(cohorts),
+            true_bad=sum(x["true_bad"] for x in cohorts),
+            recover=sum(x["recover"] for x in cohorts),
+            runner1=sum(x["runner1"] for x in cohorts),
+            runner2=sum(x["runner2"] for x in cohorts),
+            gap5m_gt2s=sum(x["max_gap_5m"]>2000 for x in cohorts),
+        )
+
+        def evaluate(selected, label, params):
+            selected=list(selected)
+            n=len(selected)
+            caught=sum(x["true_bad"] for x in selected)
+            recover_wrong=sum(x["recover"] for x in selected)
+            r1_wrong=sum(x["runner1"] for x in selected)
+            r2_wrong=sum(x["runner2"] for x in selected)
+            return dict(
+                rule=label,params=params,cut_count=n,true_bad_caught=caught,
+                recover_wrong_cut=recover_wrong,runner1_wrong_cut=r1_wrong,
+                runner2_wrong_cut=r2_wrong,
+                precision=(caught/n if n else None),
+                recall=(caught/totals["true_bad"] if totals["true_bad"] else None),
+                runner1_retention=(1-r1_wrong/totals["runner1"] if totals["runner1"] else None),
+                runner2_retention=(1-r2_wrong/totals["runner2"] if totals["runner2"] else None),
+            )
+
+        rules=[]
+        for wait_s in waits:
+            for threshold in cut_prices:
+                chosen=[]
+                for x in cohorts:
+                    bs=x["buckets"]
+                    target=x["down_ms"]+wait_s*1000
+                    # If +0.20 is reached before confirmation time, protect the runner.
+                    if x["first_up_idx"] is not None and bs[x["first_up_idx"]]["bucket_ms"] <= target:
+                        continue
+                    prior=[b for b in bs[x["down_idx"]:] if b["bucket_ms"] <= target]
+                    if not prior:
+                        continue
+                    price=prior[-1]["close_pct"]
+                    if price <= threshold + EPS:
+                        chosen.append(x)
+                rules.append(evaluate(
+                    chosen,"wait_then_price",
+                    dict(wait_s=wait_s,close_lte_pct=threshold),
+                ))
+
+        # Depth failure: cut only if a deeper adverse level is reached before a
+        # specified reclaim level; +0.20 first automatically survives.
+        for depth in depth_levels:
+            for reclaim in reclaim_levels:
+                chosen=[]
+                for x in cohorts:
+                    hit=None
+                    for b in x["buckets"][x["down_idx"]:]:
+                        if b["high_pct"] >= 0.20 - EPS:
+                            break
+                        hit_depth=b["low_pct"] <= depth + EPS
+                        hit_reclaim=b["high_pct"] >= reclaim - EPS
+                        if hit_depth and hit_reclaim:
+                            hit="AMBIG"
+                            break
+                        if hit_reclaim:
+                            hit="RECLAIM"
+                            break
+                        if hit_depth:
+                            hit="DEPTH"
+                            break
+                    if hit=="DEPTH":
+                        chosen.append(x)
+                rules.append(evaluate(
+                    chosen,"depth_before_reclaim",
+                    dict(depth_pct=depth,reclaim_pct=reclaim),
+                ))
+
+        eligible=[
+            r for r in rules
+            if r["runner1_retention"] is not None and r["runner2_retention"] is not None
+            and r["runner1_retention"] >= 0.90 - EPS
+            and r["runner2_retention"] >= 0.95 - EPS
+        ]
+        eligible.sort(key=lambda r:(
+            -(r["true_bad_caught"]),
+            -(r["precision"] or 0.0),
+            -(r["runner2_retention"] or 0.0),
+            -(r["runner1_retention"] or 0.0),
+        ))
+        balanced=sorted(rules,key=lambda r:(
+            -(r["true_bad_caught"] - 2*r["runner2_wrong_cut"] - r["runner1_wrong_cut"]),
+            -(r["precision"] or 0.0),
+        ))
+        return dict(
+            version="runner-filter-price-action-v1",
+            resolution="1s OHLC buckets first 15m, 60s afterwards; same-bucket dual touch excluded",
+            totals=totals,
+            target="catch TRUE_BAD after -0.20 first while preserving >=90% RUNNER_1 and >=95% RUNNER_2",
+            best_strict=eligible[:10],
+            best_balanced=balanced[:10],
+            all_rule_count=len(rules),
+            caveats=[
+                "Intra-bucket high/low order is unknown; rules treat same-bucket conflicting touch as ambiguous.",
+                "Price-close confirmation uses bucket close, not exact tick at the requested second.",
+                "Data gaps are reported separately and should be stress-tested before promotion.",
+            ],
+        )
+
+
     def get(self, signal_id):
         with closing(self.connect()) as db:
             row = db.execute(
