@@ -79,6 +79,19 @@ class Pilot:
                     UNIQUE(signal_id,mode));
                 CREATE TABLE IF NOT EXISTS early_v2_events(id INTEGER PRIMARY KEY,ts_ms INTEGER NOT NULL,
                     event TEXT NOT NULL,payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS early_v2_selector_shadow(
+                    signal_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    decision_ms INTEGER NOT NULL,
+                    price REAL NOT NULL,
+                    base_score REAL,
+                    v2_score REAL,
+                    v2_label TEXT NOT NULL,
+                    qualified INTEGER NOT NULL,
+                    min_score REAL NOT NULL,
+                    reasons TEXT NOT NULL,
+                    features TEXT NOT NULL
+                );
             ''')
             saved = dict(db.execute('SELECT key,value FROM early_v2_settings'))
             valid = {f.name for f in fields(Config)}
@@ -113,6 +126,115 @@ class Pilot:
         self.cfg = config
         self.generation += 1
         self.pending.clear()
+
+    def record_selector(self, signal_id, symbol, decision_ms, price, base_score,
+                            v2_score, v2_label, reasons, features):
+        score = float(v2_score) if type(v2_score) in (int, float) and not isinstance(v2_score, bool) and math.isfinite(v2_score) else None
+        qualified = bool(v2_label == 'FAST_EARLY_V2' and score is not None and score >= self.cfg.min_score)
+        payload_reasons = json.dumps(list(reasons or []), ensure_ascii=False, allow_nan=False)
+        payload_features = json.dumps(dict(features or {}), ensure_ascii=False, allow_nan=False)
+        with closing(self.connect()) as db:
+            db.execute(
+                '''INSERT INTO early_v2_selector_shadow(
+                    signal_id,symbol,decision_ms,price,base_score,v2_score,v2_label,
+                    qualified,min_score,reasons,features
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(signal_id) DO UPDATE SET
+                    symbol=excluded.symbol,decision_ms=excluded.decision_ms,price=excluded.price,
+                    base_score=excluded.base_score,v2_score=excluded.v2_score,v2_label=excluded.v2_label,
+                    qualified=excluded.qualified,min_score=excluded.min_score,
+                    reasons=excluded.reasons,features=excluded.features''',
+                (str(signal_id), str(symbol), int(decision_ms), float(price),
+                 None if base_score is None else float(base_score), score, str(v2_label),
+                 int(qualified), float(self.cfg.min_score), payload_reasons, payload_features)
+            )
+            db.commit()
+        return qualified
+
+    def selector_report(self, recent_limit=10):
+        with closing(self.connect()) as db:
+            rows = db.execute(
+                '''SELECT signal_id,symbol,decision_ms,price,base_score,v2_score,v2_label,
+                          qualified,min_score,reasons,features
+                   FROM early_v2_selector_shadow ORDER BY decision_ms'''
+            ).fetchall()
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            stages = []
+            if 'entry_stage_forward_shadow' in tables:
+                stages = db.execute(
+                    '''SELECT id,symbol,created_ts_ms,mfe_pct,mae_pct,completed_60m
+                       FROM entry_stage_forward_shadow
+                       WHERE stage='EARLY' ORDER BY created_ts_ms'''
+                ).fetchall()
+
+        by_symbol = {}
+        for st in stages:
+            by_symbol.setdefault(str(st[1]), []).append(st)
+        used = set()
+        matched = []
+        for row in rows:
+            signal_id,symbol,decision_ms,price,base_score,v2_score,label,qualified,min_score,reasons_json,features_json = row
+            best = None
+            best_delta = None
+            for st in by_symbol.get(str(symbol), ()):
+                sid = int(st[0])
+                if sid in used:
+                    continue
+                delta = abs(int(st[2]) - int(decision_ms))
+                if delta <= 5000 and (best_delta is None or delta < best_delta):
+                    best = st
+                    best_delta = delta
+            if best is not None:
+                used.add(int(best[0]))
+            matched.append((row,best,best_delta))
+
+        thresholds = (0.2,0.5,1.0,2.0,3.0,5.0)
+        def cohort_stats(want_qualified):
+            subset = [(r,st,d) for r,st,d in matched if bool(r[7]) == bool(want_qualified)]
+            mature = [(r,st,d) for r,st,d in subset if st is not None and int(st[5] or 0)]
+            out = dict(total=len(subset),matched=sum(st is not None for _,st,_ in subset),mature60=len(mature))
+            if mature:
+                mfes=[float(st[3] or 0.0) for _,st,_ in mature]
+                maes=[float(st[4] or 0.0) for _,st,_ in mature]
+                out.update(
+                    avg_mfe=sum(mfes)/len(mfes),
+                    avg_mae=sum(maes)/len(maes),
+                    reached={str(t):sum(x+1e-12>=t for x in mfes) for t in thresholds},
+                    rates={str(t):sum(x+1e-12>=t for x in mfes)/len(mfes) for t in thresholds},
+                )
+            else:
+                out.update(avg_mfe=None,avg_mae=None,
+                           reached={str(t):0 for t in thresholds},
+                           rates={str(t):None for t in thresholds})
+            return out
+
+        recent=[]
+        for r,st,delta in matched[-max(0,int(recent_limit)):][::-1]:
+            try:
+                reasons=json.loads(r[9] or "[]")
+            except Exception:
+                reasons=[]
+            recent.append(dict(
+                signal_id=str(r[0]),symbol=str(r[1]),decision_ms=int(r[2]),
+                v2_score=None if r[5] is None else float(r[5]),v2_label=str(r[6]),
+                qualified=bool(r[7]),min_score=float(r[8]),
+                matched_stage_id=None if st is None else int(st[0]),
+                stage_time_delta_ms=None if delta is None else int(delta),
+                mfe_pct=None if st is None else float(st[3] or 0.0),
+                mae_pct=None if st is None else float(st[4] or 0.0),
+                completed_60m=False if st is None else bool(st[5]),
+                reasons=reasons[:6],
+            ))
+        return dict(
+            total=len(rows),
+            qualified=sum(bool(r[7]) for r in rows),
+            rejected=sum(not bool(r[7]) for r in rows),
+            qualified_stats=cohort_stats(True),
+            rejected_stats=cohort_stats(False),
+            recent=recent,
+        )
 
     def save(self, tr):
         with closing(self.connect()) as db:
