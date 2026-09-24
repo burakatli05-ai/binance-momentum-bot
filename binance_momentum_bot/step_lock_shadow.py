@@ -117,6 +117,7 @@ class StepLockShadow:
                     status TEXT NOT NULL,
                     peak_after_pct REAL NOT NULL,
                     trough_after_pct REAL NOT NULL,
+                    trough_before_020_pct REAL NOT NULL,
                     first_positive_ms INTEGER,
                     first_020_ms INTEGER,
                     first_050_ms INTEGER,
@@ -159,9 +160,10 @@ class StepLockShadow:
         with closing(self.connect()) as db:
             watches = db.execute(
                 """SELECT signal_id,symbol,entry_price,exit_event_ms,watch_until_ms,
-                          peak_after_pct,trough_after_pct,first_positive_ms,first_020_ms,
-                          first_050_ms,first_100_ms,first_200_ms,first_300_ms,first_500_ms,
-                          first_minus3_ms,data_flags,last_event_ms,last_received_ms,last_trade_id
+                          peak_after_pct,trough_after_pct,trough_before_020_pct,
+                          first_positive_ms,first_020_ms,first_050_ms,first_100_ms,
+                          first_200_ms,first_300_ms,first_500_ms,first_minus3_ms,
+                          data_flags,last_event_ms,last_received_ms,last_trade_id
                    FROM early_step_lock_poststop_v1 WHERE status='WATCHING'"""
             ).fetchall()
         for row in watches:
@@ -169,11 +171,11 @@ class StepLockShadow:
                 signal_id=str(row[0]), symbol=row[1], entry_price=float(row[2]),
                 exit_event_ms=int(row[3]), watch_until_ms=int(row[4]),
                 peak_after_pct=float(row[5]), trough_after_pct=float(row[6]),
-                first_positive_ms=row[7], first_020_ms=row[8], first_050_ms=row[9],
-                first_100_ms=row[10], first_200_ms=row[11], first_300_ms=row[12],
-                first_500_ms=row[13], first_minus3_ms=row[14],
-                flags=set(json.loads(row[15] or "[]")), last_event_ms=row[16],
-                last_received_ms=row[17], last_trade_id=row[18],
+                trough_before_020_pct=float(row[7]), first_positive_ms=row[8],
+                first_020_ms=row[9], first_050_ms=row[10], first_100_ms=row[11],
+                first_200_ms=row[12], first_300_ms=row[13], first_500_ms=row[14],
+                first_minus3_ms=row[15], flags=set(json.loads(row[16] or "[]")),
+                last_event_ms=row[17], last_received_ms=row[18], last_trade_id=row[19],
             )
             self._activate_poststop(watch)
 
@@ -205,13 +207,14 @@ class StepLockShadow:
         with closing(self.connect()) as db:
             db.execute(
                 """UPDATE early_step_lock_poststop_v1
-                   SET status=?,peak_after_pct=?,trough_after_pct=?,first_positive_ms=?,
-                       first_020_ms=?,first_050_ms=?,first_100_ms=?,first_200_ms=?,
+                   SET status=?,peak_after_pct=?,trough_after_pct=?,trough_before_020_pct=?,
+                       first_positive_ms=?,first_020_ms=?,first_050_ms=?,first_100_ms=?,first_200_ms=?,
                        first_300_ms=?,first_500_ms=?,first_minus3_ms=?,data_flags=?,
                        last_event_ms=?,last_received_ms=?,last_trade_id=?
                    WHERE signal_id=?""",
                 (status, watch["peak_after_pct"], watch["trough_after_pct"],
-                 watch["first_positive_ms"], watch["first_020_ms"], watch["first_050_ms"],
+                 watch["trough_before_020_pct"], watch["first_positive_ms"],
+                 watch["first_020_ms"], watch["first_050_ms"],
                  watch["first_100_ms"], watch["first_200_ms"], watch["first_300_ms"],
                  watch["first_500_ms"], watch["first_minus3_ms"],
                  json.dumps(sorted(watch["flags"])), watch["last_event_ms"],
@@ -224,7 +227,7 @@ class StepLockShadow:
             signal_id=state["signal_id"], symbol=state["symbol"], entry_price=state["entry_price"],
             exit_event_ms=int(event_ms), watch_until_ms=int(event_ms) + POSTSTOP_WINDOW_MS,
             peak_after_pct=self.initial_stop_pct, trough_after_pct=self.initial_stop_pct,
-            first_positive_ms=None, first_020_ms=None, first_050_ms=None, first_100_ms=None,
+            trough_before_020_pct=self.initial_stop_pct, first_positive_ms=None, first_020_ms=None, first_050_ms=None, first_100_ms=None,
             first_200_ms=None, first_300_ms=None, first_500_ms=None, first_minus3_ms=None,
             flags=set(state["flags"]), last_event_ms=state["last_event_ms"],
             last_received_ms=state["last_received_ms"], last_trade_id=state["last_trade_id"],
@@ -233,11 +236,12 @@ class StepLockShadow:
             db.execute(
                 """INSERT OR IGNORE INTO early_step_lock_poststop_v1(
                     signal_id,symbol,entry_price,exit_event_ms,watch_until_ms,status,
-                    peak_after_pct,trough_after_pct,data_flags,last_event_ms,last_received_ms,
-                    last_trade_id,version) VALUES (?,?,?,?,?,'WATCHING',?,?,?,?,?,?,?)""",
+                    peak_after_pct,trough_after_pct,trough_before_020_pct,data_flags,
+                    last_event_ms,last_received_ms,last_trade_id,version)
+                    VALUES (?,?,?,?,?,'WATCHING',?,?,?,?,?,?,?,?)""",
                 (watch["signal_id"], watch["symbol"], watch["entry_price"], watch["exit_event_ms"],
                  watch["watch_until_ms"], watch["peak_after_pct"], watch["trough_after_pct"],
-                 json.dumps(sorted(watch["flags"])), watch["last_event_ms"],
+                 watch["trough_before_020_pct"], json.dumps(sorted(watch["flags"])), watch["last_event_ms"],
                  watch["last_received_ms"], watch["last_trade_id"], VERSION),
             )
             db.commit()
@@ -268,6 +272,8 @@ class StepLockShadow:
             ret = 100.0 * (price / watch["entry_price"] - 1.0)
             watch["peak_after_pct"] = max(watch["peak_after_pct"], ret)
             watch["trough_after_pct"] = min(watch["trough_after_pct"], ret)
+            if watch["first_020_ms"] is None:
+                watch["trough_before_020_pct"] = min(watch["trough_before_020_pct"], ret)
             level_fields = ((0.0,"first_positive_ms"),(0.20,"first_020_ms"),(0.50,"first_050_ms"),
                             (1.0,"first_100_ms"),(2.0,"first_200_ms"),(3.0,"first_300_ms"),
                             (5.0,"first_500_ms"))
