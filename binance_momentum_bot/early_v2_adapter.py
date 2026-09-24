@@ -418,10 +418,12 @@ class Integration:
                 try:
                     target = Path(report_path)
                     tmp = target.with_name(target.name + ".tmp")
+                    initial_sl = self.step_lock.initial_sl_recovery_review(limit=20)
                     payload_file = {
                         "generated_ms": now,
                         "step_lock": payload,
                         "runner_review": runner_payload,
+                        "initial_sl_recovery": initial_sl,
                     }
                     tmp.write_text(
                         json.dumps(payload_file, sort_keys=True, ensure_ascii=False, allow_nan=False),
