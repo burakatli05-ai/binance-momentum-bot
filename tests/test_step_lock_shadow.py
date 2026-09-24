@@ -181,6 +181,67 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(review["reached_after_exit_proxy"][1.25],0)
         self.assertEqual(review["items"][0]["symbol"],"TESTUSDT")
 
+    def test_initial_sl_recovery_uses_public_early_stage_and_exact_poststop_order(self):
+        with self.connect() as db:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+                    episode_id INTEGER, stage TEXT NOT NULL, created_ts_ms INTEGER NOT NULL,
+                    entry_price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+                    close60_price REAL, completed_60m INTEGER DEFAULT 0
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS radar_signals(
+                    id INTEGER PRIMARY KEY, ts INTEGER, notify_ts INTEGER, price REAL
+                )"""
+            )
+            db.execute(
+                """INSERT INTO entry_stage_forward_shadow(
+                    symbol,episode_id,stage,created_ts_ms,entry_price,mfe_pct,mae_pct,close60_price,completed_60m
+                ) VALUES ('TESTUSDT',7,'EARLY',1000,100.0,0.40,-2.50,100.2,1)"""
+            )
+            db.execute("INSERT INTO radar_signals(id,ts,notify_ts,price) VALUES (1,0,1,99.0)")
+            db.commit()
+        self.tick(97.90,1)
+        self.assertEqual(self.s.get('1')['close_reason'],'INITIAL_SL')
+        # After the -2 stop, price first worsens to -2.5, then recovers through +0.20.
+        self.s.tick('TESTUSDT',97.50,1200,1200,2)
+        self.s.tick('TESTUSDT',100.25,1300,1300,3)
+        review=self.s.initial_sl_recovery_review()
+        self.assertEqual(review['total'],1)
+        item=review['items'][0]
+        self.assertEqual(item['historical_minus3_assessment'],'WOULD_SURVIVE_MINUS3_AND_REACH_020')
+        self.assertAlmostEqual(item['public_early_mfe_60m'],0.40)
+        self.assertAlmostEqual(item['public_early_mae_60m'],-2.50)
+        self.assertEqual(item['exact_poststop']['minus3_would_save_to_020'],'YES')
+        self.assertAlmostEqual(item['exact_poststop']['trough_before_020_pct'],-2.50)
+
+    def test_poststop_minus3_before_recovery_is_no(self):
+        with self.connect() as db:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+                    episode_id INTEGER, stage TEXT NOT NULL, created_ts_ms INTEGER NOT NULL,
+                    entry_price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+                    close60_price REAL, completed_60m INTEGER DEFAULT 0
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS radar_signals(
+                    id INTEGER PRIMARY KEY, ts INTEGER, notify_ts INTEGER, price REAL
+                )"""
+            )
+            db.execute("INSERT INTO entry_stage_forward_shadow(symbol,episode_id,stage,created_ts_ms,entry_price,mfe_pct,mae_pct,completed_60m) VALUES ('TESTUSDT',7,'EARLY',1000,100.0,0.5,-3.5,1)")
+            db.execute("INSERT INTO radar_signals(id,ts,notify_ts,price) VALUES (1,0,1,99.0)")
+            db.commit()
+        self.tick(97.90,1)
+        self.s.tick('TESTUSDT',96.90,1200,1200,2)
+        self.s.tick('TESTUSDT',100.25,1300,1300,3)
+        item=self.s.initial_sl_recovery_review()['items'][0]
+        self.assertEqual(item['historical_minus3_assessment'],'ORDER_UNKNOWN_BOTH_MINUS3_AND_020_OCCUR')
+        self.assertEqual(item['exact_poststop']['minus3_would_save_to_020'],'NO')
+
 
 if __name__ == "__main__":
     unittest.main()
