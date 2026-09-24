@@ -324,11 +324,6 @@ class Integration:
                 name="early-combined-optimizer",
                 daemon=True,
             ).start()
-            threading.Thread(
-                target=self._write_daily_candidate_profit_review,
-                name="early-daily-candidate-review",
-                daemon=True,
-            ).start()
 
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
@@ -541,6 +536,12 @@ class Integration:
     async def run(self, session):
         exchange = Binance(self.b, session, self.pilot)
         if self.step_lock:
+            try:
+                await asyncio.to_thread(self._write_daily_candidate_profit_review)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "EARLY_DAILY_CANDIDATE_REVIEW_FAILED %s", type(exc).__name__
+                )
             try:
                 await asyncio.to_thread(self._write_historical_profit_review)
             except Exception as exc:
