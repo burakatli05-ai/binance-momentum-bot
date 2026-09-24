@@ -379,6 +379,90 @@ class StepLockShadow:
             recent=recent,
         )
 
+    def initial_sl_recovery_review(self, *, limit=20):
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            losses = db.execute(
+                """SELECT signal_id,symbol,decision_ms,exit_event_ms,peak_pct,trough_pct,
+                          observed_exit_pct,net_pct,data_flags
+                   FROM early_step_lock_shadow_v1
+                   WHERE status='CLOSED' AND close_reason='INITIAL_SL'
+                   ORDER BY decision_ms DESC LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+            outcome_map = {}
+            for row in losses:
+                rid = int(row[0])
+                outcome_map[rid] = db.execute(
+                    """SELECT horizon_s,return_pct,mfe_pct,mae_pct,ts
+                       FROM radar_outcomes WHERE radar_id=?
+                       ORDER BY horizon_s""",
+                    (rid,),
+                ).fetchall()
+        thresholds=(0.0,0.20,0.50,0.75,1.0,1.5,2.0,3.0,5.0)
+        items=[]
+        for row in losses:
+            signal_id,symbol,decision_ms,exit_event_ms,peak,trough,observed_exit,net_pct,flags_json=row
+            try:
+                flags=json.loads(flags_json or "[]")
+            except Exception:
+                flags=["INVALID_DATA_FLAGS_JSON"]
+            exit_age_s=None
+            if exit_event_ms is not None:
+                exit_age_s=max(0.0,(int(exit_event_ms)-int(decision_ms))/1000.0)
+            outcomes=[]
+            for h,ret,mfe,mae,ts in outcome_map.get(int(signal_id),()):
+                outcomes.append(dict(horizon_s=int(h),
+                    return_pct=None if ret is None else float(ret),
+                    mfe_pct=None if mfe is None else float(mfe),
+                    mae_pct=None if mae is None else float(mae),ts=int(ts)))
+            post=[o for o in outcomes if exit_age_s is None or o["horizon_s"]+EPS >= exit_age_s]
+            proven={}
+            for level in thresholds:
+                proof=None
+                for o in post:
+                    mfe=o["mfe_pct"]
+                    if mfe is not None:
+                        required=max(float(level),float(peak)+1e-9)
+                        if mfe + EPS >= required:
+                            proof=o
+                            break
+                    if level==0.0 and o["return_pct"] is not None and o["return_pct"]>0:
+                        proof=o
+                        break
+                proven[level]=proof["horizon_s"] if proof else None
+            first_positive_sample=None
+            for o in post:
+                if o["return_pct"] is not None and o["return_pct"]>0:
+                    first_positive_sample=o
+                    break
+            first_020=None
+            for o in post:
+                if o["mfe_pct"] is not None and o["mfe_pct"] + EPS >= max(0.20,float(peak)+1e-9):
+                    first_020=o
+                    break
+            minus3="UNKNOWN"
+            minus3_reason="no_proven_+0.20_recovery"
+            if first_020:
+                mae=first_020["mae_pct"]
+                if mae is not None and mae > -3.0 + EPS:
+                    minus3="YES"
+                    minus3_reason="+0.20_proven_before_-3_touch"
+                elif mae is not None and mae <= -3.0 + EPS:
+                    minus3="NO"
+                    minus3_reason="-3_touched_by_first_+0.20_proof_horizon"
+            items.append(dict(signal_id=str(signal_id),symbol=symbol,decision_ms=int(decision_ms),
+                exit_event_ms=None if exit_event_ms is None else int(exit_event_ms),
+                exit_age_s=exit_age_s,pre_stop_peak_pct=float(peak),pre_stop_trough_pct=float(trough),
+                observed_exit_pct=None if observed_exit is None else float(observed_exit),
+                net_pct=None if net_pct is None else float(net_pct),data_flags=flags,outcomes=outcomes,
+                first_positive_sample=first_positive_sample,
+                proven_after_stop_horizon_s={str(k):v for k,v in proven.items()},
+                minus3_would_save_to_020=minus3,minus3_reason=minus3_reason))
+        return dict(total=len(items),initial_stop_pct=self.initial_stop_pct,items=items)
+
     def runner_review(self, *, exit_level_pct=0.20, recent_limit=100):
         """Read-only review of Step Lock exits against the existing 60m EARLY forward cohort.
 
