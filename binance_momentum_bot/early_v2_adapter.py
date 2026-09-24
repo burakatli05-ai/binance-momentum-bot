@@ -444,8 +444,35 @@ class Integration:
         except Exception as exc:
             logging.getLogger(__name__).warning("STEP_LOCK_REPORT_FAILED %s", type(exc).__name__)
 
+    def _write_historical_profit_review(self):
+        if not self.step_lock:
+            return None
+        report = self.step_lock.historical_profit_review(notional_usdt=2000.0)
+        path = os.getenv("EARLY_HISTORICAL_REVIEW_PATH", "/data/early_historical_profit_review.json").strip()
+        if path:
+            target = Path(path)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(
+                json.dumps(report, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+        logging.getLogger(__name__).info(
+            "EARLY_HISTORICAL_PROFIT_REVIEW rows=%s quality_paths=%s",
+            report["full_history"]["completed_60m"],
+            report["quality_exactish"]["price_path_count"],
+        )
+        return report
+
     async def run(self, session):
         exchange = Binance(self.b, session, self.pilot)
+        if self.step_lock:
+            try:
+                await asyncio.to_thread(self._write_historical_profit_review)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "EARLY_HISTORICAL_PROFIT_REVIEW_FAILED %s", type(exc).__name__
+                )
         while not self.b['stop_event'].is_set():
             self._log_step_lock_report()
             try:

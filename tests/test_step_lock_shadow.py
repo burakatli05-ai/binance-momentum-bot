@@ -243,5 +243,76 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(item['exact_poststop']['minus3_would_save_to_020'],'NO')
 
 
+    def test_historical_profit_review_microcut_bounds_and_counterfactual(self):
+        with self.connect() as db:
+            db.execute(
+                """CREATE TABLE entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY, symbol TEXT, stage TEXT, created_ts_ms INTEGER,
+                    entry_price REAL, mfe_pct REAL, mae_pct REAL, close60_price REAL,
+                    current_outcome TEXT, fee_adjusted_current_pct REAL, completed_60m INTEGER
+                )"""
+            )
+            db.executemany(
+                """INSERT INTO entry_stage_forward_shadow
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (1,'TESTUSDT','EARLY',1000,100.0,0.80,-0.40,100.30,'TP',0.5,1),
+                    (2,'BADUSDT','EARLY',2000,100.0,0.10,-2.50,98.00,'STOP',-2.1,1),
+                    (3,'STRONGUSDT','EARLY',3000,100.0,1.20,-0.10,101.00,'TP',1.0,1),
+                ],
+            )
+            db.execute(
+                """CREATE TABLE quality_shadow_cohorts(
+                    key TEXT PRIMARY KEY,symbol TEXT,kind TEXT,episode_id INTEGER,
+                    signal_id INTEGER,radar_id INTEGER,anchor_price REAL,decision_ms INTEGER,
+                    wave_key TEXT,recovery_gap INTEGER,payload TEXT
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE quality_shadow_prices(
+                    key TEXT,bucket_ms INTEGER,width_ms INTEGER,payload TEXT,
+                    PRIMARY KEY(key,bucket_ms,width_ms)
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE quality_shadow_gaps(
+                    key TEXT,start_ms INTEGER,end_ms INTEGER,reason TEXT,
+                    PRIMARY KEY(key,start_ms,end_ms,reason)
+                )"""
+            )
+            db.execute(
+                """INSERT INTO quality_shadow_cohorts
+                   VALUES ('EARLY:1','TESTUSDT','EARLY',7,NULL,1,100.0,1000,'w',0,'{}')"""
+            )
+            db.executemany(
+                """INSERT INTO quality_shadow_prices VALUES (?,?,?,?)""",
+                [
+                    ('EARLY:1',1000,1000,'{"high":100.05,"low":99.75}'),
+                    ('EARLY:1',2000,1000,'{"high":100.60,"low":99.90}'),
+                ],
+            )
+            db.commit()
+        # Actual Step Lock baseline closes profitably after +0.20.
+        self.tick(100.21,1)
+        self.tick(100.19,2)
+        review=self.s.historical_profit_review(notional_usdt=2000.0)
+        self.assertEqual(review['full_history']['completed_60m'],3)
+        h=review['full_history']['microcut_bounds']['0.2']
+        self.assertEqual(h['down_no_up'],1)
+        self.assertEqual(h['down_no_up_hits_minus2'],1)
+        self.assertEqual(h['up_no_down'],1)
+        self.assertEqual(h['both'],1)
+        q=review['quality_exactish']['microcut_first_touch']['0.2']
+        self.assertEqual(q['down_first'],1)
+        self.assertEqual(q['down_first_later']['0.2'],1)
+        self.assertEqual(q['down_first_later']['0.5'],1)
+        cf=review['current_step_lock_counterfactual']['0.2']
+        self.assertEqual(cf['matched_unambiguous'],1)
+        self.assertEqual(cf['cut_count'],1)
+        self.assertEqual(cf['baseline_positive_that_would_be_cut'],1)
+        self.assertLess(cf['delta_usdt'],0)
+
+
+
 if __name__ == "__main__":
     unittest.main()
