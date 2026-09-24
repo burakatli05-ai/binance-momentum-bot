@@ -307,15 +307,12 @@ class StepLockShadow:
                           status,close_reason,exit_level_pct,net_pct,data_flags,last_received_ms
                    FROM early_step_lock_shadow_v1 ORDER BY decision_ms DESC"""
             ).fetchall()
-            reached = db.execute(
+            armed = db.execute(
                 """SELECT level_pct,COUNT(DISTINCT signal_id)
                    FROM early_step_lock_events_v1
                    WHERE event='LOCK_ARM' AND level_pct IS NOT NULL
                    GROUP BY level_pct ORDER BY level_pct"""
             ).fetchall()
-            final_tp = db.execute(
-                "SELECT COUNT(*) FROM early_step_lock_shadow_v1 WHERE close_reason='FINAL_TP'"
-            ).fetchone()[0]
         status_counts = {}
         reason_counts = {}
         exit_levels = {}
@@ -345,9 +342,10 @@ class StepLockShadow:
             for stamp in (decision_ms, last_received_ms):
                 if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
                     latest_ms = max(latest_ms, int(stamp))
-        reached_levels = {round(float(level), 8): int(count) for level,count in reached}
-        if final_tp:
-            reached_levels[round(self.final_tp_pct, 8)] = int(final_tp)
+        reached_levels = {}
+        for level in STEP_LEVELS + (self.final_tp_pct,):
+            reached_levels[round(float(level), 8)] = sum(float(row[4]) + EPS >= level for row in rows)
+        armed_levels = {round(float(level), 8): int(count) for level,count in armed}
         total_net_pct = sum(closed_net)
         closed_count = len(closed_net)
         recent = []
@@ -370,6 +368,7 @@ class StepLockShadow:
             closed=status_counts.get("CLOSED", 0), status_counts=status_counts,
             close_reason_counts=reason_counts, exit_level_counts=exit_levels,
             open_lock_counts=open_locks, reached_level_counts=reached_levels,
+            armed_level_counts=armed_levels,
             flagged_signals=sum(1 for row in rows if (row[10] or "[]") != "[]"),
             flag_counts=flag_counts, latest_ms=latest_ms,
             closed_net_pct_sum=total_net_pct,
