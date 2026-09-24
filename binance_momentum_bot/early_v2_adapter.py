@@ -455,6 +455,9 @@ class Integration:
             return None
         report = self.step_lock.historical_profit_review(notional_usdt=2000.0)
         report["runner_filter_price_action"] = self.step_lock.runner_filter_price_action_review()
+        report["combined_profit_loss_optimizer"] = self.step_lock.combined_profit_loss_optimizer(
+            notional_usdt=2000.0
+        )
         path = os.getenv("EARLY_HISTORICAL_REVIEW_PATH", "/data/early_historical_profit_review.json").strip()
         if path:
             target = Path(path)
