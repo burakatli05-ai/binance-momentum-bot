@@ -542,16 +542,28 @@ class StepLockShadow:
                    ORDER BY decision_ms DESC LIMIT ?""",
                 (int(limit),),
             ).fetchall()
-            outcome_map = {}
+            stages = db.execute(
+                """SELECT id,symbol,created_ts_ms,mfe_pct,mae_pct,completed_60m
+                   FROM entry_stage_forward_shadow WHERE stage='EARLY'"""
+            ).fetchall()
+            stage_by_symbol = {}
+            for st in stages:
+                stage_by_symbol.setdefault(st[1], []).append(st)
+            radar = {}
+            post = {}
             for row in losses:
                 rid = int(row[0])
-                outcome_map[rid] = db.execute(
-                    """SELECT horizon_s,return_pct,mfe_pct,mae_pct,ts
-                       FROM radar_outcomes WHERE radar_id=?
-                       ORDER BY horizon_s""",
-                    (rid,),
-                ).fetchall()
-        thresholds=(0.0,0.20,0.50,0.75,1.0,1.5,2.0,3.0,5.0)
+                radar[rid] = db.execute(
+                    "SELECT ts,notify_ts,price FROM radar_signals WHERE id=?", (rid,)
+                ).fetchone()
+                post[str(row[0])] = db.execute(
+                    """SELECT status,peak_after_pct,trough_after_pct,trough_before_020_pct,
+                              first_positive_ms,first_020_ms,first_050_ms,first_100_ms,
+                              first_200_ms,first_300_ms,first_500_ms,first_minus3_ms,data_flags
+                       FROM early_step_lock_poststop_v1 WHERE signal_id=?""",
+                    (str(row[0]),),
+                ).fetchone()
+        used=set()
         items=[]
         for row in losses:
             signal_id,symbol,decision_ms,exit_event_ms,peak,trough,observed_exit,net_pct,flags_json=row
@@ -559,59 +571,61 @@ class StepLockShadow:
                 flags=json.loads(flags_json or "[]")
             except Exception:
                 flags=["INVALID_DATA_FLAGS_JSON"]
-            exit_age_s=None
-            if exit_event_ms is not None:
-                exit_age_s=max(0.0,(int(exit_event_ms)-int(decision_ms))/1000.0)
-            outcomes=[]
-            for h,ret,mfe,mae,ts in outcome_map.get(int(signal_id),()):
-                outcomes.append(dict(horizon_s=int(h),
-                    return_pct=None if ret is None else float(ret),
-                    mfe_pct=None if mfe is None else float(mfe),
-                    mae_pct=None if mae is None else float(mae),ts=int(ts)))
-            post=[o for o in outcomes if exit_age_s is None or o["horizon_s"]+EPS >= exit_age_s]
-            proven={}
-            for level in thresholds:
-                proof=None
-                for o in post:
-                    mfe=o["mfe_pct"]
-                    if mfe is not None:
-                        required=max(float(level),float(peak)+1e-9)
-                        if mfe + EPS >= required:
-                            proof=o
-                            break
-                    if level==0.0 and o["return_pct"] is not None and o["return_pct"]>0:
-                        proof=o
-                        break
-                proven[level]=proof["horizon_s"] if proof else None
-            first_positive_sample=None
-            for o in post:
-                if o["return_pct"] is not None and o["return_pct"]>0:
-                    first_positive_sample=o
-                    break
-            first_020=None
-            for o in post:
-                if o["mfe_pct"] is not None and o["mfe_pct"] + EPS >= max(0.20,float(peak)+1e-9):
-                    first_020=o
-                    break
-            minus3="UNKNOWN"
-            minus3_reason="no_proven_+0.20_recovery"
-            if first_020:
-                mae=first_020["mae_pct"]
-                if mae is not None and mae > -3.0 + EPS:
-                    minus3="YES"
-                    minus3_reason="+0.20_proven_before_-3_touch"
-                elif mae is not None and mae <= -3.0 + EPS:
-                    minus3="NO"
-                    minus3_reason="-3_touched_by_first_+0.20_proof_horizon"
-            items.append(dict(signal_id=str(signal_id),symbol=symbol,decision_ms=int(decision_ms),
+            candidates=[st for st in stage_by_symbol.get(symbol,())
+                        if st[0] not in used and abs(int(st[2])-int(decision_ms)) <= 5000]
+            stage=min(candidates,key=lambda st:abs(int(st[2])-int(decision_ms))) if candidates else None
+            if stage:
+                used.add(stage[0])
+                _,_,stage_ms,stage_mfe,stage_mae,stage_done=stage
+                stage_mfe=None if stage_mfe is None else float(stage_mfe)
+                stage_mae=None if stage_mae is None else float(stage_mae)
+            else:
+                stage_ms=stage_mfe=stage_mae=stage_done=None
+            historical='UNKNOWN'
+            if stage_mfe is not None and stage_mae is not None:
+                if stage_mfe + EPS >= 0.20 and stage_mae > -3.0 + EPS:
+                    historical='WOULD_SURVIVE_MINUS3_AND_REACH_020'
+                elif stage_mfe + EPS < 0.20 and stage_mae <= -3.0 + EPS:
+                    historical='WOULD_HIT_MINUS3_NO_020'
+                elif stage_mfe + EPS < 0.20 and stage_mae > -3.0 + EPS:
+                    historical='SURVIVES_MINUS3_BUT_NO_020_WITHIN_60M'
+                else:
+                    historical='ORDER_UNKNOWN_BOTH_MINUS3_AND_020_OCCUR'
+            postrow=post.get(str(signal_id))
+            exact=None
+            if postrow:
+                (pstatus,ppeak,ptrough,ptrough020,p0,p020,p050,p100,p200,p300,p500,pminus3,pflags)=postrow
+                if p020 is not None and (pminus3 is None or int(p020) < int(pminus3)):
+                    verdict='YES'
+                elif pminus3 is not None and (p020 is None or int(pminus3) < int(p020)):
+                    verdict='NO'
+                else:
+                    verdict='PENDING'
+                exact=dict(
+                    status=pstatus,peak_after_pct=float(ppeak),trough_after_pct=float(ptrough),
+                    trough_before_020_pct=float(ptrough020),first_positive_ms=p0,first_020_ms=p020,
+                    first_050_ms=p050,first_100_ms=p100,first_200_ms=p200,first_300_ms=p300,
+                    first_500_ms=p500,first_minus3_ms=pminus3,minus3_would_save_to_020=verdict,
+                    data_flags=json.loads(pflags or '[]'))
+            r=radar.get(int(signal_id))
+            radar_created_ms=(int(r[0])*1000 if r and r[0] is not None else None)
+            radar_notify_ms=(int(r[1])*1000 if r and r[1] is not None else None)
+            items.append(dict(
+                signal_id=str(signal_id),symbol=symbol,decision_ms=int(decision_ms),
                 exit_event_ms=None if exit_event_ms is None else int(exit_event_ms),
-                exit_age_s=exit_age_s,pre_stop_peak_pct=float(peak),pre_stop_trough_pct=float(trough),
+                pre_stop_peak_pct=float(peak),pre_stop_trough_pct=float(trough),
                 observed_exit_pct=None if observed_exit is None else float(observed_exit),
-                net_pct=None if net_pct is None else float(net_pct),data_flags=flags,outcomes=outcomes,
-                first_positive_sample=first_positive_sample,
-                proven_after_stop_horizon_s={str(k):v for k,v in proven.items()},
-                minus3_would_save_to_020=minus3,minus3_reason=minus3_reason))
-        return dict(total=len(items),initial_stop_pct=self.initial_stop_pct,items=items)
+                net_pct=None if net_pct is None else float(net_pct),data_flags=flags,
+                radar_created_ms=radar_created_ms,radar_notify_ms=radar_notify_ms,
+                radar_lead_before_public_early_s=(None if radar_created_ms is None else (int(decision_ms)-radar_created_ms)/1000.0),
+                stage_matched=bool(stage),stage_time_delta_ms=(None if stage_ms is None else int(stage_ms)-int(decision_ms)),
+                public_early_mfe_60m=stage_mfe,public_early_mae_60m=stage_mae,
+                public_early_completed_60m=bool(stage_done) if stage is not None else False,
+                historical_minus3_assessment=historical,exact_poststop=exact))
+        return dict(
+            total=len(items),initial_stop_pct=self.initial_stop_pct,
+            note='Historical counterfactuals use PUBLIC_EARLY-aligned stage data; radar_outcomes are intentionally excluded because radar starts before public Early. Exact post-stop order is available only for new watches.',
+            items=items)
 
     def runner_review(self, *, exit_level_pct=0.20, recent_limit=100):
         """Read-only review of Step Lock exits against the existing 60m EARLY forward cohort.
