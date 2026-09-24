@@ -125,5 +125,34 @@ class StepLockShadowTests(unittest.TestCase):
             self.s.summary(recent_limit=51)
 
 
+    def test_runner_review_matches_early_stage_and_counts_later_thresholds(self):
+        # Build the existing production-stage table shape minimally for this test.
+        with self.connect() as db:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+                    episode_id INTEGER, stage TEXT NOT NULL, created_ts_ms INTEGER NOT NULL,
+                    entry_price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+                    close60_price REAL, completed_60m INTEGER DEFAULT 0
+                )"""
+            )
+            db.execute(
+                """INSERT INTO entry_stage_forward_shadow(
+                    symbol,episode_id,stage,created_ts_ms,entry_price,mfe_pct,mae_pct,close60_price,completed_60m
+                ) VALUES ('TESTUSDT',7,'EARLY',1000,100.0,1.10,-0.40,100.8,1)"""
+            )
+            db.commit()
+        self.tick(100.21,1)
+        self.tick(100.19,2)
+        review=self.s.runner_review(exit_level_pct=.2)
+        self.assertEqual(review["total"],1)
+        self.assertEqual(review["matched_stage"],1)
+        self.assertEqual(review["mature_60m"],1)
+        self.assertEqual(review["reached_after_exit_proxy"][.5],1)
+        self.assertEqual(review["reached_after_exit_proxy"][1.0],1)
+        self.assertEqual(review["reached_after_exit_proxy"][1.25],0)
+        self.assertEqual(review["items"][0]["symbol"],"TESTUSDT")
+
+
 if __name__ == "__main__":
     unittest.main()
