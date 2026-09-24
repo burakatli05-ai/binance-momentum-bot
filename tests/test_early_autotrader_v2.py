@@ -111,6 +111,36 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     def trade(self):return next(iter(self.p.active.values()))
     async def test_boot_off_and_no_io(self):
         await self.enter();self.assertEqual(self.p.mode,'OFF');self.assertEqual(self.ex.calls,[])
+    async def test_selector_shadow_records_while_execution_off(self):
+        self.assertEqual(self.p.mode,'OFF')
+        qualified=self.p.record_selector(
+            '7','TESTUSDT',self.now,100.0,80,95,'FAST_EARLY_V2',
+            ['reason'],{'chg60':0.5,'buy30':0.6}
+        )
+        self.assertTrue(qualified)
+        report=self.p.selector_report(recent_limit=1)
+        self.assertEqual((report['total'],report['qualified'],report['rejected']),(1,1,0))
+        self.assertEqual(report['recent'][0]['signal_id'],'7')
+
+    async def test_adapter_arm_scores_and_records_even_when_off(self):
+        adapter=Integration.__new__(Integration)
+        adapter.pilot=self.p
+        adapter.step_lock=None
+        adapter.queue=asyncio.Queue(maxsize=20)
+        adapter.b={
+            'ignition_shadow_score':lambda m,base:(95,'FAST_EARLY_V2',['ok']),
+            'estimate_trade_plan':lambda symbol,m:dict(entry_high=100.1,invalidation=99,target1=102),
+            'states':{},
+        }
+        adapter.arm(77,'TESTUSDT',dict(
+            price=100.,chg10=.2,chg30=.4,chg60=.5,flow10=1.2,flow30=1.1,flow60=1.0,
+            buy30=.6,rel30=.2,flow_eff30=.3,dist15high_pct=.5,spread=.05,qv24=1e7,
+            oi5=.1,oi_accel5=.1,compression_ratio=1.0,extended=False
+        ),80)
+        self.assertTrue(adapter.queue.empty())
+        report=self.p.selector_report(recent_limit=1)
+        self.assertEqual(report['qualified'],1)
+        self.assertEqual(report['recent'][0]['signal_id'],'77')
     async def test_restart_off_and_profit_shadow(self):
         self.live();await self.enter()
         token=self.p.challenge('u','PROFIT_LIVE');self.p.confirm('u',token,ready=True,kind='PROFIT_LIVE')
