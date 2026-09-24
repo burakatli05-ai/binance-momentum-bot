@@ -314,6 +314,12 @@ class Integration:
                                          'ON' if self.step_lock else 'OFF')
         if self.step_lock:
             self._log_step_lock_report()
+            try:
+                self._write_daily_candidate_profit_review()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "EARLY_DAILY_CANDIDATE_REVIEW_FAILED %s", type(exc).__name__
+                )
             threading.Thread(
                 target=self._write_historical_profit_review,
                 name="early-historical-profit-review",
