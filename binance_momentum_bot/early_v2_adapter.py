@@ -382,7 +382,8 @@ class Integration:
                         f"{symbol} | skor {float(score):.1f}/{self.pilot.cfg.min_score:g}\n"
                         f"Fiyat: {float(m['price']):.8g}\n"
                         f"30sn {feature('chg30')}% | 60sn {feature('chg60')}% | "
-                        f"Flow30 {feature('flow30')}x | Buy30 %{feature('buy30',3)}\n"
+                        f"Flow30 {feature('flow30')}x | Buy30 "
+                        f"{('—' if selector_features.get('buy30') is None else f'%{100*float(selector_features['buy30']):.1f}')}\n"
                         f"BTC relatif {feature('rel30')}%\n"
                         f"Neden: {reason_text}\n"
                         f"Mod: {self.pilot.mode} — {'DRY işlem kuyruğuna alındı' if self.pilot.mode == 'DRY' else 'selector shadow'}"
@@ -481,7 +482,7 @@ class Integration:
                     f"Giriş proxy: {float(tr.get('vwap') or 0):.8g}\n"
                     f"SL: {float(tr.get('stop') or 0):.8g} | "
                     f"TP referans: {float((tr.get('plan') or {}).get('target') or 0):.8g}\n"
-                    f"Tutar: {float((tr.get('plan') or {}).get('notional') or 0):.2f} USDT nominal"
+                    f"Tutar: {float(tr.get('qty') or 0)*float(tr.get('vwap') or 0):.2f} USDT nominal"
                 ),
             )
 
