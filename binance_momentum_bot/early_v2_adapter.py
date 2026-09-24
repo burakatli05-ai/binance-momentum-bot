@@ -303,22 +303,17 @@ class Integration:
             value = os.getenv('EARLY_V2_' + name.upper())
             if value is not None:
                 self.pilot.configure(name, json.loads(value))
-        if flag('EARLY_V2_BOOT_DRY'):
+        auto_dry = flag('EARLY_V2_BOOT_DRY') or flag('EARLY_V2_AUTO_DRY')
+        if auto_dry:
             try:
                 self.pilot.set_mode('DRY')
                 self.pilot.event('BOOT_DRY_ENABLED', {})
+                logging.getLogger(__name__).info('EarlyV2 auto-dry enabled')
             except Blocked as exc:
                 self.pilot.event('BOOT_DRY_BLOCKED', {'reason': str(exc)})
+                logging.getLogger(__name__).warning('EarlyV2 auto-dry blocked: %s', exc)
         self.queue = asyncio.Queue(maxsize=20)
         self._last_step_report_ms = 0
-        if flag('EARLY_V2_AUTO_DRY'):
-            try:
-                self.pilot.set_mode('DRY')
-                logging.getLogger(__name__).info('EarlyV2 auto-dry enabled')
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    'EarlyV2 auto-dry failed: %s:%s', type(exc).__name__, exc
-                )
         logging.getLogger(__name__).info(
             'EarlyV2 startup: mode=%s profit_mode=%s live_allowed=%s profit_live_allowed=%s fallback_tp_pct=%s Premium=%s',
             self.pilot.mode, self.pilot.profit_mode, int(self.pilot.live_allowed),
@@ -694,7 +689,7 @@ class Integration:
             f'Kill: {"AKTİF" if p.halted else "kapalı"} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\n'
             f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
             f'60dk olgun: {selector["qualified_stats"]["mature60"]}\n'
-            f'Boot DRY: {"ON" if flag("EARLY_V2_BOOT_DRY") else "OFF"} | '
+            f'Boot DRY: {"ON" if (flag("EARLY_V2_BOOT_DRY") or flag("EARLY_V2_AUTO_DRY")) else "OFF"} | '
             f'Profit LIVE geçişi: {"bekliyor" if p.profit_live_pending else "yok"}\n')
 
     def markup(self):
