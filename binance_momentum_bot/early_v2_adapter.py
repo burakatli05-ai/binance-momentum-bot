@@ -385,6 +385,31 @@ class Integration:
             logging.getLogger(__name__).info(
                 "STEP_LOCK_REPORT %s", json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
             )
+            runner = self.step_lock.runner_review(exit_level_pct=0.20, recent_limit=200)
+            runner_payload = {
+                "exit_level_pct": runner["exit_level_pct"],
+                "total": runner["total"],
+                "matched_stage": runner["matched_stage"],
+                "mature_60m": runner["mature_60m"],
+                "clean_signals": runner["clean_signals"],
+                "reached_after_exit_proxy": {str(k): v for k,v in runner["reached_after_exit_proxy"].items()},
+                "clean_reached_after_exit_proxy": {str(k): v for k,v in runner["clean_reached_after_exit_proxy"].items()},
+                "items": [
+                    {
+                        "id": row["signal_id"], "symbol": row["symbol"], "decision_ms": row["decision_ms"],
+                        "exit_event_ms": row["exit_event_ms"], "exit_net_pct": row["net_pct"],
+                        "step_peak_pct": round(row["step_peak_pct"],5),
+                        "stage_mfe_pct": (None if row["stage_mfe_pct"] is None else round(row["stage_mfe_pct"],5)),
+                        "stage_mae_pct": (None if row["stage_mae_pct"] is None else round(row["stage_mae_pct"],5)),
+                        "mature_60m": row["completed_60m"], "flags": row["data_flags"],
+                    }
+                    for row in runner["items"]
+                ],
+            }
+            logging.getLogger(__name__).info(
+                "STEP_LOCK_RUNNER_REVIEW %s",
+                json.dumps(runner_payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            )
         except Exception as exc:
             logging.getLogger(__name__).warning("STEP_LOCK_REPORT_FAILED %s", type(exc).__name__)
 

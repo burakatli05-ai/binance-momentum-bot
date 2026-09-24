@@ -379,6 +379,84 @@ class StepLockShadow:
             recent=recent,
         )
 
+    def runner_review(self, *, exit_level_pct=0.20, recent_limit=100):
+        """Read-only review of Step Lock exits against the existing 60m EARLY forward cohort.
+
+        For a signal that actually exited at +0.20, any later EARLY-stage MFE >= +0.50
+        necessarily represents upside observed after that Step Lock exit (assuming clean
+        event coverage), because the live shadow would otherwise have ratcheted to +0.50
+        before allowing a +0.20 exit.
+        """
+        exit_level_pct = _finite(exit_level_pct, "exit_level_pct")
+        if isinstance(recent_limit, bool) or not isinstance(recent_limit, int) or not 1 <= recent_limit <= 500:
+            raise ValueError("recent_limit must be an integer between 1 and 500")
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute(
+                """SELECT s.signal_id,s.symbol,s.episode_id,s.decision_ms,s.exit_event_ms,
+                          s.exit_level_pct,s.observed_exit_pct,s.net_pct,s.peak_pct,s.trough_pct,
+                          s.data_flags,
+                          e.id,e.created_ts_ms,e.entry_price,e.mfe_pct,e.mae_pct,
+                          e.close60_price,e.completed_60m
+                   FROM early_step_lock_shadow_v1 s
+                   LEFT JOIN entry_stage_forward_shadow e
+                     ON e.symbol=s.symbol
+                    AND COALESCE(e.episode_id,0)=COALESCE(s.episode_id,0)
+                    AND e.stage='EARLY'
+                   WHERE s.status='CLOSED'
+                     AND s.close_reason='STEP_LOCK'
+                     AND ABS(COALESCE(s.exit_level_pct,999)-?) < 0.000001
+                   ORDER BY s.decision_ms DESC
+                   LIMIT ?""",
+                (float(exit_level_pct), int(recent_limit)),
+            ).fetchall()
+        items = []
+        thresholds = (0.50,0.75,1.00,1.25,1.50,2.00,3.00,5.00)
+        reached = {level: 0 for level in thresholds}
+        clean_reached = {level: 0 for level in thresholds}
+        matched = mature = clean = 0
+        for row in rows:
+            (signal_id,symbol,episode_id,decision_ms,exit_event_ms,exit_level,observed_exit,
+             net_pct,step_peak,step_trough,flags_json,stage_id,stage_created_ms,stage_entry,
+             stage_mfe,stage_mae,close60_price,completed_60m) = row
+            try:
+                flags = json.loads(flags_json or "[]")
+            except Exception:
+                flags = ["INVALID_DATA_FLAGS_JSON"]
+            is_clean = not flags
+            clean += int(is_clean)
+            has_stage = stage_id is not None
+            matched += int(has_stage)
+            is_mature = bool(completed_60m) if has_stage else False
+            mature += int(is_mature)
+            mfe = None if stage_mfe is None else float(stage_mfe)
+            if mfe is not None:
+                for level in thresholds:
+                    if mfe + EPS >= level:
+                        reached[level] += 1
+                        if is_clean:
+                            clean_reached[level] += 1
+            items.append(dict(
+                signal_id=str(signal_id), symbol=symbol, episode_id=episode_id,
+                decision_ms=int(decision_ms), exit_event_ms=None if exit_event_ms is None else int(exit_event_ms),
+                exit_level_pct=None if exit_level is None else float(exit_level),
+                observed_exit_pct=None if observed_exit is None else float(observed_exit),
+                net_pct=None if net_pct is None else float(net_pct),
+                step_peak_pct=float(step_peak), step_trough_pct=float(step_trough),
+                data_flags=flags, stage_matched=has_stage,
+                stage_created_ms=None if stage_created_ms is None else int(stage_created_ms),
+                stage_entry_price=None if stage_entry is None else float(stage_entry),
+                stage_mfe_pct=mfe, stage_mae_pct=None if stage_mae is None else float(stage_mae),
+                close60_price=None if close60_price is None else float(close60_price),
+                completed_60m=is_mature,
+            ))
+        total = len(items)
+        return dict(
+            exit_level_pct=float(exit_level_pct), total=total, matched_stage=matched,
+            mature_60m=mature, clean_signals=clean, reached_after_exit_proxy=reached,
+            clean_reached_after_exit_proxy=clean_reached, items=items,
+        )
+
     def get(self, signal_id):
         with closing(self.connect()) as db:
             row = db.execute(
