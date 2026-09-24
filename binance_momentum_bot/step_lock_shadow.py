@@ -27,6 +27,8 @@ DEFAULT_FINAL_TP_PCT = 5.0
 DEFAULT_COST_PCT = 0.14
 MAX_RECEIVE_LAG_MS = 2000
 MAX_EVENT_GAP_MS = 2000
+POSTSTOP_WINDOW_MS = 60 * 60 * 1000
+POSTSTOP_LEVELS = (0.0, 0.20, 0.50, 1.0, 2.0, 3.0, 5.0)
 
 
 def _finite(value, name, positive=False):
@@ -54,6 +56,8 @@ class StepLockShadow:
             raise ValueError("cost must be nonnegative")
         self.active = {}
         self.by_symbol = {}
+        self.poststop = {}
+        self.poststop_by_symbol = {}
         self._init_db()
         self._recover()
 
@@ -104,6 +108,31 @@ class StepLockShadow:
                 );
                 CREATE INDEX IF NOT EXISTS idx_step_lock_events_signal
                     ON early_step_lock_events_v1(signal_id,event_ms,id);
+                CREATE TABLE IF NOT EXISTS early_step_lock_poststop_v1(
+                    signal_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_event_ms INTEGER NOT NULL,
+                    watch_until_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    peak_after_pct REAL NOT NULL,
+                    trough_after_pct REAL NOT NULL,
+                    first_positive_ms INTEGER,
+                    first_020_ms INTEGER,
+                    first_050_ms INTEGER,
+                    first_100_ms INTEGER,
+                    first_200_ms INTEGER,
+                    first_300_ms INTEGER,
+                    first_500_ms INTEGER,
+                    first_minus3_ms INTEGER,
+                    data_flags TEXT NOT NULL DEFAULT '[]',
+                    last_event_ms INTEGER,
+                    last_received_ms INTEGER,
+                    last_trade_id INTEGER,
+                    version TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_step_lock_poststop_symbol
+                    ON early_step_lock_poststop_v1(status,symbol);
                 """
             )
             db.commit()
@@ -127,6 +156,26 @@ class StepLockShadow:
                 last_event_ms=row[11], last_received_ms=row[12], last_trade_id=row[13],
             )
             self._activate(state)
+        with closing(self.connect()) as db:
+            watches = db.execute(
+                """SELECT signal_id,symbol,entry_price,exit_event_ms,watch_until_ms,
+                          peak_after_pct,trough_after_pct,first_positive_ms,first_020_ms,
+                          first_050_ms,first_100_ms,first_200_ms,first_300_ms,first_500_ms,
+                          first_minus3_ms,data_flags,last_event_ms,last_received_ms,last_trade_id
+                   FROM early_step_lock_poststop_v1 WHERE status='WATCHING'"""
+            ).fetchall()
+        for row in watches:
+            watch = dict(
+                signal_id=str(row[0]), symbol=row[1], entry_price=float(row[2]),
+                exit_event_ms=int(row[3]), watch_until_ms=int(row[4]),
+                peak_after_pct=float(row[5]), trough_after_pct=float(row[6]),
+                first_positive_ms=row[7], first_020_ms=row[8], first_050_ms=row[9],
+                first_100_ms=row[10], first_200_ms=row[11], first_300_ms=row[12],
+                first_500_ms=row[13], first_minus3_ms=row[14],
+                flags=set(json.loads(row[15] or "[]")), last_event_ms=row[16],
+                last_received_ms=row[17], last_trade_id=row[18],
+            )
+            self._activate_poststop(watch)
 
     def _activate(self, state):
         self.active[state["signal_id"]] = state
@@ -139,6 +188,98 @@ class StepLockShadow:
             ids.discard(state["signal_id"])
             if not ids:
                 self.by_symbol.pop(state["symbol"], None)
+
+    def _activate_poststop(self, watch):
+        self.poststop[watch["signal_id"]] = watch
+        self.poststop_by_symbol.setdefault(watch["symbol"], set()).add(watch["signal_id"])
+
+    def _deactivate_poststop(self, watch):
+        self.poststop.pop(watch["signal_id"], None)
+        ids = self.poststop_by_symbol.get(watch["symbol"])
+        if ids is not None:
+            ids.discard(watch["signal_id"])
+            if not ids:
+                self.poststop_by_symbol.pop(watch["symbol"], None)
+
+    def _save_poststop(self, watch, status="WATCHING"):
+        with closing(self.connect()) as db:
+            db.execute(
+                """UPDATE early_step_lock_poststop_v1
+                   SET status=?,peak_after_pct=?,trough_after_pct=?,first_positive_ms=?,
+                       first_020_ms=?,first_050_ms=?,first_100_ms=?,first_200_ms=?,
+                       first_300_ms=?,first_500_ms=?,first_minus3_ms=?,data_flags=?,
+                       last_event_ms=?,last_received_ms=?,last_trade_id=?
+                   WHERE signal_id=?""",
+                (status, watch["peak_after_pct"], watch["trough_after_pct"],
+                 watch["first_positive_ms"], watch["first_020_ms"], watch["first_050_ms"],
+                 watch["first_100_ms"], watch["first_200_ms"], watch["first_300_ms"],
+                 watch["first_500_ms"], watch["first_minus3_ms"],
+                 json.dumps(sorted(watch["flags"])), watch["last_event_ms"],
+                 watch["last_received_ms"], watch["last_trade_id"], watch["signal_id"]),
+            )
+            db.commit()
+
+    def _arm_poststop(self, state, event_ms):
+        watch = dict(
+            signal_id=state["signal_id"], symbol=state["symbol"], entry_price=state["entry_price"],
+            exit_event_ms=int(event_ms), watch_until_ms=int(event_ms) + POSTSTOP_WINDOW_MS,
+            peak_after_pct=self.initial_stop_pct, trough_after_pct=self.initial_stop_pct,
+            first_positive_ms=None, first_020_ms=None, first_050_ms=None, first_100_ms=None,
+            first_200_ms=None, first_300_ms=None, first_500_ms=None, first_minus3_ms=None,
+            flags=set(state["flags"]), last_event_ms=state["last_event_ms"],
+            last_received_ms=state["last_received_ms"], last_trade_id=state["last_trade_id"],
+        )
+        with closing(self.connect()) as db:
+            db.execute(
+                """INSERT OR IGNORE INTO early_step_lock_poststop_v1(
+                    signal_id,symbol,entry_price,exit_event_ms,watch_until_ms,status,
+                    peak_after_pct,trough_after_pct,data_flags,last_event_ms,last_received_ms,
+                    last_trade_id,version) VALUES (?,?,?,?,?,'WATCHING',?,?,?,?,?,?,?)""",
+                (watch["signal_id"], watch["symbol"], watch["entry_price"], watch["exit_event_ms"],
+                 watch["watch_until_ms"], watch["peak_after_pct"], watch["trough_after_pct"],
+                 json.dumps(sorted(watch["flags"])), watch["last_event_ms"],
+                 watch["last_received_ms"], watch["last_trade_id"], VERSION),
+            )
+            db.commit()
+        self._activate_poststop(watch)
+
+    def _tick_poststop(self, symbol, price, event_ms, received_ms, trade_id):
+        for signal_id in list(self.poststop_by_symbol.get(symbol, ())):
+            watch = self.poststop.get(signal_id)
+            if not watch or event_ms <= watch["exit_event_ms"]:
+                continue
+            if event_ms > watch["watch_until_ms"]:
+                self._save_poststop(watch, "DONE")
+                self._deactivate_poststop(watch)
+                continue
+            if event_ms > received_ms or received_ms - event_ms > MAX_RECEIVE_LAG_MS:
+                watch["flags"].add("STALE_OR_FUTURE_TRADE")
+                self._save_poststop(watch)
+                continue
+            if watch["last_trade_id"] is not None:
+                if trade_id <= watch["last_trade_id"] or event_ms < (watch["last_event_ms"] or 0):
+                    watch["flags"].add("OUT_OF_ORDER_TRADE")
+                    self._save_poststop(watch)
+                    continue
+                if trade_id != watch["last_trade_id"] + 1:
+                    watch["flags"].add("MISSING_AGG_TRADE_IDS")
+                if watch["last_event_ms"] is not None and event_ms - watch["last_event_ms"] > MAX_EVENT_GAP_MS:
+                    watch["flags"].add("TRADE_OBSERVATION_GAP")
+            ret = 100.0 * (price / watch["entry_price"] - 1.0)
+            watch["peak_after_pct"] = max(watch["peak_after_pct"], ret)
+            watch["trough_after_pct"] = min(watch["trough_after_pct"], ret)
+            level_fields = ((0.0,"first_positive_ms"),(0.20,"first_020_ms"),(0.50,"first_050_ms"),
+                            (1.0,"first_100_ms"),(2.0,"first_200_ms"),(3.0,"first_300_ms"),
+                            (5.0,"first_500_ms"))
+            for level,field in level_fields:
+                if watch[field] is None and ret + EPS >= level:
+                    watch[field] = int(event_ms)
+            if watch["first_minus3_ms"] is None and ret <= -3.0 + EPS:
+                watch["first_minus3_ms"] = int(event_ms)
+            watch["last_event_ms"] = int(event_ms)
+            watch["last_received_ms"] = int(received_ms)
+            watch["last_trade_id"] = int(trade_id)
+            self._save_poststop(watch)
 
     def _event(self, state, event, event_ms, observed_ms, trade_id=None,
                level_pct=None, price=None, return_pct=None, details=None):
@@ -170,6 +311,7 @@ class StepLockShadow:
         if flag not in state["flags"]:
             state["flags"].add(flag)
             self._save_open(state)
+        self._tick_poststop(symbol, price, event_ms, received_ms, trade_id)
 
     def arm(self, signal_id, symbol, entry_price, decision_ms, episode_id=None):
         signal_id = str(signal_id)
@@ -231,6 +373,8 @@ class StepLockShadow:
                     level_pct=level_pct, price=price, return_pct=ret,
                     details={"reason": reason, "gross_pct": gross, "net_pct": net,
                              "cost_pct": self.cost_pct})
+        if reason == "INITIAL_SL":
+            self._arm_poststop(state, event_ms)
         self._deactivate(state)
 
     def tick(self, symbol, price, event_ms, received_ms, trade_id):
