@@ -7,6 +7,7 @@ import json
 import math
 import logging
 import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from early_autotrader_v2 import Pilot
@@ -410,6 +411,25 @@ class Integration:
                 "STEP_LOCK_RUNNER_REVIEW %s",
                 json.dumps(runner_payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
             )
+            report_path = os.getenv("STEP_LOCK_REPORT_PATH", "/data/step_lock_latest.json").strip()
+            if report_path:
+                try:
+                    target = Path(report_path)
+                    tmp = target.with_name(target.name + ".tmp")
+                    payload_file = {
+                        "generated_ms": now,
+                        "step_lock": payload,
+                        "runner_review": runner_payload,
+                    }
+                    tmp.write_text(
+                        json.dumps(payload_file, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                        encoding="utf-8",
+                    )
+                    os.replace(tmp, target)
+                except Exception as file_exc:
+                    logging.getLogger(__name__).warning(
+                        "STEP_LOCK_REPORT_FILE_FAILED %s", type(file_exc).__name__
+                    )
         except Exception as exc:
             logging.getLogger(__name__).warning("STEP_LOCK_REPORT_FAILED %s", type(exc).__name__)
 
