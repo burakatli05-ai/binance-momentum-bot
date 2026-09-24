@@ -406,6 +406,11 @@ class Integration:
                         "step_peak_pct": round(row["step_peak_pct"],5),
                         "stage_mfe_pct": (None if row["stage_mfe_pct"] is None else round(row["stage_mfe_pct"],5)),
                         "stage_mae_pct": (None if row["stage_mae_pct"] is None else round(row["stage_mae_pct"],5)),
+                        "stage_tp1_return_pct": row.get("stage_tp1_return_pct"),
+                        "stage_tp1_hit_s": row.get("stage_tp1_hit_s"),
+                        "stage_tp1_after_exit_s": row.get("stage_tp1_after_exit_s"),
+                        "p0_half_reach_upper_bound": row.get("p0_half_reach_upper_bound"),
+                        "p0_timing": row.get("p0_timing"),
                         "mature_60m": row["completed_60m"], "flags": row["data_flags"],
                     }
                     for row in runner["items"]

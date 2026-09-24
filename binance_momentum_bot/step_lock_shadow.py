@@ -655,9 +655,12 @@ class StepLockShadow:
                 lo = min(int(row[3]) for row in exits) - 5000
                 hi = max(int(row[3]) for row in exits) + 5000
                 placeholders = ",".join("?" for _ in symbols)
+                stage_cols = {r[1] for r in db.execute("PRAGMA table_info(entry_stage_forward_shadow)").fetchall()}
+                opt = lambda name: name if name in stage_cols else f"NULL AS {name}"
                 stages = db.execute(
                     f"""SELECT id,symbol,episode_id,created_ts_ms,entry_price,mfe_pct,mae_pct,
-                               close60_price,completed_60m
+                               close60_price,completed_60m,{opt('tp1_price')},{opt('tp1_hit_s')},
+                               {opt('tp2_price')},{opt('tp2_hit_s')}
                         FROM entry_stage_forward_shadow
                         WHERE stage='EARLY' AND symbol IN ({placeholders})
                           AND created_ts_ms BETWEEN ? AND ?
@@ -666,6 +669,27 @@ class StepLockShadow:
                 ).fetchall()
             else:
                 stages = []
+            p0_forward = {}
+            p0_outcomes = {}
+            if stages:
+                source_keys = [f"stage:{int(st[0])}" for st in stages]
+                ph = ",".join("?" for _ in source_keys)
+                try:
+                    for prow in db.execute(
+                        f"""SELECT source_key,allow_reference_price,fill_price,fill_event_ts_ms
+                            FROM p0_forward WHERE source_key IN ({ph})""",
+                        tuple(source_keys),
+                    ).fetchall():
+                        p0_forward[str(prow[0])] = prow
+                    for orow in db.execute(
+                        f"""SELECT source_key,horizon_s,mfe_pct,mae_pct,peak_ts_ms,gap,missing_reason
+                            FROM p0_forward_outcomes WHERE source_key IN ({ph})
+                            ORDER BY source_key,horizon_s""",
+                        tuple(source_keys),
+                    ).fetchall():
+                        p0_outcomes.setdefault(str(orow[0]), []).append(orow)
+                except sqlite3.OperationalError:
+                    pass
         by_symbol = {}
         for stage in stages:
             by_symbol.setdefault(stage[1], []).append(stage)
@@ -685,9 +709,11 @@ class StepLockShadow:
             stage = min(candidates, key=lambda st: abs(int(st[3]) - int(decision_ms))) if candidates else None
             if stage:
                 used_stage_ids.add(stage[0])
-                stage_id,_,stage_episode,stage_created_ms,stage_entry,stage_mfe,stage_mae,close60_price,completed_60m = stage
+                (stage_id,_,stage_episode,stage_created_ms,stage_entry,stage_mfe,stage_mae,
+                 close60_price,completed_60m,tp1_price,tp1_hit_s,tp2_price,tp2_hit_s) = stage
             else:
                 stage_id=stage_episode=stage_created_ms=stage_entry=stage_mfe=stage_mae=close60_price=completed_60m=None
+                tp1_price=tp1_hit_s=tp2_price=tp2_hit_s=None
             try:
                 flags = json.loads(flags_json or "[]")
             except Exception:
@@ -705,6 +731,47 @@ class StepLockShadow:
                         reached[level] += 1
                         if is_clean:
                             clean_reached[level] += 1
+            tp1_return_pct = None
+            tp1_after_exit_s = None
+            if stage_entry is not None and tp1_price is not None and float(stage_entry) > 0:
+                tp1_return_pct = 100.0 * (float(tp1_price) / float(stage_entry) - 1.0)
+                if tp1_hit_s is not None and exit_event_ms is not None and stage_created_ms is not None:
+                    tp1_event_ms = int(stage_created_ms + float(tp1_hit_s) * 1000.0)
+                    tp1_after_exit_s = (tp1_event_ms - int(exit_event_ms)) / 1000.0
+
+            p0_key = None if stage_id is None else f"stage:{int(stage_id)}"
+            p0_ref = p0_forward.get(p0_key) if p0_key else None
+            p0_timing = []
+            first_half_upper = None
+            if p0_ref:
+                reference = None if p0_ref[1] is None else float(p0_ref[1])
+                fill = None if p0_ref[2] is None else float(p0_ref[2])
+                for o in p0_outcomes.get(p0_key, ()):
+                    _,h,mfe_o,mae_o,peak_ts,gap_o,missing_o = o
+                    peak_ref_pct = None
+                    if reference and fill and mfe_o is not None:
+                        peak_price = fill * (1.0 + float(mfe_o) / 100.0)
+                        peak_ref_pct = 100.0 * (peak_price / reference - 1.0)
+                    after_exit_peak_s = None
+                    if peak_ts is not None and exit_event_ms is not None:
+                        after_exit_peak_s = (int(peak_ts) - int(exit_event_ms)) / 1000.0
+                    rec = dict(horizon_s=int(h), mfe_fill_pct=None if mfe_o is None else float(mfe_o),
+                               mae_fill_pct=None if mae_o is None else float(mae_o),
+                               peak_reference_pct=peak_ref_pct,
+                               peak_ts_ms=None if peak_ts is None else int(peak_ts),
+                               peak_after_exit_s=after_exit_peak_s,
+                               gap=int(gap_o or 0), missing_reason=missing_o)
+                    p0_timing.append(rec)
+                    if (first_half_upper is None and peak_ref_pct is not None and
+                            peak_ref_pct + EPS >= 0.50 and peak_ts is not None and
+                            exit_event_ms is not None and int(peak_ts) >= int(exit_event_ms)):
+                        first_half_upper = dict(horizon_s=int(h),
+                                                peak_ts_ms=int(peak_ts),
+                                                upper_bound_after_exit_s=after_exit_peak_s,
+                                                peak_reference_pct=peak_ref_pct,
+                                                gap=int(gap_o or 0),
+                                                missing_reason=missing_o)
+
             items.append(dict(
                 signal_id=str(signal_id), symbol=symbol, episode_id=episode_id,
                 decision_ms=int(decision_ms), exit_event_ms=None if exit_event_ms is None else int(exit_event_ms),
@@ -716,8 +783,17 @@ class StepLockShadow:
                 stage_episode_id=stage_episode,
                 stage_created_ms=None if stage_created_ms is None else int(stage_created_ms),
                 stage_time_delta_ms=None if stage_created_ms is None else int(stage_created_ms)-int(decision_ms),
+                stage_id=None if stage_id is None else int(stage_id),
                 stage_entry_price=None if stage_entry is None else float(stage_entry),
                 stage_mfe_pct=mfe, stage_mae_pct=None if stage_mae is None else float(stage_mae),
+                stage_tp1_return_pct=tp1_return_pct,
+                stage_tp1_hit_s=None if tp1_hit_s is None else float(tp1_hit_s),
+                stage_tp1_after_exit_s=tp1_after_exit_s,
+                stage_tp2_return_pct=(None if stage_entry is None or tp2_price is None or float(stage_entry) <= 0
+                                      else 100.0 * (float(tp2_price) / float(stage_entry) - 1.0)),
+                stage_tp2_hit_s=None if tp2_hit_s is None else float(tp2_hit_s),
+                p0_half_reach_upper_bound=first_half_upper,
+                p0_timing=p0_timing,
                 close60_price=None if close60_price is None else float(close60_price),
                 completed_60m=is_mature,
             ))
