@@ -303,6 +303,7 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(h['up_no_down'],1)
         self.assertEqual(h['both'],1)
         q=review['quality_exactish']['microcut_first_touch']['0.2']
+        print("DEBUG_HYBRID_Q", q)
         self.assertEqual(q['down_first'],1)
         self.assertEqual(q['down_first_later']['0.2'],1)
         self.assertEqual(q['down_first_later']['0.5'],1)
