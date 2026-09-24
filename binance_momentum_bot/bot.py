@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -4760,7 +4761,16 @@ def recover_pending_tracking():
         conn.close()
 
 
-telegram_send_lock = asyncio.Lock()
+telegram_command_context = contextvars.ContextVar("telegram_command_context", default=False)
+telegram_command_send_semaphore = asyncio.Semaphore(max(1, int(os.getenv("TELEGRAM_COMMAND_CONCURRENCY", "2"))))
+telegram_background_send_semaphore = asyncio.Semaphore(max(1, int(os.getenv("TELEGRAM_BACKGROUND_CONCURRENCY", "3"))))
+
+
+def _telegram_safe_error(exc: Exception) -> str:
+    detail = str(exc)
+    if TELEGRAM_BOT_TOKEN:
+        detail = detail.replace(TELEGRAM_BOT_TOKEN, "<redacted>")
+    return detail[:500]
 
 
 async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
@@ -4768,10 +4778,11 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                         signal_id: Optional[int] = None, signal_price: Optional[float] = None,
                         entry_status: Optional[str] = None, chat_id: Optional[str] = None,
                         reply_markup: Optional[dict] = None, track_delivery: bool = True) -> bool:
-    """Send a Telegram message reliably.
+    """Send a Telegram message without letting alert traffic block command replies.
 
-    Retries transient network/5xx/429 failures and logs the real exception type,
-    HTTP status and Telegram response body so Railway logs are actionable.
+    Command-loop sends use a dedicated priority lane. Background alerts use a
+    separate bounded lane, so Telegram/API stalls cannot create one global
+    head-of-line queue. Retries are intentionally short and bounded.
     """
     target_chat_id = str(chat_id or TELEGRAM_CHAT_ID)
     if not TELEGRAM_BOT_TOKEN or not target_chat_id:
@@ -4789,12 +4800,16 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
             ]]
         }
 
-    timeout = aiohttp.ClientTimeout(total=15, connect=6, sock_read=10)
-    max_attempts = 4
+    is_command = bool(telegram_command_context.get())
+    timeout = aiohttp.ClientTimeout(
+        total=5 if is_command else 8,
+        connect=2 if is_command else 3,
+        sock_read=3 if is_command else 5,
+    )
+    max_attempts = 2
+    send_gate = telegram_command_send_semaphore if is_command else telegram_background_send_semaphore
 
-    # Serialize Telegram writes. This prevents several gainers/signal/command
-    # messages from hitting Telegram at exactly the same moment.
-    async with telegram_send_lock:
+    async with send_gate:
         send_start_ms = now_ms()
         live_bid = live_ask = drift = None
         if symbol and symbol in states:
@@ -4808,6 +4823,7 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                 symbol or "", notification_kind, notification_ordinal, signal_id=signal_id, send_start_ts_ms=send_start_ms,
                 live_bid=live_bid, live_ask=live_ask, price_drift_pct=drift, entry_status=entry_status,
             )
+
         for attempt in range(1, max_attempts + 1):
             try:
                 async with session.post(url, json=payload, timeout=timeout) as r:
@@ -4832,31 +4848,31 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                             return True
                         log.warning("Telegram API ok=false attempt=%d body=%s", attempt, body[:1000])
                     elif r.status == 429:
-                        retry_after = 2
+                        retry_after = 1
                         try:
                             data = json.loads(body)
-                            retry_after = int(data.get("parameters", {}).get("retry_after", 2))
+                            retry_after = int(data.get("parameters", {}).get("retry_after", 1))
                         except Exception:
                             pass
+                        retry_after = min(max(retry_after, 1), 3 if is_command else 5)
                         log.warning("Telegram rate limited (429), retry_after=%ss body=%s", retry_after, body[:1000])
                         if attempt < max_attempts:
-                            await asyncio.sleep(min(max(retry_after, 1), 30))
+                            await asyncio.sleep(retry_after)
                             continue
                     else:
                         log.warning("Telegram HTTP %s attempt=%d body=%s", r.status, attempt, body[:1000])
-                        # 4xx errors other than 429 are usually permanent for this payload.
                         if 400 <= r.status < 500:
                             return False
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 log.warning(
-                    "Telegram send exception attempt=%d/%d type=%s repr=%r",
-                    attempt, max_attempts, type(e).__name__, e,
+                    "Telegram send exception attempt=%d/%d type=%s detail=%s",
+                    attempt, max_attempts, type(e).__name__, _telegram_safe_error(e),
                 )
 
             if attempt < max_attempts:
-                await asyncio.sleep(min(2 ** (attempt - 1), 8))
+                await asyncio.sleep(0.5 if is_command else 1.0)
 
     log.error("Telegram message abandoned after %d attempts; preview=%r", max_attempts, text[:160])
     return False
@@ -4895,19 +4911,30 @@ async def telegram_api_call(session: aiohttp.ClientSession, method: str, payload
     if not TELEGRAM_BOT_TOKEN:
         return {"ok": False, "description": "bot token missing"}
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+    is_command = bool(telegram_command_context.get())
+    timeout = aiohttp.ClientTimeout(
+        total=5 if is_command else 8,
+        connect=2 if is_command else 3,
+        sock_read=3 if is_command else 5,
+    )
+    send_gate = telegram_command_send_semaphore if is_command else telegram_background_send_semaphore
     try:
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15, connect=6, sock_read=10)) as r:
-            text = await r.text()
-            try:
-                data = json.loads(text)
-            except Exception:
-                data = {"ok": False, "description": text[:500]}
-            if r.status != 200 or not data.get("ok", False):
-                log.warning("Telegram %s failed HTTP=%s body=%s", method, r.status, text[:1000])
-            return data
+        async with send_gate:
+            async with session.post(url, json=payload, timeout=timeout) as r:
+                response_text = await r.text()
+                try:
+                    data = json.loads(response_text)
+                except Exception:
+                    data = {"ok": False, "description": response_text[:500]}
+                if r.status != 200 or not data.get("ok", False):
+                    log.warning("Telegram %s failed HTTP=%s body=%s", method, r.status, response_text[:1000])
+                return data
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        log.warning("Telegram %s exception: %r", method, e)
-        return {"ok": False, "description": repr(e)}
+        detail = _telegram_safe_error(e)
+        log.warning("Telegram %s exception type=%s detail=%s", method, type(e).__name__, detail)
+        return {"ok": False, "description": detail}
 
 
 async def handle_join_request(session: aiohttp.ClientSession, req: dict):
@@ -7978,6 +8005,10 @@ async def telegram_command_loop(session):
     global telegram_offset
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+    # This ContextVar is task-local. Every reply/callback originating from the
+    # command polling task gets a dedicated priority Telegram lane, while
+    # scanner/alert tasks keep using the bounded background lane.
+    telegram_command_context.set(True)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     while not stop_event.is_set():
         try:
@@ -7993,7 +8024,7 @@ async def telegram_command_loop(session):
                 try:
                     data = json.loads(raw)
                 except Exception as e:
-                    log.warning("Telegram getUpdates invalid JSON type=%s repr=%r body=%r", type(e).__name__, e, raw[:500])
+                    log.warning("Telegram getUpdates invalid JSON type=%s detail=%s body=%r", type(e).__name__, _telegram_safe_error(e), raw[:500])
                     await asyncio.sleep(3)
                     continue
                 if not data.get("ok", True):
