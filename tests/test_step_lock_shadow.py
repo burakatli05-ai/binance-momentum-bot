@@ -125,6 +125,34 @@ class StepLockShadowTests(unittest.TestCase):
             self.s.summary(recent_limit=51)
 
 
+    def test_runner_review_falls_back_to_nearest_stage_when_episode_missing(self):
+        with self.connect() as db:
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+                    episode_id INTEGER, stage TEXT NOT NULL, created_ts_ms INTEGER NOT NULL,
+                    entry_price REAL NOT NULL, mfe_pct REAL DEFAULT 0, mae_pct REAL DEFAULT 0,
+                    close60_price REAL, completed_60m INTEGER DEFAULT 0
+                )"""
+            )
+            db.execute(
+                """INSERT INTO entry_stage_forward_shadow(
+                    symbol,episode_id,stage,created_ts_ms,entry_price,mfe_pct,mae_pct,close60_price,completed_60m
+                ) VALUES ('TESTUSDT',99,'EARLY',1002,100.0,0.80,-0.30,100.4,1)"""
+            )
+            db.commit()
+        # Re-arm fixture row without episode id to mirror historical Step Lock rows.
+        with self.connect() as db:
+            db.execute("UPDATE early_step_lock_shadow_v1 SET episode_id=NULL WHERE signal_id='1'")
+            db.commit()
+        self.tick(100.21,1)
+        self.tick(100.19,2)
+        review=self.s.runner_review(exit_level_pct=.2)
+        self.assertEqual(review["matched_stage"],1)
+        self.assertEqual(review["mature_60m"],1)
+        self.assertEqual(review["reached_after_exit_proxy"][.5],1)
+        self.assertEqual(review["reached_after_exit_proxy"][.75],1)
+
     def test_runner_review_matches_early_stage_and_counts_later_thresholds(self):
         # Build the existing production-stage table shape minimally for this test.
         with self.connect() as db:

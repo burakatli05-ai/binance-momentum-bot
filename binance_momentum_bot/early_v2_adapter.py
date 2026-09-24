@@ -315,7 +315,9 @@ class Integration:
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
             try:
-                self.step_lock.arm(radar_id, symbol, float(m['price']), self.pilot.clock())
+                state = self.b.get('states', {}).get(symbol)
+                episode_id = getattr(state, 'episode_id', None) if state is not None else None
+                self.step_lock.arm(radar_id, symbol, float(m['price']), self.pilot.clock(), episode_id)
             except Exception as exc:
                 self.pilot.event('STEP_LOCK_ARM_FAILED', {'signal_id': str(radar_id), 'symbol': symbol,
                                                           'reason': type(exc).__name__})
