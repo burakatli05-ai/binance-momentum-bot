@@ -315,6 +315,7 @@ class Integration:
         self.queue = asyncio.Queue(maxsize=20)
         self.notify_queue = asyncio.Queue(maxsize=100)
         self._notified_open = set()
+        self._notify_tasks = set()
         self._last_step_report_ms = 0
         logging.getLogger(__name__).info(
             'EarlyV2 startup: mode=%s profit_mode=%s live_allowed=%s profit_live_allowed=%s fallback_tp_pct=%s Premium=%s',
@@ -453,18 +454,33 @@ class Integration:
         except asyncio.QueueFull:
             self.pilot.event('EARLY_V2_NOTIFY_DROPPED', {'kind': str(kind), 'reason': 'QUEUE_FULL'})
 
+    async def _deliver_notify(self, session, item):
+        try:
+            ok = await self.b['telegram_send'](session, item['text'])
+            if not ok:
+                self.pilot.event('EARLY_V2_NOTIFY_FAILED', {
+                    'kind': item.get('kind'), 'reason': 'SEND_FAILED'
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.pilot.event('EARLY_V2_NOTIFY_FAILED', {
+                'kind': item.get('kind'), 'reason': type(exc).__name__
+            })
+
     async def _drain_notify(self, session):
-        while True:
+        # Telegram must never block the Early V2 reconcile/trade worker.
+        # Keep only a small bounded set of notification sends in flight; the
+        # main bot's Telegram priority lanes handle command-vs-alert isolation.
+        self._notify_tasks = {task for task in self._notify_tasks if not task.done()}
+        while len(self._notify_tasks) < 3:
             try:
                 item = self.notify_queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
-            try:
-                await self.b['telegram_send'](session, item['text'])
-            except Exception as exc:
-                self.pilot.event('EARLY_V2_NOTIFY_FAILED', {
-                    'kind': item.get('kind'), 'reason': type(exc).__name__ + ':' + str(exc)
-                })
+            task = asyncio.create_task(self._deliver_notify(session, item))
+            self._notify_tasks.add(task)
+            task.add_done_callback(self._notify_tasks.discard)
 
     def _notify_open_if_new(self, candidate):
         if not flag('EARLY_V2_NOTIFY'):
