@@ -302,6 +302,7 @@ class Integration:
             if value is not None:
                 self.pilot.configure(name, json.loads(value))
         self.queue = asyncio.Queue(maxsize=20)
+        self._last_step_report_ms = 0
         logging.getLogger(__name__).info(
             'EarlyV2 startup: mode=%s profit_mode=%s live_allowed=%s profit_live_allowed=%s fallback_tp_pct=%s Premium=%s',
             self.pilot.mode, self.pilot.profit_mode, int(self.pilot.live_allowed),
@@ -345,9 +346,52 @@ class Integration:
         except Exception as exc:
             self.pilot.kill('TICK:' + type(exc).__name__)
 
+    def _log_step_lock_report(self):
+        if not self.step_lock:
+            return
+        now = self.pilot.clock()
+        if self._last_step_report_ms and now - self._last_step_report_ms < 300000:
+            return
+        self._last_step_report_ms = now
+        try:
+            report = self.step_lock.summary(notional_usdt=2000.0, recent_limit=5)
+            payload = {
+                "version": report["version"],
+                "total": report["total"],
+                "open": report["open"],
+                "closed": report["closed"],
+                "close_reasons": report["close_reason_counts"],
+                "exit_levels": report["exit_level_counts"],
+                "open_locks": report["open_lock_counts"],
+                "reached": {str(level): report["reached_level_counts"].get(level, 0)
+                            for level in (0.2,0.5,0.75,1.0,1.5,2.0,3.0,4.0,5.0)},
+                "closed_net_usdt_200x10": round(float(report["closed_net_usdt"]), 6),
+                "closed_avg_usdt_200x10": (None if report["closed_net_usdt_avg"] is None
+                                            else round(float(report["closed_net_usdt_avg"]), 6)),
+                "flagged_signals": report["flagged_signals"],
+                "flag_counts": report["flag_counts"],
+                "latest_ms": report["latest_ms"],
+                "recent": [
+                    {
+                        "id": row["signal_id"], "symbol": row["symbol"], "decision_ms": row["decision_ms"],
+                        "peak": round(row["peak_pct"], 5), "trough": round(row["trough_pct"], 5),
+                        "status": row["status"], "lock": row["current_lock_pct"],
+                        "reason": row["close_reason"], "exit_level": row["exit_level_pct"],
+                        "net_pct": row["net_pct"], "flags": row["data_flags"],
+                    }
+                    for row in report["recent"]
+                ],
+            }
+            logging.getLogger(__name__).info(
+                "STEP_LOCK_REPORT %s", json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("STEP_LOCK_REPORT_FAILED %s", type(exc).__name__)
+
     async def run(self, session):
         exchange = Binance(self.b, session, self.pilot)
         while not self.b['stop_event'].is_set():
+            self._log_step_lock_report()
             try:
                 await self.pilot.reconcile(exchange)
                 try:

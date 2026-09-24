@@ -278,6 +278,22 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Yetkili',sender.await_args.args[1])
 
 
+    async def test_step_lock_report_log_is_periodic_and_read_only(self):
+        adapter=Integration.__new__(Integration);adapter.pilot=self.p
+        adapter.step_lock=StepLockShadow(self.connect);adapter._last_step_report_ms=0
+        adapter.step_lock.arm('log1','TESTUSDT',100.0,self.now)
+        adapter.step_lock.tick('TESTUSDT',105.1,self.now+100,self.now+100,1)
+        mode=self.p.mode;halted=self.p.halted
+        with self.assertLogs('early_v2_adapter',level='INFO') as logs:
+            adapter._log_step_lock_report()
+        self.assertTrue(any('STEP_LOCK_REPORT ' in line for line in logs.output))
+        self.assertTrue(any('closed_net_usdt_200x10' in line for line in logs.output))
+        self.assertEqual((self.p.mode,self.p.halted),(mode,halted))
+        first=adapter._last_step_report_ms
+        adapter._log_step_lock_report()
+        self.assertEqual(adapter._last_step_report_ms,first)
+
+
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory();path=Path(self.tmp.name)/'db.sqlite'
