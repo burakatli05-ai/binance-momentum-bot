@@ -287,8 +287,8 @@ class StepLockShadowTests(unittest.TestCase):
             db.executemany(
                 """INSERT INTO quality_shadow_prices VALUES (?,?,?,?)""",
                 [
-                    ('EARLY:1',1000,1000,'{"high":100.05,"low":99.75}'),
-                    ('EARLY:1',2000,1000,'{"high":100.60,"low":99.90}'),
+                    ('EARLY:1',1000,1000,'{"open":100.0,"high":100.05,"low":99.75,"close":99.90}'),
+                    ('EARLY:1',2000,1000,'{"open":99.90,"high":100.60,"low":99.90,"close":100.50}'),
                 ],
             )
             db.commit()
@@ -311,6 +311,15 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(cf['cut_count'],1)
         self.assertEqual(cf['baseline_positive_that_would_be_cut'],1)
         self.assertLess(cf['delta_usdt'],0)
+        hybrid=review['quality_exactish']['hybrid_step_ladder_60m']['hybrid_minus020']
+        self.assertEqual(hybrid['low_high']['cohort'],1)
+        self.assertEqual(hybrid['directional']['cohort'],1)
+        self.assertEqual(hybrid['high_low']['cohort'],1)
+        # This fixture cleanly hits -0.20 before +0.20, so every intra-bucket
+        # model must take the micro-cut.
+        self.assertEqual(hybrid['low_high']['close_reasons']['MICRO_CUT'],1)
+        self.assertEqual(hybrid['directional']['close_reasons']['MICRO_CUT'],1)
+        self.assertEqual(hybrid['high_low']['close_reasons']['MICRO_CUT'],1)
 
 
 
