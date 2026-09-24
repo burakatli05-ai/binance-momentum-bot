@@ -375,6 +375,8 @@ class Integration:
                     else f"{float(selector_features[name]):.{digits}f}"
                 )
                 reason_text = ', '.join(str(x) for x in (reasons or [])[:3]) or 'FAST_EARLY_V2'
+                buy30_value = selector_features.get('buy30')
+                buy30_text = '—' if buy30_value is None else f"%{100*float(buy30_value):.1f}"
                 self._queue_notify(
                     'selector',
                     (
@@ -382,8 +384,7 @@ class Integration:
                         f"{symbol} | skor {float(score):.1f}/{self.pilot.cfg.min_score:g}\n"
                         f"Fiyat: {float(m['price']):.8g}\n"
                         f"30sn {feature('chg30')}% | 60sn {feature('chg60')}% | "
-                        f"Flow30 {feature('flow30')}x | Buy30 "
-                        f"{('—' if selector_features.get('buy30') is None else f'%{100*float(selector_features['buy30']):.1f}')}\n"
+                        f"Flow30 {feature('flow30')}x | Buy30 {buy30_text}\n"
                         f"BTC relatif {feature('rel30')}%\n"
                         f"Neden: {reason_text}\n"
                         f"Mod: {self.pilot.mode} — {'DRY işlem kuyruğuna alındı' if self.pilot.mode == 'DRY' else 'selector shadow'}"
