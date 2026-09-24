@@ -90,5 +90,40 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertIn("STALE_OR_FUTURE_TRADE", row["data_flags"])
 
 
+    def test_summary_is_read_only_and_reports_levels_and_usdt(self):
+        # signal 1 closes at +0.20 lock
+        self.tick(100.21, 1)
+        self.tick(100.19, 2)
+        # signal 2 reaches +5 final target
+        self.s.arm("2", "MOONUSDT", 100.0, 2000, 8)
+        self.s.tick("MOONUSDT", 105.10, 2100, 2100, 10)
+        # signal 3 stays open with +0.50 lock
+        self.s.arm("3", "OPENUSDT", 100.0, 3000, 9)
+        self.s.tick("OPENUSDT", 100.51, 3100, 3100, 20)
+        before = self.s.get("3")
+        report = self.s.summary(notional_usdt=2000.0, recent_limit=10)
+        after = self.s.get("3")
+        self.assertEqual(before, after)
+        self.assertEqual(report["total"], 3)
+        self.assertEqual(report["closed"], 2)
+        self.assertEqual(report["open"], 1)
+        self.assertEqual(report["close_reason_counts"]["STEP_LOCK"], 1)
+        self.assertEqual(report["close_reason_counts"]["FINAL_TP"], 1)
+        self.assertEqual(report["exit_level_counts"][0.2], 1)
+        self.assertEqual(report["exit_level_counts"][5.0], 1)
+        self.assertEqual(report["open_lock_counts"][0.5], 1)
+        self.assertEqual(report["reached_level_counts"][0.2], 3)
+        self.assertEqual(report["reached_level_counts"][0.5], 2)
+        self.assertEqual(report["reached_level_counts"][5.0], 1)
+        self.assertAlmostEqual(report["closed_net_usdt"], (0.05 + 4.86) * 20.0, places=6)
+        self.assertEqual(len(report["recent"]), 3)
+
+    def test_summary_validates_notional_and_limit(self):
+        with self.assertRaises(ValueError):
+            self.s.summary(notional_usdt=0)
+        with self.assertRaises(ValueError):
+            self.s.summary(recent_limit=51)
+
+
 if __name__ == "__main__":
     unittest.main()

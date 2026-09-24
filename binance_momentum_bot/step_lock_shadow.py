@@ -295,6 +295,90 @@ class StepLockShadow:
                                 details={"previous_lock_pct": old})
             self._save_open(state)
 
+    def summary(self, *, notional_usdt=2000.0, recent_limit=10):
+        """Return a read-only aggregate snapshot for Telegram/research review."""
+        notional_usdt = _finite(notional_usdt, "notional_usdt", True)
+        if isinstance(recent_limit, bool) or not isinstance(recent_limit, int) or not 0 <= recent_limit <= 50:
+            raise ValueError("recent_limit must be an integer between 0 and 50")
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute(
+                """SELECT signal_id,symbol,decision_ms,current_lock_pct,peak_pct,trough_pct,
+                          status,close_reason,exit_level_pct,net_pct,data_flags,last_received_ms
+                   FROM early_step_lock_shadow_v1 ORDER BY decision_ms DESC"""
+            ).fetchall()
+            armed = db.execute(
+                """SELECT level_pct,COUNT(DISTINCT signal_id)
+                   FROM early_step_lock_events_v1
+                   WHERE event='LOCK_ARM' AND level_pct IS NOT NULL
+                   GROUP BY level_pct ORDER BY level_pct"""
+            ).fetchall()
+        status_counts = {}
+        reason_counts = {}
+        exit_levels = {}
+        open_locks = {}
+        flag_counts = {}
+        closed_net = []
+        latest_ms = 0
+        for row in rows:
+            signal_id,symbol,decision_ms,current_lock,peak,trough,status,reason,exit_level,net_pct,flags_json,last_received_ms = row
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if reason:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            if status == "CLOSED" and exit_level is not None:
+                key = round(float(exit_level), 8)
+                exit_levels[key] = exit_levels.get(key, 0) + 1
+            if status == "OPEN":
+                key = None if current_lock is None else round(float(current_lock), 8)
+                open_locks[key] = open_locks.get(key, 0) + 1
+            if net_pct is not None and status == "CLOSED":
+                closed_net.append(float(net_pct))
+            try:
+                flags = json.loads(flags_json or "[]")
+            except Exception:
+                flags = ["INVALID_DATA_FLAGS_JSON"]
+            for flag in flags:
+                flag_counts[str(flag)] = flag_counts.get(str(flag), 0) + 1
+            for stamp in (decision_ms, last_received_ms):
+                if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+                    latest_ms = max(latest_ms, int(stamp))
+        reached_levels = {}
+        for level in STEP_LEVELS + (self.final_tp_pct,):
+            reached_levels[round(float(level), 8)] = sum(float(row[4]) + EPS >= level for row in rows)
+        armed_levels = {round(float(level), 8): int(count) for level,count in armed}
+        total_net_pct = sum(closed_net)
+        closed_count = len(closed_net)
+        recent = []
+        for row in rows[:recent_limit]:
+            signal_id,symbol,decision_ms,current_lock,peak,trough,status,reason,exit_level,net_pct,flags_json,last_received_ms = row
+            try:
+                flags = json.loads(flags_json or "[]")
+            except Exception:
+                flags = ["INVALID_DATA_FLAGS_JSON"]
+            recent.append(dict(
+                signal_id=str(signal_id), symbol=symbol, decision_ms=int(decision_ms),
+                current_lock_pct=None if current_lock is None else float(current_lock),
+                peak_pct=float(peak), trough_pct=float(trough), status=status,
+                close_reason=reason, exit_level_pct=None if exit_level is None else float(exit_level),
+                net_pct=None if net_pct is None else float(net_pct), data_flags=flags,
+                last_received_ms=None if last_received_ms is None else int(last_received_ms),
+            ))
+        return dict(
+            version=VERSION, total=len(rows), open=status_counts.get("OPEN", 0),
+            closed=status_counts.get("CLOSED", 0), status_counts=status_counts,
+            close_reason_counts=reason_counts, exit_level_counts=exit_levels,
+            open_lock_counts=open_locks, reached_level_counts=reached_levels,
+            armed_level_counts=armed_levels,
+            flagged_signals=sum(1 for row in rows if (row[10] or "[]") != "[]"),
+            flag_counts=flag_counts, latest_ms=latest_ms,
+            closed_net_pct_sum=total_net_pct,
+            closed_net_pct_avg=(total_net_pct / closed_count if closed_count else None),
+            notional_usdt=notional_usdt,
+            closed_net_usdt=total_net_pct * notional_usdt / 100.0,
+            closed_net_usdt_avg=(total_net_pct * notional_usdt / 100.0 / closed_count if closed_count else None),
+            recent=recent,
+        )
+
     def get(self, signal_id):
         with closing(self.connect()) as db:
             row = db.execute(
