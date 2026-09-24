@@ -860,7 +860,7 @@ class StepLockShadow:
                          AND p.bucket_ms>=c.decision_ms
                          AND p.bucket_ms<c.decision_ms+3600000
                        ORDER BY c.key,p.bucket_ms"""
-                )
+                ).fetchall()
 
             hist = {d: dict(up_no_down=0, down_no_up=0, both=0, neither=0,
                             down_no_up_hits_minus2=0,
