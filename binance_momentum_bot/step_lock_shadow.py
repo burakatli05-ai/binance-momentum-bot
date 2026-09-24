@@ -1381,6 +1381,389 @@ class StepLockShadow:
         )
 
 
+
+    def combined_profit_loss_optimizer(self, *, notional_usdt=2000.0):
+        """Read-only, time-split search for runner-preserving loss filters and profit locks."""
+        notional_usdt = _finite(notional_usdt, "notional_usdt", True)
+        horizons = (30000, 60000, 90000, 180000)
+        features = (
+            "chg10","chg30","chg60","flow10","flow30","flow60",
+            "buy10","buy30","buy60","book_imbalance","compression_ratio",
+            "oi5","oi_accel5","rel30","gainer_rank","rank_velocity",
+            "candidate_runup","dist_episode_peak_pct","distance_from_episode_low_pct",
+            "seconds_since_episode_peak","episode_age_s","spread",
+        )
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            path_rows = db.execute(
+                """SELECT c.key,c.anchor_price,c.decision_ms,c.recovery_gap,
+                          p.bucket_ms,p.width_ms,p.payload
+                   FROM quality_shadow_cohorts c
+                   JOIN quality_shadow_prices p ON p.key=c.key
+                   WHERE c.kind='EARLY'
+                     AND p.bucket_ms>=c.decision_ms
+                     AND p.bucket_ms<c.decision_ms+3600000
+                   ORDER BY c.key,p.bucket_ms"""
+            ).fetchall()
+            snap_rows = db.execute(
+                """SELECT s.key,s.horizon_ms,s.nominal_ms,s.payload
+                   FROM quality_shadow_snapshots s
+                   JOIN quality_shadow_cohorts c ON c.key=s.key
+                   WHERE c.kind='EARLY' AND s.horizon_ms IN (30000,60000,90000,180000)
+                   ORDER BY s.key,s.horizon_ms"""
+            ).fetchall()
+
+        paths = {}
+        for key,anchor,decision,recovery,bucket_ms,width_ms,payload_json in path_rows:
+            key=str(key)
+            try:
+                p=json.loads(payload_json or "{}")
+                op,hi,lo,cl=map(float,(p.get("open"),p.get("high"),p.get("low"),p.get("close")))
+                if min(op,hi,lo,cl,float(anchor)) <= 0:
+                    continue
+                max_gap=int(p.get("max_gap_ms") or 0)
+            except Exception:
+                continue
+            a=float(anchor)
+            item=paths.setdefault(key,dict(
+                key=key,anchor=a,decision_ms=int(decision),recovery_gap=bool(recovery),
+                buckets=[],snapshots={},mfe=-999.0,mae=999.0,first_down_ms=None,
+                first_up_ms=None,ambiguous_first=False,max_gap_5m=0,
+            ))
+            rec=dict(
+                bucket_ms=int(bucket_ms),width_ms=int(width_ms),
+                open_pct=100.0*(op/a-1.0),high_pct=100.0*(hi/a-1.0),
+                low_pct=100.0*(lo/a-1.0),close_pct=100.0*(cl/a-1.0),
+                max_gap_ms=max_gap,
+            )
+            item["buckets"].append(rec)
+            item["mfe"]=max(item["mfe"],rec["high_pct"])
+            item["mae"]=min(item["mae"],rec["low_pct"])
+            if rec["bucket_ms"] < item["decision_ms"]+300000:
+                item["max_gap_5m"]=max(item["max_gap_5m"],max_gap)
+            if item["first_down_ms"] is None and item["first_up_ms"] is None:
+                hd=rec["low_pct"] <= -0.20 + EPS
+                hu=rec["high_pct"] >= 0.20 - EPS
+                if hd and hu:
+                    item["ambiguous_first"]=True
+                elif hd:
+                    item["first_down_ms"]=rec["bucket_ms"]
+                elif hu:
+                    item["first_up_ms"]=rec["bucket_ms"]
+            else:
+                if item["first_down_ms"] is None and rec["low_pct"] <= -0.20 + EPS:
+                    item["first_down_ms"]=rec["bucket_ms"]
+                if item["first_up_ms"] is None and rec["high_pct"] >= 0.20 - EPS:
+                    item["first_up_ms"]=rec["bucket_ms"]
+
+        for key,horizon,nominal,payload_json in snap_rows:
+            key=str(key)
+            if key not in paths:
+                continue
+            try:
+                payload=json.loads(payload_json or "{}")
+                raw=payload.get("raw_features") or {}
+                source_flags=payload.get("feature_source_flags") or {}
+                gap_flags=payload.get("gap_flags") or []
+            except Exception:
+                continue
+            clean={}
+            for name in features:
+                value=raw.get(name)
+                if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(float(value)):
+                    continue
+                sf=source_flags.get(name)
+                if sf is not None and sf!="OK":
+                    continue
+                clean[name]=float(value)
+            price=raw.get("price")
+            price_ret=None
+            if isinstance(price,(int,float)) and math.isfinite(float(price)) and float(price)>0:
+                price_ret=100.0*(float(price)/paths[key]["anchor"]-1.0)
+            paths[key]["snapshots"][int(horizon)]=dict(
+                nominal_ms=int(nominal),features=clean,price_ret=price_ret,
+                gap_flags=list(gap_flags),
+            )
+
+        usable=[p for p in paths.values() if p["buckets"]]
+        usable.sort(key=lambda x:x["decision_ms"])
+        split=max(1,min(len(usable)-1,int(len(usable)*0.70))) if len(usable)>1 else len(usable)
+        train_keys={p["key"] for p in usable[:split]}
+        test_keys={p["key"] for p in usable[split:]}
+
+        def is_early_dip(p):
+            if p["ambiguous_first"] or p["first_down_ms"] is None:
+                return False
+            return p["first_up_ms"] is None or p["first_down_ms"] < p["first_up_ms"]
+
+        for p in usable:
+            p["early_dip"]=is_early_dip(p)
+            p["recover"]=bool(p["early_dip"] and p["first_up_ms"] is not None and p["first_up_ms"]>p["first_down_ms"])
+            p["true_bad"]=bool(p["early_dip"] and not p["recover"])
+            p["runner1"]=bool(p["recover"] and p["mfe"]>=1.0-EPS)
+            p["runner2"]=bool(p["recover"] and p["mfe"]>=2.0-EPS)
+
+        train_dips=[p for p in usable if p["key"] in train_keys and p["early_dip"]]
+        test_dips=[p for p in usable if p["key"] in test_keys and p["early_dip"]]
+
+        def qtile(values,q):
+            vals=sorted(values)
+            if not vals:
+                return None
+            pos=(len(vals)-1)*q
+            lo=int(math.floor(pos));hi=int(math.ceil(pos))
+            if lo==hi:return vals[lo]
+            return vals[lo]+(vals[hi]-vals[lo])*(pos-lo)
+
+        def rule_trigger(p,rule):
+            h=rule["horizon_ms"]
+            snap=p["snapshots"].get(h)
+            if not snap or p["first_down_ms"] is None:
+                return False
+            t=p["decision_ms"]+h
+            if p["first_down_ms"]>t:
+                return False
+            if p["first_up_ms"] is not None and p["first_up_ms"]<=t:
+                return False
+            for cond in rule["conditions"]:
+                v=snap["features"].get(cond["feature"])
+                if v is None:
+                    return False
+                if cond["op"]=="<=" and not (v<=cond["threshold"]+EPS):
+                    return False
+                if cond["op"]==">=" and not (v>=cond["threshold"]-EPS):
+                    return False
+            return True
+
+        def rule_stats(rule, cohort):
+            all_r1=sum(p["runner1"] for p in cohort)
+            all_r2=sum(p["runner2"] for p in cohort)
+            all_bad=sum(p["true_bad"] for p in cohort)
+            selected=[p for p in cohort if rule_trigger(p,rule)]
+            caught=sum(p["true_bad"] for p in selected)
+            wrong=sum(p["recover"] for p in selected)
+            r1_wrong=sum(p["runner1"] for p in selected)
+            r2_wrong=sum(p["runner2"] for p in selected)
+            return dict(
+                eligible=len(cohort),cut_count=len(selected),true_bad_caught=caught,
+                recover_wrong_cut=wrong,runner1_wrong_cut=r1_wrong,runner2_wrong_cut=r2_wrong,
+                precision=(caught/len(selected) if selected else None),
+                recall=(caught/all_bad if all_bad else None),
+                runner1_retention=(1-r1_wrong/all_r1 if all_r1 else None),
+                runner2_retention=(1-r2_wrong/all_r2 if all_r2 else None),
+            )
+
+        feature_coverage={}
+        singles=[]
+        for h in horizons:
+            eligible=[
+                p for p in train_dips
+                if p["first_down_ms"] is not None and p["first_down_ms"]<=p["decision_ms"]+h
+                and (p["first_up_ms"] is None or p["first_up_ms"]>p["decision_ms"]+h)
+                and h in p["snapshots"]
+            ]
+            cov={}
+            for name in features:
+                vals=[p["snapshots"][h]["features"][name] for p in eligible
+                      if name in p["snapshots"][h]["features"]]
+                coverage=len(vals)/len(eligible) if eligible else 0.0
+                cov[name]=dict(n=len(vals),coverage=coverage)
+                if coverage < 0.60 or len(vals)<20:
+                    continue
+                thresholds=sorted(set(
+                    round(float(qtile(vals,q)),10) for q in (0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90)
+                    if qtile(vals,q) is not None
+                ))
+                for threshold in thresholds:
+                    for op in ("<=",">="):
+                        rule=dict(horizon_ms=h,conditions=[dict(feature=name,op=op,threshold=threshold)])
+                        st=rule_stats(rule,train_dips)
+                        if st["cut_count"]>=5:
+                            singles.append(dict(rule=rule,train=st))
+            feature_coverage[str(h)]=cov
+
+        def rank_key(item):
+            st=item["train"]
+            r1=st["runner1_retention"] if st["runner1_retention"] is not None else 0.0
+            r2=st["runner2_retention"] if st["runner2_retention"] is not None else 0.0
+            precision=st["precision"] or 0.0
+            return (st["true_bad_caught"]-2*st["runner2_wrong_cut"]-st["runner1_wrong_cut"],
+                    precision,r2,r1)
+
+        singles.sort(key=rank_key,reverse=True)
+        pairs=[]
+        by_h={}
+        for item in singles[:80]:
+            by_h.setdefault(item["rule"]["horizon_ms"],[]).append(item)
+        for h,items in by_h.items():
+            top=items[:18]
+            for i in range(len(top)):
+                for j in range(i+1,len(top)):
+                    c1=top[i]["rule"]["conditions"][0];c2=top[j]["rule"]["conditions"][0]
+                    if c1["feature"]==c2["feature"]:
+                        continue
+                    rule=dict(horizon_ms=h,conditions=[c1,c2])
+                    st=rule_stats(rule,train_dips)
+                    if st["cut_count"]>=5:
+                        pairs.append(dict(rule=rule,train=st))
+        candidates=singles+pairs
+        strict=[
+            x for x in candidates
+            if (x["train"]["runner1_retention"] is not None and x["train"]["runner1_retention"]>=0.90-EPS
+                and x["train"]["runner2_retention"] is not None and x["train"]["runner2_retention"]>=0.95-EPS)
+        ]
+        strict.sort(key=lambda x:(
+            x["train"]["true_bad_caught"],x["train"]["precision"] or 0.0,
+            x["train"]["runner2_retention"] or 0.0,x["train"]["runner1_retention"] or 0.0
+        ),reverse=True)
+        top_rules=[]
+        for item in strict[:12]:
+            enriched=dict(rule=item["rule"],train=item["train"],test=rule_stats(item["rule"],test_dips))
+            top_rules.append(enriched)
+        no_rule=dict(horizon_ms=None,conditions=[])
+
+        rungs=list(STEP_LEVELS)
+        profit_policies=[dict(name=f"lag_{lag}",kind="lag",lag=lag) for lag in (0,1,2,3,4)]
+        for activation in (0.50,0.75,1.00,1.25):
+            for trail in (0.25,0.50,0.75,1.00):
+                if trail>=activation+0.50:
+                    continue
+                profit_policies.append(dict(
+                    name=f"trail_a{activation:g}_d{trail:g}",kind="trail",
+                    activation=activation,trail=trail,floor=0.0,
+                ))
+
+        def apply_profit_state(state,ret,policy):
+            if state["closed"]:
+                return
+            # Existing stop is checked before a favorable observation can raise it.
+            stop=state["stop"]
+            if stop is not None and ret<=stop+EPS:
+                state.update(closed=True,gross=float(stop),reason="PROFIT_STOP")
+                return
+            if ret<=-2.0+EPS and state["peak"]<0.20-EPS:
+                state.update(closed=True,gross=-2.0,reason="INITIAL_SL")
+                return
+            if ret+EPS>=5.0:
+                state.update(closed=True,gross=5.0,reason="FINAL_TP")
+                return
+            state["peak"]=max(state["peak"],ret)
+            if policy["kind"]=="lag":
+                reached=[i for i,x in enumerate(rungs) if ret+EPS>=x]
+                if reached:
+                    idx=max(reached)-int(policy["lag"])
+                    if idx>=0:
+                        new=float(rungs[idx])
+                        if state["stop"] is None or new>state["stop"]+EPS:
+                            state["stop"]=new
+            else:
+                if state["peak"]+EPS>=float(policy["activation"]):
+                    new=max(float(policy["floor"]),state["peak"]-float(policy["trail"]))
+                    if state["stop"] is None or new>state["stop"]+EPS:
+                        state["stop"]=new
+
+        def points_for_bucket(b):
+            op,hi,lo,cl=b["open_pct"],b["high_pct"],b["low_pct"],b["close_pct"]
+            return (op,lo,hi,cl) if cl>=op else (op,hi,lo,cl)
+
+        def simulate_one(p,policy,rule):
+            state=dict(closed=False,gross=None,reason=None,stop=None,peak=-999.0)
+            trigger_ms=(p["decision_ms"]+rule["horizon_ms"]) if rule.get("horizon_ms") is not None else None
+            trigger_done=False
+            for b in p["buckets"]:
+                if state["closed"]:
+                    break
+                if trigger_ms is not None and not trigger_done and b["bucket_ms"]>=trigger_ms:
+                    trigger_done=True
+                    if rule_trigger(p,rule):
+                        snap=p["snapshots"].get(rule["horizon_ms"])
+                        gross=snap.get("price_ret") if snap else None
+                        if gross is None:
+                            gross=b["open_pct"]
+                        state.update(closed=True,gross=float(gross),reason="FAILURE_FILTER")
+                        break
+                for ret in points_for_bucket(b):
+                    apply_profit_state(state,ret,policy)
+                    if state["closed"]:
+                        break
+            if not state["closed"]:
+                last=p["buckets"][-1]["close_pct"]
+                state.update(closed=True,gross=float(last),reason="MARK_60M")
+            net=float(state["gross"])-self.cost_pct
+            return net,state["reason"]
+
+        def simulate_set(keys,policy,rule):
+            cohort=[p for p in usable if p["key"] in keys]
+            net_sum=0.0;wins=losses=0;reasons={}
+            for p in cohort:
+                net,reason=simulate_one(p,policy,rule)
+                net_sum+=net
+                if net>EPS:wins+=1
+                elif net<-EPS:losses+=1
+                reasons[reason]=reasons.get(reason,0)+1
+            n=len(cohort)
+            return dict(
+                n=n,net_pct_sum=net_sum,net_usdt=net_sum*notional_usdt/100.0,
+                avg_net_pct=(net_sum/n if n else None),
+                avg_net_usdt=(net_sum*notional_usdt/100.0/n if n else None),
+                wins=wins,losses=losses,win_rate=(wins/n if n else None),
+                reasons=reasons,
+            )
+
+        loss_rules=[no_rule]+[x["rule"] for x in top_rules[:8]]
+        combos=[]
+        for policy in profit_policies:
+            for rule in loss_rules:
+                train=simulate_set(train_keys,policy,rule)
+                combos.append(dict(policy=policy,loss_rule=rule,train=train))
+        combos.sort(key=lambda x:x["train"]["net_pct_sum"],reverse=True)
+
+        baseline_policy=dict(name="lag_0",kind="lag",lag=0)
+        baseline_train=simulate_set(train_keys,baseline_policy,no_rule)
+        baseline_test=simulate_set(test_keys,baseline_policy,no_rule)
+        best=combos[0] if combos else dict(policy=baseline_policy,loss_rule=no_rule,train=baseline_train)
+        best_test=simulate_set(test_keys,best["policy"],best["loss_rule"])
+        best_profit_only=max(
+            (x for x in combos if x["loss_rule"].get("horizon_ms") is None),
+            key=lambda x:x["train"]["net_pct_sum"],
+            default=dict(policy=baseline_policy,loss_rule=no_rule,train=baseline_train),
+        )
+        best_profit_only_test=simulate_set(test_keys,best_profit_only["policy"],no_rule)
+
+        return dict(
+            version="combined-profit-loss-optimizer-v1",
+            notional_usdt=notional_usdt,
+            cohort=dict(total=len(usable),train=len(train_keys),test=len(test_keys),split="chronological 70/30"),
+            early_dip=dict(
+                train=len(train_dips),test=len(test_dips),
+                train_true_bad=sum(p["true_bad"] for p in train_dips),
+                test_true_bad=sum(p["true_bad"] for p in test_dips),
+                train_runner1=sum(p["runner1"] for p in train_dips),
+                test_runner1=sum(p["runner1"] for p in test_dips),
+                train_runner2=sum(p["runner2"] for p in train_dips),
+                test_runner2=sum(p["runner2"] for p in test_dips),
+            ),
+            feature_coverage=feature_coverage,
+            candidate_loss_rules=top_rules,
+            profitability=dict(
+                baseline=dict(policy=baseline_policy,train=baseline_train,test=baseline_test),
+                best_profit_only=dict(policy=best_profit_only["policy"],train=best_profit_only["train"],
+                                      test=best_profit_only_test),
+                best_combined=dict(policy=best["policy"],loss_rule=best["loss_rule"],
+                                   train=best["train"],test=best_test),
+                test_delta_vs_baseline_usdt=best_test["net_usdt"]-baseline_test["net_usdt"],
+                profit_only_test_delta_vs_baseline_usdt=best_profit_only_test["net_usdt"]-baseline_test["net_usdt"],
+            ),
+            caveats=[
+                "Optimizer selects on the earlier 70% and reports profitability on the later 30% holdout.",
+                "Price paths use 1s OHLC buckets for first 15m and 60s buckets afterwards; directional OHLC ordering is a heuristic.",
+                "Feature rules only use scheduled snapshots whose individual source flag is OK when such provenance exists.",
+                "The study is shadow research; fills are idealized at modeled stops/snapshot prices and use %.2fpp round-trip cost." % self.cost_pct,
+                "Observed trade gaps remain common and should block live promotion until forward validation confirms the result.",
+            ],
+        )
+
+
     def get(self, signal_id):
         with closing(self.connect()) as db:
             row = db.execute(
