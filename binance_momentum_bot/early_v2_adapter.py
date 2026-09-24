@@ -303,6 +303,12 @@ class Integration:
             value = os.getenv('EARLY_V2_' + name.upper())
             if value is not None:
                 self.pilot.configure(name, json.loads(value))
+        if flag('EARLY_V2_BOOT_DRY'):
+            try:
+                self.pilot.set_mode('DRY')
+                self.pilot.event('BOOT_DRY_ENABLED', {})
+            except Blocked as exc:
+                self.pilot.event('BOOT_DRY_BLOCKED', {'reason': str(exc)})
         self.queue = asyncio.Queue(maxsize=20)
         self._last_step_report_ms = 0
         if flag('EARLY_V2_AUTO_DRY'):
@@ -688,6 +694,7 @@ class Integration:
             f'Kill: {"AKTİF" if p.halted else "kapalı"} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\n'
             f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
             f'60dk olgun: {selector["qualified_stats"]["mature60"]}\n'
+            f'Boot DRY: {"ON" if flag("EARLY_V2_BOOT_DRY") else "OFF"} | '
             f'Profit LIVE geçişi: {"bekliyor" if p.profit_live_pending else "yok"}\n')
 
     def markup(self):
@@ -800,7 +807,18 @@ class Integration:
                     f'Toplam: {sr["total"]} | seçilen: {sr["qualified"]} | reddedilen: {sr["rejected"]}',
                     f'Seçilen 60dk n={q["mature60"]}: +0.5 {rate_text(q,0.5)} | +1 {rate_text(q,1.0)} | +2 {rate_text(q,2.0)} | +3 {rate_text(q,3.0)} | +5 {rate_text(q,5.0)}',
                     f'Reddedilen 60dk n={rj["mature60"]}: +0.5 {rate_text(rj,0.5)} | +1 {rate_text(rj,1.0)} | +2 {rate_text(rj,2.0)} | +3 {rate_text(rj,3.0)} | +5 {rate_text(rj,5.0)}',
+                    '',
+                    'Skor eşik karşılaştırması:',
                 ]
+                for threshold in ('85','90','95','98'):
+                    stats = sr.get('threshold_stats', {}).get(threshold, {})
+                    rates = stats.get('rates') or {}
+                    def tr(level):
+                        value = rates.get(str(level))
+                        return '-' if value is None else f'%{100*value:.1f}'
+                    lines.append(
+                        f'≥{threshold}: n={stats.get("mature60",0)} | +1 {tr(1.0)} | +2 {tr(2.0)} | +5 {tr(5.0)}'
+                    )
                 if sr['recent']:
                     lines.append('')
                     lines.append('Son kararlar:')
