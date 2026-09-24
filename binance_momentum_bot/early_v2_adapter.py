@@ -7,6 +7,7 @@ import json
 import math
 import logging
 import os
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -313,6 +314,11 @@ class Integration:
                                          'ON' if self.step_lock else 'OFF')
         if self.step_lock:
             self._log_step_lock_report()
+            threading.Thread(
+                target=self._write_historical_profit_review,
+                name="early-historical-profit-review",
+                daemon=True,
+            ).start()
 
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
