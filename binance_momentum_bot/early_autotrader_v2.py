@@ -227,12 +227,30 @@ class Pilot:
                 completed_60m=False if st is None else bool(st[5]),
                 reasons=reasons[:6],
             ))
+        threshold_stats = {}
+        for threshold in (85.0, 90.0, 95.0, 98.0):
+            eligible = [(r,st,d) for r,st,d in matched
+                        if r[5] is not None and str(r[6]) == 'FAST_EARLY_V2'
+                        and float(r[5]) + 1e-12 >= threshold]
+            mature = [(r,st,d) for r,st,d in eligible if st is not None and int(st[5] or 0)]
+            mfes = [float(st[3] or 0.0) for _,st,_ in mature]
+            threshold_stats[str(int(threshold))] = dict(
+                total=len(eligible),
+                mature60=len(mature),
+                avg_mfe=(sum(mfes)/len(mfes) if mfes else None),
+                rates={
+                    str(t):(sum(x+1e-12>=t for x in mfes)/len(mfes) if mfes else None)
+                    for t in thresholds
+                },
+            )
+
         return dict(
             total=len(rows),
             qualified=sum(bool(r[7]) for r in rows),
             rejected=sum(not bool(r[7]) for r in rows),
             qualified_stats=cohort_stats(True),
             rejected_stats=cohort_stats(False),
+            threshold_stats=threshold_stats,
             recent=recent,
         )
 

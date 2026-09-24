@@ -269,6 +269,55 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_dry_realized_loss_and_report(self):
         self.p.set_mode('DRY');await self.enter();self.now+=10;self.p.tick('TESTUSDT',98.,self.now,self.now,1)
         self.assertFalse(self.p.active);r=self.p.report('DRY');self.assertEqual(r['closed'],1);self.assertLess(r['net'],0)
+    async def test_selector_shadow_records_and_matches_public_early(self):
+        self.p.record_selector(
+            'sel1','TESTUSDT',self.now,100.0,80,95.0,'FAST_EARLY_V2',
+            ['fast'],{'chg30':0.4,'buy30':0.62}
+        )
+        with closing(self.connect()) as db:
+            db.execute(
+                '''CREATE TABLE IF NOT EXISTS entry_stage_forward_shadow(
+                    id INTEGER PRIMARY KEY,symbol TEXT,stage TEXT,created_ts_ms INTEGER,
+                    mfe_pct REAL,mae_pct REAL,completed_60m INTEGER
+                )'''
+            )
+            db.execute(
+                '''INSERT INTO entry_stage_forward_shadow
+                   (id,symbol,stage,created_ts_ms,mfe_pct,mae_pct,completed_60m)
+                   VALUES (1,'TESTUSDT','EARLY',?,2.5,-0.4,1)''',
+                (self.now+1000,)
+            )
+            db.commit()
+        report=self.p.selector_report(recent_limit=5)
+        self.assertEqual((report['total'],report['qualified']), (1,1))
+        self.assertEqual(report['qualified_stats']['mature60'],1)
+        self.assertEqual(report['qualified_stats']['reached']['2.0'],1)
+        self.assertEqual(report['threshold_stats']['95']['mature60'],1)
+        self.assertEqual(report['threshold_stats']['98']['mature60'],0)
+
+    async def test_adapter_arm_records_selector_even_when_pilot_off(self):
+        adapter=Integration.__new__(Integration)
+        adapter.pilot=self.p
+        adapter.step_lock=None
+        adapter.queue=asyncio.Queue(maxsize=20)
+        adapter.b={
+            'ignition_shadow_score':lambda m,base:(95.0,'FAST_EARLY_V2',['ok']),
+            'estimate_trade_plan':lambda symbol,m:dict(
+                entry_high=100.1,invalidation=99.0,target1=102.0
+            ),
+            'states':{},
+        }
+        adapter.arm('sel-off','TESTUSDT',{
+            'price':100.0,'chg10':0.2,'chg30':0.4,'chg60':0.5,
+            'flow10':1.2,'flow30':1.1,'flow60':1.0,'buy30':0.6,
+            'rel30':0.2,'flow_eff30':0.3,'dist15high_pct':0.8,
+            'spread':0.05,'qv24':10000000,'extended':False,
+        },80)
+        report=self.p.selector_report(recent_limit=5)
+        self.assertEqual(report['total'],1)
+        self.assertEqual(report['qualified'],1)
+        self.assertTrue(adapter.queue.empty())
+
     async def test_menu_contains_all_requested_controls(self):
         adapter=Integration.__new__(Integration);adapter.pilot=self.p
         labels=[b['text'] for row in adapter.markup()['inline_keyboard'] for b in row]
