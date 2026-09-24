@@ -305,6 +305,14 @@ class Integration:
                 self.pilot.configure(name, json.loads(value))
         self.queue = asyncio.Queue(maxsize=20)
         self._last_step_report_ms = 0
+        if flag('EARLY_V2_AUTO_DRY'):
+            try:
+                self.pilot.set_mode('DRY')
+                logging.getLogger(__name__).info('EarlyV2 auto-dry enabled')
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    'EarlyV2 auto-dry failed: %s:%s', type(exc).__name__, exc
+                )
         logging.getLogger(__name__).info(
             'EarlyV2 startup: mode=%s profit_mode=%s live_allowed=%s profit_live_allowed=%s fallback_tp_pct=%s Premium=%s',
             self.pilot.mode, self.pilot.profit_mode, int(self.pilot.live_allowed),
@@ -332,24 +340,49 @@ class Integration:
             ).start()
 
     def arm(self, radar_id, symbol, m, base_score):
+        decision_ms = self.pilot.clock()
         if self.step_lock:
             try:
                 state = self.b.get('states', {}).get(symbol)
                 episode_id = getattr(state, 'episode_id', None) if state is not None else None
-                self.step_lock.arm(radar_id, symbol, float(m['price']), self.pilot.clock(), episode_id)
+                self.step_lock.arm(radar_id, symbol, float(m['price']), decision_ms, episode_id)
             except Exception as exc:
                 self.pilot.event('STEP_LOCK_ARM_FAILED', {'signal_id': str(radar_id), 'symbol': symbol,
                                                           'reason': type(exc).__name__})
-        if self.pilot.mode == 'OFF':
-            return
         try:
-            score, label, _ = self.b['ignition_shadow_score'](m, base_score)
+            score, label, reasons = self.b['ignition_shadow_score'](m, base_score)
+            selector_features = {
+                key: m.get(key) for key in (
+                    'chg10','chg30','chg60','flow10','flow30','flow60','buy30',
+                    'rel30','flow_eff30','dist15high_pct','spread','qv24',
+                    'oi5','oi_accel5','compression_ratio','extended'
+                )
+            }
+            qualified = self.pilot.record_selector(
+                radar_id, symbol, decision_ms, float(m['price']), base_score,
+                score, label, reasons, selector_features
+            )
+            self.pilot.event('SELECTOR_DECISION', {
+                'signal_id': str(radar_id), 'symbol': symbol, 'score': score,
+                'label': label, 'qualified': bool(qualified), 'min_score': self.pilot.cfg.min_score
+            })
+            if self.pilot.mode == 'OFF' or not qualified:
+                return
             plan = self.b['estimate_trade_plan'](symbol, m)
-            self.queue.put_nowait(dict(id=radar_id, symbol=symbol, price=float(m['price']),
-                v2_score=score, v2_label=label, ts_ms=self.pilot.clock(),
-                entry_high=plan['entry_high'], stop=plan['invalidation'], target=plan['target1']))
+            self.queue.put_nowait(dict(
+                id=radar_id, symbol=symbol, price=float(m['price']),
+                v2_score=score, v2_label=label, ts_ms=decision_ms,
+                entry_high=plan['entry_high'], stop=plan['invalidation'], target=plan['target1']
+            ))
+        except asyncio.QueueFull:
+            self.pilot.event('CANDIDATE_REJECTED', {
+                'signal_id': str(radar_id), 'symbol': symbol, 'reason': 'QUEUE_FULL'
+            })
         except Exception as exc:
-            self.pilot.event('CANDIDATE_REJECTED', {'reason': type(exc).__name__})
+            self.pilot.event('CANDIDATE_REJECTED', {
+                'signal_id': str(radar_id), 'symbol': symbol,
+                'reason': type(exc).__name__ + ':' + str(exc)
+            })
 
     async def premium(self, session, signal_id, symbol, m, plan):
         async with self.pilot.lock:
@@ -648,10 +681,13 @@ class Integration:
 
     def status(self):
         p = self.pilot
+        selector = p.selector_report(recent_limit=0)
         return (f'⚡ Early AutoTrader V2: {p.mode} | {p.cfg.margin:g} USDT × {p.cfg.leverage}x | '
             f'skor ≥{p.cfg.min_score:g} | max {p.cfg.max_positions} | Profit Lock {p.profit_mode}\n'
             f'V2 doğrulama: {"ON" if p.score_validated else "YOK — yalnız DRY"} | '
             f'Kill: {"AKTİF" if p.halted else "kapalı"} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\n'
+            f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
+            f'60dk olgun: {selector["qualified_stats"]["mature60"]}\n'
             f'Profit LIVE geçişi: {"bekliyor" if p.profit_live_pending else "yok"}\n')
 
     def markup(self):
@@ -753,10 +789,32 @@ class Integration:
             elif cmd == 'positions':
                 message = '\n'.join(f"{t['symbol']} {t['mode']} {t['status']} {t['classification']} | qty={t['qty']} | VWAP={t.get('vwap','bekleniyor')} | SL={t.get('stop','bekleniyor')} | TP={t.get('fallback_tp_price','yok')} | {t.get('profit_policy','bekleniyor')}"
                                     for t in p.active.values()) or 'Early pozisyonu yok.'
+            elif cmd == 'selector':
+                sr = p.selector_report(recent_limit=10)
+                q = sr['qualified_stats']; rj = sr['rejected_stats']
+                def rate_text(stats, level):
+                    value = stats['rates'].get(str(level))
+                    return '-' if value is None else f'%{100*value:.1f}'
+                lines = [
+                    '🧪 EARLY V2 SELECTOR SHADOW',
+                    f'Toplam: {sr["total"]} | seçilen: {sr["qualified"]} | reddedilen: {sr["rejected"]}',
+                    f'Seçilen 60dk n={q["mature60"]}: +0.5 {rate_text(q,0.5)} | +1 {rate_text(q,1.0)} | +2 {rate_text(q,2.0)} | +3 {rate_text(q,3.0)} | +5 {rate_text(q,5.0)}',
+                    f'Reddedilen 60dk n={rj["mature60"]}: +0.5 {rate_text(rj,0.5)} | +1 {rate_text(rj,1.0)} | +2 {rate_text(rj,2.0)} | +3 {rate_text(rj,3.0)} | +5 {rate_text(rj,5.0)}',
+                ]
+                if sr['recent']:
+                    lines.append('')
+                    lines.append('Son kararlar:')
+                    for row in sr['recent'][:10]:
+                        lines.append(
+                            f'{row["symbol"]} score {row["v2_score"]} {row["v2_label"]} '
+                            f'{"✅" if row["qualified"] else "❌"} | '
+                            f'MFE {("-" if row["mfe_pct"] is None else f"{row["mfe_pct"]:+.2f}%")}'
+                        )
+                message = '\n'.join(lines)
             elif cmd == 'report':
                 message = '\n'.join(json.dumps(p.report(mode), ensure_ascii=False) for mode in ('DRY','LIVE'))
             elif cmd not in ('menu','status'):
-                message = 'Komut tanınmadı. /earlyv2 menüsünü kullanın.'
+                message = 'Komut tanınmadı. /earlyv2 menüsünü kullanın. Selector raporu: /earlyv2 selector'
             await self.show(session, chat, message)
         except (Blocked, ValueError, TypeError) as exc:
             await self.show(session,chat,'İşlem uygulanmadı: '+str(exc))
