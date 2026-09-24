@@ -581,6 +581,7 @@ class Pilot:
         return engine
 
     def tick(self, symbol, price, event_ms, received_ms, trade_id):
+        closed = []
         for tr in list(self.active.values()):
             if tr['symbol'] != symbol or tr['status'] != 'OPEN':
                 continue
@@ -608,7 +609,9 @@ class Pilot:
                     net = tr['qty'] * (exit_price - tr['vwap']) - tr['qty'] * (exit_price + tr['vwap']) * .0005
                     tr.update(status='CLOSED', closed_ms=received_ms, net=net, exit_price=exit_price,
                               cost_reference='DRY_FEE_0.05_PERCENT_PER_SIDE', close_reason=exit_event['reason'])
+                    closed.append(dict(tr))
                     self.save(tr)
+        return closed
 
     async def reconcile(self, exchange):
         async with self.lock:

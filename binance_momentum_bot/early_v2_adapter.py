@@ -313,6 +313,8 @@ class Integration:
                 self.pilot.event('BOOT_DRY_BLOCKED', {'reason': str(exc)})
                 logging.getLogger(__name__).warning('EarlyV2 auto-dry blocked: %s', exc)
         self.queue = asyncio.Queue(maxsize=20)
+        self.notify_queue = asyncio.Queue(maxsize=100)
+        self._notified_open = set()
         self._last_step_report_ms = 0
         logging.getLogger(__name__).info(
             'EarlyV2 startup: mode=%s profit_mode=%s live_allowed=%s profit_live_allowed=%s fallback_tp_pct=%s Premium=%s',
@@ -367,6 +369,27 @@ class Integration:
                 'signal_id': str(radar_id), 'symbol': symbol, 'score': score,
                 'label': label, 'qualified': bool(qualified), 'min_score': self.pilot.cfg.min_score
             })
+            if qualified and flag('EARLY_V2_NOTIFY'):
+                feature = lambda name, digits=2: (
+                    '—' if selector_features.get(name) is None
+                    else f"{float(selector_features[name]):.{digits}f}"
+                )
+                reason_text = ', '.join(str(x) for x in (reasons or [])[:3]) or 'FAST_EARLY_V2'
+                buy30_value = selector_features.get('buy30')
+                buy30_text = '—' if buy30_value is None else f"%{100*float(buy30_value):.1f}"
+                self._queue_notify(
+                    'selector',
+                    (
+                        f"🧪 EARLY V2 SEÇİLDİ\n"
+                        f"{symbol} | skor {float(score):.1f}/{self.pilot.cfg.min_score:g}\n"
+                        f"Fiyat: {float(m['price']):.8g}\n"
+                        f"30sn {feature('chg30')}% | 60sn {feature('chg60')}% | "
+                        f"Flow30 {feature('flow30')}x | Buy30 {buy30_text}\n"
+                        f"BTC relatif {feature('rel30')}%\n"
+                        f"Neden: {reason_text}\n"
+                        f"Mod: {self.pilot.mode} — {'DRY işlem kuyruğuna alındı' if self.pilot.mode == 'DRY' else 'selector shadow'}"
+                    ),
+                )
             if self.pilot.mode == 'OFF' or not qualified:
                 return
             plan = self.b['estimate_trade_plan'](symbol, m)
@@ -398,9 +421,71 @@ class Integration:
             except Exception as exc:
                 self.pilot.event('STEP_LOCK_TICK_FAILED', {'symbol': symbol, 'reason': type(exc).__name__})
         try:
-            self.pilot.tick(symbol, price, event_ms, received_ms, trade_id)
+            closed = self.pilot.tick(symbol, price, event_ms, received_ms, trade_id) or []
+            if flag('EARLY_V2_NOTIFY'):
+                for tr in closed:
+                    qty = float(tr.get('qty') or 0.0)
+                    vwap = float(tr.get('vwap') or 0.0)
+                    exit_price = float(tr.get('exit_price') or 0.0)
+                    net = float(tr.get('net') or 0.0)
+                    notional = qty * vwap
+                    gross_pct = (100.0 * (exit_price / vwap - 1.0)) if vwap > 0 and exit_price > 0 else None
+                    net_pct = (100.0 * net / notional) if notional > 0 else None
+                    self._queue_notify(
+                        'close',
+                        (
+                            f"🧪 EARLY V2 DRY KAPANDI\n"
+                            f"{tr.get('symbol')} | {tr.get('close_reason') or 'CLOSED'}\n"
+                            f"Giriş {vwap:.8g} → Çıkış {exit_price:.8g}\n"
+                            f"Hareket: {('—' if gross_pct is None else f'{gross_pct:+.3f}%')} | "
+                            f"Net: {('—' if net_pct is None else f'{net_pct:+.3f}%')} "
+                            f"({net:+.4f} USDT)"
+                        ),
+                    )
         except Exception as exc:
             self.pilot.kill('TICK:' + type(exc).__name__)
+
+    def _queue_notify(self, kind, text):
+        if not flag('EARLY_V2_NOTIFY'):
+            return
+        try:
+            self.notify_queue.put_nowait(dict(kind=str(kind), text=str(text)))
+        except asyncio.QueueFull:
+            self.pilot.event('EARLY_V2_NOTIFY_DROPPED', {'kind': str(kind), 'reason': 'QUEUE_FULL'})
+
+    async def _drain_notify(self, session):
+        while True:
+            try:
+                item = self.notify_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                await self.b['telegram_send'](session, item['text'])
+            except Exception as exc:
+                self.pilot.event('EARLY_V2_NOTIFY_FAILED', {
+                    'kind': item.get('kind'), 'reason': type(exc).__name__ + ':' + str(exc)
+                })
+
+    def _notify_open_if_new(self, candidate):
+        if not flag('EARLY_V2_NOTIFY'):
+            return
+        signal_id = str(candidate.get('id'))
+        for tr in self.pilot.active.values():
+            if (str(tr.get('signal_id')) != signal_id or tr.get('status') != 'OPEN'
+                    or tr.get('mode') != 'DRY' or tr.get('id') in self._notified_open):
+                continue
+            self._notified_open.add(tr.get('id'))
+            self._queue_notify(
+                'open',
+                (
+                    f"🧪 EARLY V2 DRY AÇILDI\n"
+                    f"{tr.get('symbol')} | skor {float((tr.get('signal') or {}).get('v2_score') or 0):.1f}\n"
+                    f"Giriş proxy: {float(tr.get('vwap') or 0):.8g}\n"
+                    f"SL: {float(tr.get('stop') or 0):.8g} | "
+                    f"TP referans: {float((tr.get('plan') or {}).get('target') or 0):.8g}\n"
+                    f"Tutar: {float(tr.get('qty') or 0)*float(tr.get('vwap') or 0):.2f} USDT nominal"
+                ),
+            )
 
     def _log_step_lock_report(self):
         if not self.step_lock:
@@ -599,6 +684,8 @@ class Integration:
                 if candidate:
                     await self.pilot.enter(candidate, exchange,
                         premium_busy=lambda: bool(self.b['autotrade_active_by_symbol'].get(candidate['symbol'])))
+                    self._notify_open_if_new(candidate)
+                await self._drain_notify(session)
             except Exception as exc:
                 self.pilot.kill('WORKER:' + type(exc).__name__)
             await asyncio.sleep(1)
@@ -690,6 +777,7 @@ class Integration:
             f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
             f'60dk olgun: {selector["qualified_stats"]["mature60"]}\n'
             f'Boot DRY: {"ON" if (flag("EARLY_V2_BOOT_DRY") or flag("EARLY_V2_AUTO_DRY")) else "OFF"} | '
+            f'Bildirim: {"ON" if flag("EARLY_V2_NOTIFY") else "OFF"} | '
             f'Profit LIVE geçişi: {"bekliyor" if p.profit_live_pending else "yok"}\n')
 
     def markup(self):
