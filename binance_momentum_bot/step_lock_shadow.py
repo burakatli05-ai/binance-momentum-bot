@@ -655,9 +655,12 @@ class StepLockShadow:
                 lo = min(int(row[3]) for row in exits) - 5000
                 hi = max(int(row[3]) for row in exits) + 5000
                 placeholders = ",".join("?" for _ in symbols)
+                stage_cols = {r[1] for r in db.execute("PRAGMA table_info(entry_stage_forward_shadow)").fetchall()}
+                opt = lambda name: name if name in stage_cols else f"NULL AS {name}"
                 stages = db.execute(
                     f"""SELECT id,symbol,episode_id,created_ts_ms,entry_price,mfe_pct,mae_pct,
-                               close60_price,completed_60m,tp1_price,tp1_hit_s,tp2_price,tp2_hit_s
+                               close60_price,completed_60m,{opt('tp1_price')},{opt('tp1_hit_s')},
+                               {opt('tp2_price')},{opt('tp2_hit_s')}
                         FROM entry_stage_forward_shadow
                         WHERE stage='EARLY' AND symbol IN ({placeholders})
                           AND created_ts_ms BETWEEN ? AND ?
@@ -671,19 +674,22 @@ class StepLockShadow:
             if stages:
                 source_keys = [f"stage:{int(st[0])}" for st in stages]
                 ph = ",".join("?" for _ in source_keys)
-                for prow in db.execute(
-                    f"""SELECT source_key,allow_reference_price,fill_price,fill_event_ts_ms
-                        FROM p0_forward WHERE source_key IN ({ph})""",
-                    tuple(source_keys),
-                ).fetchall():
-                    p0_forward[str(prow[0])] = prow
-                for orow in db.execute(
-                    f"""SELECT source_key,horizon_s,mfe_pct,mae_pct,peak_ts_ms,gap,missing_reason
-                        FROM p0_forward_outcomes WHERE source_key IN ({ph})
-                        ORDER BY source_key,horizon_s""",
-                    tuple(source_keys),
-                ).fetchall():
-                    p0_outcomes.setdefault(str(orow[0]), []).append(orow)
+                try:
+                    for prow in db.execute(
+                        f"""SELECT source_key,allow_reference_price,fill_price,fill_event_ts_ms
+                            FROM p0_forward WHERE source_key IN ({ph})""",
+                        tuple(source_keys),
+                    ).fetchall():
+                        p0_forward[str(prow[0])] = prow
+                    for orow in db.execute(
+                        f"""SELECT source_key,horizon_s,mfe_pct,mae_pct,peak_ts_ms,gap,missing_reason
+                            FROM p0_forward_outcomes WHERE source_key IN ({ph})
+                            ORDER BY source_key,horizon_s""",
+                        tuple(source_keys),
+                    ).fetchall():
+                        p0_outcomes.setdefault(str(orow[0]), []).append(orow)
+                except sqlite3.OperationalError:
+                    pass
         by_symbol = {}
         for stage in stages:
             by_symbol.setdefault(stage[1], []).append(stage)
