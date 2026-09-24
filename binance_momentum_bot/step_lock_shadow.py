@@ -317,7 +317,6 @@ class StepLockShadow:
         if flag not in state["flags"]:
             state["flags"].add(flag)
             self._save_open(state)
-        self._tick_poststop(symbol, price, event_ms, received_ms, trade_id)
 
     def arm(self, signal_id, symbol, entry_price, decision_ms, episode_id=None):
         signal_id = str(signal_id)
@@ -444,6 +443,7 @@ class StepLockShadow:
                                 level_pct=new_lock, price=price, return_pct=ret,
                                 details={"previous_lock_pct": old})
             self._save_open(state)
+        self._tick_poststop(symbol, price, event_ms, received_ms, trade_id)
 
     def summary(self, *, notional_usdt=2000.0, recent_limit=10):
         """Return a read-only aggregate snapshot for Telegram/research review."""
