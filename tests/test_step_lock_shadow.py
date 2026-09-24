@@ -315,10 +315,11 @@ class StepLockShadowTests(unittest.TestCase):
         self.assertEqual(hybrid['low_high']['cohort'],1)
         self.assertEqual(hybrid['directional']['cohort'],1)
         self.assertEqual(hybrid['high_low']['cohort'],1)
-        # The first bucket hits -0.20 before +0.20 under low_high/directional,
-        # while high_low reaches +0.20 first and then applies the ladder.
+        # This fixture cleanly hits -0.20 before +0.20, so every intra-bucket
+        # model must take the micro-cut.
         self.assertEqual(hybrid['low_high']['close_reasons']['MICRO_CUT'],1)
-        self.assertIn('STEP_LOCK', hybrid['high_low']['close_reasons'])
+        self.assertEqual(hybrid['directional']['close_reasons']['MICRO_CUT'],1)
+        self.assertEqual(hybrid['high_low']['close_reasons']['MICRO_CUT'],1)
 
 
 
