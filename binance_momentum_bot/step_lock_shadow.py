@@ -382,43 +382,65 @@ class StepLockShadow:
     def runner_review(self, *, exit_level_pct=0.20, recent_limit=100):
         """Read-only review of Step Lock exits against the existing 60m EARLY forward cohort.
 
-        For a signal that actually exited at +0.20, any later EARLY-stage MFE >= +0.50
-        necessarily represents upside observed after that Step Lock exit (assuming clean
-        event coverage), because the live shadow would otherwise have ratcheted to +0.50
-        before allowing a +0.20 exit.
+        Step Lock is armed from the Early adapter immediately after the production
+        EARLY stage row is created, but it historically did not persist episode_id.
+        Therefore matching uses symbol + nearest EARLY-stage created_ts_ms within
+        five seconds of the Step Lock decision, with a one-to-one nearest match.
         """
         exit_level_pct = _finite(exit_level_pct, "exit_level_pct")
         if isinstance(recent_limit, bool) or not isinstance(recent_limit, int) or not 1 <= recent_limit <= 500:
             raise ValueError("recent_limit must be an integer between 1 and 500")
         with closing(self.connect()) as db:
             db.execute("PRAGMA query_only=ON")
-            rows = db.execute(
-                """SELECT s.signal_id,s.symbol,s.episode_id,s.decision_ms,s.exit_event_ms,
-                          s.exit_level_pct,s.observed_exit_pct,s.net_pct,s.peak_pct,s.trough_pct,
-                          s.data_flags,
-                          e.id,e.created_ts_ms,e.entry_price,e.mfe_pct,e.mae_pct,
-                          e.close60_price,e.completed_60m
-                   FROM early_step_lock_shadow_v1 s
-                   LEFT JOIN entry_stage_forward_shadow e
-                     ON e.symbol=s.symbol
-                    AND COALESCE(e.episode_id,0)=COALESCE(s.episode_id,0)
-                    AND e.stage='EARLY'
-                   WHERE s.status='CLOSED'
-                     AND s.close_reason='STEP_LOCK'
-                     AND ABS(COALESCE(s.exit_level_pct,999)-?) < 0.000001
-                   ORDER BY s.decision_ms DESC
+            exits = db.execute(
+                """SELECT signal_id,symbol,episode_id,decision_ms,exit_event_ms,
+                          exit_level_pct,observed_exit_pct,net_pct,peak_pct,trough_pct,data_flags
+                   FROM early_step_lock_shadow_v1
+                   WHERE status='CLOSED'
+                     AND close_reason='STEP_LOCK'
+                     AND ABS(COALESCE(exit_level_pct,999)-?) < 0.000001
+                   ORDER BY decision_ms DESC
                    LIMIT ?""",
                 (float(exit_level_pct), int(recent_limit)),
             ).fetchall()
+            if exits:
+                symbols = sorted({row[1] for row in exits})
+                lo = min(int(row[3]) for row in exits) - 5000
+                hi = max(int(row[3]) for row in exits) + 5000
+                placeholders = ",".join("?" for _ in symbols)
+                stages = db.execute(
+                    f"""SELECT id,symbol,episode_id,created_ts_ms,entry_price,mfe_pct,mae_pct,
+                               close60_price,completed_60m
+                        FROM entry_stage_forward_shadow
+                        WHERE stage='EARLY' AND symbol IN ({placeholders})
+                          AND created_ts_ms BETWEEN ? AND ?
+                        ORDER BY created_ts_ms""",
+                    tuple(symbols) + (lo, hi),
+                ).fetchall()
+            else:
+                stages = []
+        by_symbol = {}
+        for stage in stages:
+            by_symbol.setdefault(stage[1], []).append(stage)
+        used_stage_ids = set()
         items = []
         thresholds = (0.50,0.75,1.00,1.25,1.50,2.00,3.00,5.00)
         reached = {level: 0 for level in thresholds}
         clean_reached = {level: 0 for level in thresholds}
         matched = mature = clean = 0
-        for row in rows:
+        for row in exits:
             (signal_id,symbol,episode_id,decision_ms,exit_event_ms,exit_level,observed_exit,
-             net_pct,step_peak,step_trough,flags_json,stage_id,stage_created_ms,stage_entry,
-             stage_mfe,stage_mae,close60_price,completed_60m) = row
+             net_pct,step_peak,step_trough,flags_json) = row
+            candidates = [
+                st for st in by_symbol.get(symbol, ())
+                if st[0] not in used_stage_ids and abs(int(st[3]) - int(decision_ms)) <= 5000
+            ]
+            stage = min(candidates, key=lambda st: abs(int(st[3]) - int(decision_ms))) if candidates else None
+            if stage:
+                used_stage_ids.add(stage[0])
+                stage_id,_,stage_episode,stage_created_ms,stage_entry,stage_mfe,stage_mae,close60_price,completed_60m = stage
+            else:
+                stage_id=stage_episode=stage_created_ms=stage_entry=stage_mfe=stage_mae=close60_price=completed_60m=None
             try:
                 flags = json.loads(flags_json or "[]")
             except Exception:
@@ -444,7 +466,9 @@ class StepLockShadow:
                 net_pct=None if net_pct is None else float(net_pct),
                 step_peak_pct=float(step_peak), step_trough_pct=float(step_trough),
                 data_flags=flags, stage_matched=has_stage,
+                stage_episode_id=stage_episode,
                 stage_created_ms=None if stage_created_ms is None else int(stage_created_ms),
+                stage_time_delta_ms=None if stage_created_ms is None else int(stage_created_ms)-int(decision_ms),
                 stage_entry_price=None if stage_entry is None else float(stage_entry),
                 stage_mfe_pct=mfe, stage_mae_pct=None if stage_mae is None else float(stage_mae),
                 close60_price=None if close60_price is None else float(close60_price),
