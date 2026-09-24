@@ -1733,6 +1733,34 @@ class StepLockShadow:
         baseline_policy=dict(name="lag_0",kind="lag",lag=0)
         baseline_train=simulate_set(train_keys,baseline_policy,no_rule)
         baseline_test=simulate_set(test_keys,baseline_policy,no_rule)
+
+        profit_policy_results=[]
+        for policy in profit_policies:
+            tr=simulate_set(train_keys,policy,no_rule)
+            te=simulate_set(test_keys,policy,no_rule)
+            profit_policy_results.append(dict(
+                policy=policy,train=tr,test=te,
+                train_delta_vs_baseline_usdt=tr["net_usdt"]-baseline_train["net_usdt"],
+                test_delta_vs_baseline_usdt=te["net_usdt"]-baseline_test["net_usdt"],
+            ))
+        profit_policy_results.sort(key=lambda x:x["train"]["net_usdt"],reverse=True)
+
+        baseline_loss_rule_results=[]
+        for enriched in top_rules:
+            rule=enriched["rule"]
+            tr=simulate_set(train_keys,baseline_policy,rule)
+            te=simulate_set(test_keys,baseline_policy,rule)
+            baseline_loss_rule_results.append(dict(
+                loss_rule=rule,train=tr,test=te,
+                train_delta_vs_baseline_usdt=tr["net_usdt"]-baseline_train["net_usdt"],
+                test_delta_vs_baseline_usdt=te["net_usdt"]-baseline_test["net_usdt"],
+                train_classification=enriched["train"],
+                test_classification=enriched["test"],
+            ))
+        baseline_loss_rule_results.sort(
+            key=lambda x:x["train_delta_vs_baseline_usdt"], reverse=True
+        )
+
         best=combos[0] if combos else dict(policy=baseline_policy,loss_rule=no_rule,train=baseline_train)
         best_test=simulate_set(test_keys,best["policy"],best["loss_rule"])
         best_profit_only=max(
@@ -1759,6 +1787,8 @@ class StepLockShadow:
             candidate_loss_rules=top_rules,
             profitability=dict(
                 baseline=dict(policy=baseline_policy,train=baseline_train,test=baseline_test),
+                profit_policy_leaderboard=profit_policy_results,
+                baseline_plus_loss_rule_leaderboard=baseline_loss_rule_results,
                 best_profit_only=dict(policy=best_profit_only["policy"],train=best_profit_only["train"],
                                       test=best_profit_only_test),
                 best_combined=dict(policy=best["policy"],loss_rule=best["loss_rule"],
