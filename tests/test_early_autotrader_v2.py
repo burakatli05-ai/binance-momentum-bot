@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'binance_momentum_b
 from execution_v2 import Blocked, Uncertain, capped_plan, marketable_price, reconcile_fills, submit_ioc
 from early_autotrader_v2 import Pilot, Config
 from early_v2_adapter import Integration, Binance
+from step_lock_shadow import StepLockShadow
 
 FILTERS = dict(tick=.01, step=.001, min_qty=.001, max_qty=1000, min_notional=1)
 SIGNAL = dict(id=7, symbol='TESTUSDT', price=100., stop=99., target=102., entry_high=100.1,
@@ -246,6 +247,35 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
         adapter=Integration.__new__(Integration);adapter.pilot=self.p
         adapter.b={'_at_admin_allowed':lambda *a,**k:False,'telegram_send':AsyncMock()}
         await adapter.command(None,'/earlyv2 dry','c','u');self.assertEqual(self.p.mode,'OFF')
+
+
+    async def test_steplock_command_is_admin_only_read_only_and_reports_shadow(self):
+        adapter=Integration.__new__(Integration);adapter.pilot=self.p
+        adapter.step_lock=StepLockShadow(self.connect)
+        adapter.step_lock.arm('sl1','TESTUSDT',100.0,self.now)
+        adapter.step_lock.tick('TESTUSDT',100.21,self.now+100,self.now+100,1)
+        adapter.step_lock.tick('TESTUSDT',100.19,self.now+200,self.now+200,2)
+        sender=AsyncMock()
+        adapter.b={'_at_admin_allowed':lambda *a,**k:True,'telegram_send':sender}
+        mode=self.p.mode; halted=self.p.halted
+        handled=await adapter.command(None,'/steplock recent','c','u')
+        self.assertTrue(handled)
+        self.assertEqual((self.p.mode,self.p.halted),(mode,halted))
+        sender.assert_awaited_once()
+        message=sender.await_args.args[1]
+        self.assertIn('STEP LOCK V1',message)
+        self.assertIn('200×10',message)
+        self.assertIn('TESTUSDT',message)
+
+    async def test_steplock_unauthorized_returns_without_query_mutation(self):
+        adapter=Integration.__new__(Integration);adapter.pilot=self.p
+        adapter.step_lock=StepLockShadow(self.connect)
+        sender=AsyncMock()
+        adapter.b={'_at_admin_allowed':lambda *a,**k:False,'telegram_send':sender}
+        handled=await adapter.command(None,'/steplock','c','u')
+        self.assertTrue(handled)
+        sender.assert_awaited_once()
+        self.assertIn('Yetkili',sender.await_args.args[1])
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
