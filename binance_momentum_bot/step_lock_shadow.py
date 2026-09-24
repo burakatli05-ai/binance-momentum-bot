@@ -1666,37 +1666,49 @@ class StepLockShadow:
             op,hi,lo,cl=b["open_pct"],b["high_pct"],b["low_pct"],b["close_pct"]
             return (op,lo,hi,cl) if cl>=op else (op,hi,lo,cl)
 
-        def simulate_one(p,policy,rule):
-            state=dict(closed=False,gross=None,reason=None,stop=None,peak=-999.0)
-            trigger_ms=(p["decision_ms"]+rule["horizon_ms"]) if rule.get("horizon_ms") is not None else None
-            trigger_done=False
-            for b in p["buckets"]:
-                if state["closed"]:
-                    break
-                if trigger_ms is not None and not trigger_done and b["bucket_ms"]>=trigger_ms:
-                    trigger_done=True
-                    if rule_trigger(p,rule):
-                        snap=p["snapshots"].get(rule["horizon_ms"])
-                        gross=snap.get("price_ret") if snap else None
-                        if gross is None:
-                            gross=b["open_pct"]
-                        state.update(closed=True,gross=float(gross),reason="FAILURE_FILTER")
-                        break
-                for ret in points_for_bucket(b):
-                    apply_profit_state(state,ret,policy)
+        # Precompute each profit policy once per path. Combined loss-filter
+        # candidates can then replace the precomputed outcome at their trigger
+        # time instead of replaying the entire 60m path for every combination.
+        policy_cache={}
+        for policy in profit_policies:
+            by_key={}
+            for p in usable:
+                state=dict(closed=False,gross=None,reason=None,stop=None,peak=-999.0,close_ms=None)
+                for b in p["buckets"]:
                     if state["closed"]:
                         break
-            if not state["closed"]:
-                last=p["buckets"][-1]["close_pct"]
-                state.update(closed=True,gross=float(last),reason="MARK_60M")
-            net=float(state["gross"])-self.cost_pct
-            return net,state["reason"]
+                    for ret in points_for_bucket(b):
+                        was=state["closed"]
+                        apply_profit_state(state,ret,policy)
+                        if not was and state["closed"]:
+                            state["close_ms"]=int(b["bucket_ms"])
+                            break
+                if not state["closed"]:
+                    last=p["buckets"][-1]["close_pct"]
+                    state.update(closed=True,gross=float(last),reason="MARK_60M",
+                                 close_ms=int(p["buckets"][-1]["bucket_ms"]))
+                by_key[p["key"]]=dict(
+                    net=float(state["gross"])-self.cost_pct,
+                    reason=state["reason"],
+                    close_ms=int(state["close_ms"]),
+                )
+            policy_cache[policy["name"]]=by_key
 
         def simulate_set(keys,policy,rule):
             cohort=[p for p in usable if p["key"] in keys]
+            cache=policy_cache[policy["name"]]
             net_sum=0.0;wins=losses=0;reasons={}
             for p in cohort:
-                net,reason=simulate_one(p,policy,rule)
+                base=cache[p["key"]]
+                net=float(base["net"]);reason=base["reason"]
+                if rule.get("horizon_ms") is not None and rule_trigger(p,rule):
+                    trigger_ms=int(p["decision_ms"]+rule["horizon_ms"])
+                    if trigger_ms <= int(base["close_ms"]):
+                        snap=p["snapshots"].get(rule["horizon_ms"])
+                        gross=snap.get("price_ret") if snap else None
+                        if gross is not None:
+                            net=float(gross)-self.cost_pct
+                            reason="FAILURE_FILTER"
                 net_sum+=net
                 if net>EPS:wins+=1
                 elif net<-EPS:losses+=1
