@@ -17,6 +17,7 @@ All percentages are unlevered price-return percentage points.
 from contextlib import closing
 import json
 import math
+import sqlite3
 
 
 VERSION = "step-lock-v1-20260923"
@@ -802,6 +803,288 @@ class StepLockShadow:
             mature_60m=mature, clean_signals=clean, reached_after_exit_proxy=reached,
             clean_reached_after_exit_proxy=clean_reached, items=items,
         )
+
+
+    def historical_profit_review(self, *, notional_usdt=2000.0):
+        """Read-only profitability study for public EARLY cohorts.
+
+        Full-history rows provide exact 60m extrema but not arbitrary +/-0.20
+        first-touch order. Quality-shadow price buckets provide 1s order for the
+        first 15m and 60s buckets afterwards, so arbitrary micro-cut rules are
+        evaluated separately on that later exact-ish cohort.
+        """
+        notional_usdt = _finite(notional_usdt, "notional_usdt", True)
+        cuts = (0.10, 0.20, 0.30, 0.50, 1.00)
+        future_levels = (0.20, 0.50, 1.00, 2.00, 3.00, 5.00)
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            stage_rows = db.execute(
+                """SELECT id,symbol,created_ts_ms,entry_price,mfe_pct,mae_pct,close60_price,
+                          current_outcome,fee_adjusted_current_pct
+                   FROM entry_stage_forward_shadow
+                   WHERE stage='EARLY' AND completed_60m=1
+                   ORDER BY created_ts_ms"""
+            ).fetchall() if "entry_stage_forward_shadow" in tables else []
+            stage_all = db.execute(
+                """SELECT COUNT(*),MIN(created_ts_ms),MAX(created_ts_ms)
+                   FROM entry_stage_forward_shadow WHERE stage='EARLY'"""
+            ).fetchone() if "entry_stage_forward_shadow" in tables else (0,None,None)
+            step_rows = db.execute(
+                """SELECT signal_id,net_pct,data_flags FROM early_step_lock_shadow_v1
+                   WHERE status='CLOSED' AND net_pct IS NOT NULL"""
+            ).fetchall() if "early_step_lock_shadow_v1" in tables else []
+
+            quality_meta = []
+            gap_keys = set()
+            price_rows = []
+            if {"quality_shadow_cohorts","quality_shadow_prices"}.issubset(tables):
+                quality_meta = db.execute(
+                    """SELECT key,symbol,anchor_price,decision_ms,recovery_gap
+                       FROM quality_shadow_cohorts WHERE kind='EARLY'"""
+                ).fetchall()
+                if "quality_shadow_gaps" in tables:
+                    gap_keys = {str(r[0]) for r in db.execute(
+                        """SELECT DISTINCT key FROM quality_shadow_gaps
+                           WHERE key LIKE 'EARLY:%'"""
+                    ).fetchall()}
+                # Stream only the first 60m for public EARLY cohorts.
+                price_rows = db.execute(
+                    """SELECT c.key,c.anchor_price,c.decision_ms,c.recovery_gap,
+                              p.bucket_ms,p.width_ms,p.payload
+                       FROM quality_shadow_cohorts c
+                       JOIN quality_shadow_prices p ON p.key=c.key
+                       WHERE c.kind='EARLY'
+                         AND p.bucket_ms>=c.decision_ms
+                         AND p.bucket_ms<c.decision_ms+3600000
+                       ORDER BY c.key,p.bucket_ms"""
+                )
+
+            hist = {d: dict(up_no_down=0, down_no_up=0, both=0, neither=0,
+                            down_no_up_hits_minus2=0,
+                            both_future={str(x):0 for x in future_levels})
+                    for d in cuts}
+            mfe_reach = {str(x):0 for x in future_levels}
+            mae_reach = {str(-x):0 for x in (0.20,0.50,1.00,2.00,3.00)}
+            close_returns = []
+            for row in stage_rows:
+                mfe = float(row[4] or 0.0)
+                mae = float(row[5] or 0.0)
+                if row[6] is not None and row[3]:
+                    close_returns.append(100.0 * (float(row[6]) / float(row[3]) - 1.0))
+                for level in future_levels:
+                    if mfe + EPS >= level:
+                        mfe_reach[str(level)] += 1
+                for level in (0.20,0.50,1.00,2.00,3.00):
+                    if mae <= -level + EPS:
+                        mae_reach[str(-level)] += 1
+                for d in cuts:
+                    up = mfe + EPS >= 0.20
+                    down = mae <= -d + EPS
+                    h = hist[d]
+                    if up and not down:
+                        h["up_no_down"] += 1
+                    elif down and not up:
+                        h["down_no_up"] += 1
+                        if mae <= -2.0 + EPS:
+                            h["down_no_up_hits_minus2"] += 1
+                    elif up and down:
+                        h["both"] += 1
+                        for level in future_levels:
+                            if mfe + EPS >= level:
+                                h["both_future"][str(level)] += 1
+                    else:
+                        h["neither"] += 1
+
+            qmeta = {
+                str(key): dict(symbol=symbol, anchor=float(anchor), decision_ms=int(decision),
+                               clean=(not int(recovery or 0) and str(key) not in gap_keys))
+                for key,symbol,anchor,decision,recovery in quality_meta
+                if anchor is not None and float(anchor) > 0
+            }
+            qstate = {}
+            def fresh_state():
+                return {
+                    "mfe": 0.0, "mae": 0.0,
+                    "cuts": {d: {"first": None, "first_bucket_ms": None,
+                                 "post_down_mfe": None} for d in cuts}
+                }
+            current_key = None
+            state = None
+            for key,anchor,decision,recovery,bucket_ms,width_ms,payload_json in price_rows:
+                key = str(key)
+                if key != current_key:
+                    if current_key is not None and state is not None:
+                        qstate[current_key] = state
+                    current_key = key
+                    state = fresh_state()
+                try:
+                    payload = json.loads(payload_json or "{}")
+                    high = float(payload.get("high"))
+                    low = float(payload.get("low"))
+                except Exception:
+                    continue
+                anchor = float(anchor)
+                hi = 100.0 * (high / anchor - 1.0)
+                lo = 100.0 * (low / anchor - 1.0)
+                state["mfe"] = max(state["mfe"], hi)
+                state["mae"] = min(state["mae"], lo)
+                for d in cuts:
+                    cs = state["cuts"][d]
+                    if cs["first"] is None:
+                        hit_up = hi + EPS >= 0.20
+                        hit_down = lo <= -d + EPS
+                        if hit_up and hit_down:
+                            cs["first"] = "AMBIGUOUS_SAME_BUCKET"
+                            cs["first_bucket_ms"] = int(bucket_ms)
+                        elif hit_up:
+                            cs["first"] = "UP_020"
+                            cs["first_bucket_ms"] = int(bucket_ms)
+                        elif hit_down:
+                            cs["first"] = "DOWN_CUT"
+                            cs["first_bucket_ms"] = int(bucket_ms)
+                            cs["post_down_mfe"] = hi
+                    elif cs["first"] == "DOWN_CUT":
+                        cs["post_down_mfe"] = max(float(cs["post_down_mfe"] or -999.0), hi)
+            if current_key is not None and state is not None:
+                qstate[current_key] = state
+
+        exact = {}
+        for d in cuts:
+            out = dict(total=0,clean_total=0,up_first=0,down_first=0,ambiguous=0,none=0,
+                       clean_up_first=0,clean_down_first=0,clean_ambiguous=0,clean_none=0,
+                       down_first_later={str(x):0 for x in future_levels},
+                       clean_down_first_later={str(x):0 for x in future_levels})
+            for key,meta in qmeta.items():
+                st = qstate.get(key)
+                if not st:
+                    continue
+                out["total"] += 1
+                clean = bool(meta["clean"])
+                if clean:
+                    out["clean_total"] += 1
+                cs = st["cuts"][d]
+                first = cs["first"]
+                if first == "UP_020":
+                    out["up_first"] += 1
+                    if clean: out["clean_up_first"] += 1
+                elif first == "DOWN_CUT":
+                    out["down_first"] += 1
+                    if clean: out["clean_down_first"] += 1
+                    later = float(cs["post_down_mfe"] if cs["post_down_mfe"] is not None else -999.0)
+                    for level in future_levels:
+                        if later + EPS >= level:
+                            out["down_first_later"][str(level)] += 1
+                            if clean:
+                                out["clean_down_first_later"][str(level)] += 1
+                elif first == "AMBIGUOUS_SAME_BUCKET":
+                    out["ambiguous"] += 1
+                    if clean: out["clean_ambiguous"] += 1
+                else:
+                    out["none"] += 1
+                    if clean: out["clean_none"] += 1
+            true_bad = out["down_first"] - out["down_first_later"]["0.2"]
+            clean_true_bad = out["clean_down_first"] - out["clean_down_first_later"]["0.2"]
+            out["down_first_no_later_020"] = true_bad
+            out["clean_down_first_no_later_020"] = clean_true_bad
+            out["cut_precision_no_later_020"] = (true_bad / out["down_first"] if out["down_first"] else None)
+            out["clean_cut_precision_no_later_020"] = (
+                clean_true_bad / out["clean_down_first"] if out["clean_down_first"] else None)
+            exact[str(d)] = out
+
+        # Counterfactual on the actual Step Lock cohort: before +0.20, replace -2
+        # with a micro-cut. Same round-trip cost is applied to both paths.
+        step_cf = {}
+        step_by_key = {}
+        for signal_id,net_pct,flags_json in step_rows:
+            try:
+                flags = json.loads(flags_json or "[]")
+            except Exception:
+                flags = ["INVALID_DATA_FLAGS_JSON"]
+            step_by_key["EARLY:"+str(signal_id)] = (float(net_pct), not flags)
+        for d in cuts:
+            base_sum = prop_sum = clean_base = clean_prop = 0.0
+            used = cut_count = clean_used = clean_cut = ambiguous = 0
+            baseline_positive_cut = 0
+            for key,(base_net,step_clean) in step_by_key.items():
+                st = qstate.get(key)
+                meta = qmeta.get(key)
+                if not st or not meta:
+                    continue
+                first = st["cuts"][d]["first"]
+                if first == "AMBIGUOUS_SAME_BUCKET":
+                    ambiguous += 1
+                    continue
+                if first not in ("UP_020","DOWN_CUT"):
+                    continue
+                used += 1
+                base_sum += base_net
+                proposed = base_net
+                if first == "DOWN_CUT":
+                    cut_count += 1
+                    proposed = -float(d) - self.cost_pct
+                    if base_net > 0:
+                        baseline_positive_cut += 1
+                prop_sum += proposed
+                if step_clean and meta["clean"]:
+                    clean_used += 1
+                    clean_base += base_net
+                    if first == "DOWN_CUT":
+                        clean_cut += 1
+                    clean_prop += proposed
+            step_cf[str(d)] = dict(
+                matched_unambiguous=used, cut_count=cut_count, ambiguous=ambiguous,
+                baseline_positive_that_would_be_cut=baseline_positive_cut,
+                baseline_net_pct_sum=base_sum, proposed_net_pct_sum=prop_sum,
+                delta_net_pct_sum=prop_sum-base_sum,
+                delta_usdt=(prop_sum-base_sum)*notional_usdt/100.0,
+                clean_matched_unambiguous=clean_used, clean_cut_count=clean_cut,
+                clean_delta_net_pct_sum=clean_prop-clean_base,
+                clean_delta_usdt=(clean_prop-clean_base)*notional_usdt/100.0,
+                assumption="ideal threshold fill; same %.2fpp round-trip cost" % self.cost_pct,
+            )
+
+        full = {}
+        total_hist = len(stage_rows)
+        for d in cuts:
+            h = hist[d]
+            definite_saves = h["down_no_up_hits_minus2"]
+            full[str(d)] = dict(
+                **h,
+                total_completed_60m=total_hist,
+                definite_minus2_to_microcut_saves=definite_saves,
+                ideal_saving_per_saved_trade_pct=2.0-float(d),
+                ideal_saving_per_saved_trade_usdt=(2.0-float(d))*notional_usdt/100.0,
+                ideal_total_saving_usdt_if_all_definite=definite_saves*(2.0-float(d))*notional_usdt/100.0,
+                caveat="MFE/MAE know both extrema but not order when both thresholds were touched.",
+            )
+
+        return dict(
+            version="early-microcut-profit-review-v1",
+            notional_usdt=notional_usdt,
+            full_history=dict(
+                early_rows_all=int(stage_all[0] or 0),
+                completed_60m=total_hist,
+                first_created_ms=stage_all[1], last_created_ms=stage_all[2],
+                mfe_reach=mfe_reach, mae_reach=mae_reach,
+                microcut_bounds=full,
+            ),
+            quality_exactish=dict(
+                cohort_count=len(qmeta),
+                price_path_count=len(qstate),
+                resolution="1s buckets first 15m; 60s buckets afterwards; same-bucket dual touch is ambiguous",
+                microcut_first_touch=exact,
+            ),
+            current_step_lock_counterfactual=step_cf,
+            interpretation=dict(
+                all_history="Use for broad bounds and definite no-+0.20 losers; arbitrary +/-0.20 order is unknown when both occurred.",
+                exactish="Use quality-shadow buckets for first-touch ordering; exclude ambiguous same-bucket rows.",
+                counterfactual="Uses actual Step Lock realized net for survivors and idealized micro-cut threshold fills for early cuts.",
+            ),
+        )
+
 
     def get(self, signal_id):
         with closing(self.connect()) as db:
