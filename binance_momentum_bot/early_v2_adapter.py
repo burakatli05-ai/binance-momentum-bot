@@ -324,6 +324,11 @@ class Integration:
                 name="early-combined-optimizer",
                 daemon=True,
             ).start()
+            threading.Thread(
+                target=self._write_daily_candidate_profit_review,
+                name="early-daily-candidate-review",
+                daemon=True,
+            ).start()
 
     def arm(self, radar_id, symbol, m, base_score):
         if self.step_lock:
@@ -497,6 +502,39 @@ class Integration:
             report["cohort"]["train"],
             report["cohort"]["test"],
             report["profitability"]["test_delta_vs_baseline_usdt"],
+        )
+        return report
+
+    def _write_daily_candidate_profit_review(self):
+        if not self.step_lock:
+            return None
+        trt = timezone(timedelta(hours=3))
+        now = datetime.now(trt)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        report = self.step_lock.daily_candidate_profit_review(
+            start_ms=int(start.timestamp() * 1000),
+            end_ms=int(now.timestamp() * 1000),
+            notional_usdt=2000.0,
+        )
+        report["local_date"] = start.date().isoformat()
+        report["generated_local"] = now.isoformat()
+        path = os.getenv(
+            "EARLY_DAILY_CANDIDATE_REVIEW_PATH",
+            "/data/daily_candidate_profit_review.json",
+        ).strip()
+        if path:
+            target = Path(path)
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(
+                json.dumps(report, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target)
+        logging.getLogger(__name__).info(
+            "EARLY_DAILY_CANDIDATE_REVIEW date=%s eligible=%s candidate_usdt=%s baseline_usdt=%s",
+            report["local_date"], report["eligible"],
+            report["all_to_now"]["candidate"]["net_usdt"],
+            report["all_to_now"]["baseline"]["net_usdt"],
         )
         return report
 
