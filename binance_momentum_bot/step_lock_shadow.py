@@ -905,11 +905,57 @@ class StepLockShadow:
                 if anchor is not None and float(anchor) > 0
             }
             qstate = {}
+            path_models = ("low_high", "directional", "high_low")
+            sim_policies = {"baseline_minus2": 2.0, "hybrid_minus020": 0.20}
+
+            def fresh_sim():
+                return dict(status="OPEN", current_lock_pct=None, gross_pct=None,
+                            reason=None, last_ret_pct=0.0)
+
+            def advance_sim(sim, ret, initial_cut):
+                if sim["status"] != "OPEN":
+                    return
+                sim["last_ret_pct"] = float(ret)
+                if ret + EPS >= self.final_tp_pct:
+                    sim.update(status="CLOSED", gross_pct=self.final_tp_pct, reason="FINAL_TP")
+                    return
+                lock = sim["current_lock_pct"]
+                if lock is not None:
+                    if ret <= lock + EPS:
+                        sim.update(status="CLOSED", gross_pct=float(lock), reason="STEP_LOCK")
+                        return
+                elif ret <= -float(initial_cut) + EPS:
+                    sim.update(status="CLOSED", gross_pct=-float(initial_cut),
+                               reason=("MICRO_CUT" if float(initial_cut) < 1.999 else "INITIAL_SL"))
+                    return
+                eligible = [level for level in STEP_LEVELS if ret + EPS >= level]
+                if eligible:
+                    new_lock = max(eligible)
+                    if lock is None or new_lock > lock + EPS:
+                        sim["current_lock_pct"] = float(new_lock)
+
+            def bucket_points(payload, anchor, model):
+                op = 100.0 * (float(payload.get("open")) / anchor - 1.0)
+                hi = 100.0 * (float(payload.get("high")) / anchor - 1.0)
+                lo = 100.0 * (float(payload.get("low")) / anchor - 1.0)
+                cl = 100.0 * (float(payload.get("close")) / anchor - 1.0)
+                if model == "low_high":
+                    return (op, lo, hi, cl)
+                if model == "high_low":
+                    return (op, hi, lo, cl)
+                # Standard OHLC path heuristic: bullish bucket assumes low then high;
+                # bearish bucket assumes high then low.
+                return (op, lo, hi, cl) if cl >= op else (op, hi, lo, cl)
+
             def fresh_state():
                 return {
-                    "mfe": 0.0, "mae": 0.0,
+                    "mfe": 0.0, "mae": 0.0, "last_close_ret": 0.0,
                     "cuts": {d: {"first": None, "first_bucket_ms": None,
-                                 "post_down_mfe": None} for d in cuts}
+                                 "post_down_mfe": None} for d in cuts},
+                    "sims": {
+                        policy: {model: fresh_sim() for model in path_models}
+                        for policy in sim_policies
+                    },
                 }
             current_key = None
             state = None
@@ -924,13 +970,22 @@ class StepLockShadow:
                     payload = json.loads(payload_json or "{}")
                     high = float(payload.get("high"))
                     low = float(payload.get("low"))
+                    close_price = float(payload.get("close"))
+                    open_price = float(payload.get("open"))
+                    if min(high, low, close_price, open_price) <= 0:
+                        continue
                 except Exception:
                     continue
                 anchor = float(anchor)
                 hi = 100.0 * (high / anchor - 1.0)
                 lo = 100.0 * (low / anchor - 1.0)
+                state["last_close_ret"] = 100.0 * (close_price / anchor - 1.0)
                 state["mfe"] = max(state["mfe"], hi)
                 state["mae"] = min(state["mae"], lo)
+                for policy, initial_cut in sim_policies.items():
+                    for model in path_models:
+                        for ret in bucket_points(payload, anchor, model):
+                            advance_sim(state["sims"][policy][model], ret, initial_cut)
                 for d in cuts:
                     cs = state["cuts"][d]
                     if cs["first"] is None:
@@ -950,6 +1005,48 @@ class StepLockShadow:
                         cs["post_down_mfe"] = max(float(cs["post_down_mfe"] or -999.0), hi)
             if current_key is not None and state is not None:
                 qstate[current_key] = state
+
+        hybrid_scenarios = {}
+        for policy in sim_policies:
+            policy_out = {}
+            for model in path_models:
+                net_sum = 0.0
+                gross_sum = 0.0
+                wins = losses = flat = 0
+                reasons = {}
+                resolved = 0
+                marked_60m = 0
+                for key, st in qstate.items():
+                    sim = st["sims"][policy][model]
+                    if sim["status"] == "CLOSED":
+                        gross = float(sim["gross_pct"])
+                        reason = str(sim["reason"])
+                    else:
+                        gross = float(st["last_close_ret"])
+                        reason = "MARK_60M"
+                        marked_60m += 1
+                    net = gross - self.cost_pct
+                    gross_sum += gross
+                    net_sum += net
+                    resolved += 1
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                    if net > EPS:
+                        wins += 1
+                    elif net < -EPS:
+                        losses += 1
+                    else:
+                        flat += 1
+                policy_out[model] = dict(
+                    cohort=resolved, gross_pct_sum=gross_sum, net_pct_sum=net_sum,
+                    net_usdt=net_sum * notional_usdt / 100.0,
+                    avg_net_pct=(net_sum / resolved if resolved else None),
+                    avg_net_usdt=(net_sum * notional_usdt / 100.0 / resolved if resolved else None),
+                    wins=wins, losses=losses, flat=flat,
+                    win_rate=(wins / resolved if resolved else None),
+                    marked_at_60m=marked_60m, close_reasons=reasons,
+                    cost_pct=self.cost_pct,
+                )
+            hybrid_scenarios[policy] = policy_out
 
         exact = {}
         for d in cuts:
@@ -1076,6 +1173,14 @@ class StepLockShadow:
                 price_path_count=len(qstate),
                 resolution="1s buckets first 15m; 60s buckets afterwards; same-bucket dual touch is ambiguous",
                 microcut_first_touch=exact,
+                hybrid_step_ladder_60m=hybrid_scenarios,
+                hybrid_method=(
+                    "Three intra-bucket path assumptions are reported: low_high (pessimistic), "
+                    "directional OHLC heuristic, high_low (optimistic). Policy hybrid_minus020 exits "
+                    "at -0.20 before +0.20; otherwise applies Step Lock levels +0.20,+0.50,+0.75...+5. "
+                    "Any position still open at 60m is marked to the last observed close; all outcomes "
+                    "subtract the same 0.14pp round-trip cost."
+                ),
             ),
             current_step_lock_counterfactual=step_cf,
             interpretation=dict(
