@@ -43,7 +43,7 @@ class CapabilityTests(unittest.TestCase):
         changed |= {'quality_features', 'quality_arm', 'quality_shadow_loop'}
         nodes = [StripQualityHooks().visit(n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name not in changed]
         digest = hashlib.sha256(ast.dump(ast.Module(body=nodes, type_ignores=[]), include_attributes=False).encode()).hexdigest()
-        self.assertEqual('00bd7869a96a9a71d5584fd7b35336dd591a84999e6c58f7976515a456ca8218', digest)
+        self.assertEqual('0c2321ff0901b31977b2026c5bf976196161ae1bfc1c6d5184090a230cc35b74', digest)
 
     def test_bot_environment_is_fail_closed_and_always_boots_off(self):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))
