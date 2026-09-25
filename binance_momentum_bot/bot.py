@@ -7232,7 +7232,17 @@ async def _at_get_account_config(session, *, priority: bool = False, force: bool
     return cfg
 
 
-async def _at_account_snapshot(session, *, priority: bool = True):
+async def _at_account_snapshot(session, *, priority: bool = True, positions_only: bool = False):
+    if positions_only:
+        # Preserve the historical snapshot interface for reconciliation/tests while
+        # avoiding the expensive accountConfig+balance pair when only positions are needed.
+        cfg = dict(autotrade_account_config_cache.get("value") or {})
+        usdt = {
+            "balance": autotrade_account_cache.get("wallet_balance"),
+            "availableBalance": autotrade_account_cache.get("available_balance"),
+        }
+        positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=priority)
+        return cfg, usdt, positions
     cfg = await _at_get_account_config(session, priority=priority)
     bal = await binance_signed_request(session, "GET", "/fapi/v3/balance", priority=priority)
     usdt = next((x for x in bal if x.get("asset") == "USDT"), None) or {}
@@ -7687,7 +7697,7 @@ async def autotrade_reconcile_loop(session):
                 # Reconcile only needs positionRisk every tick. accountConfig is cached
                 # separately and balance is informational, so polling all three every
                 # two seconds wastes a large part of the shared IP request-weight budget.
-                positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk")
+                _, _, positions = await _at_account_snapshot(session, priority=False, positions_only=True)
                 if time.time()-float(autotrade_account_cache.get("updated_ts") or 0) >= 30:
                     bal_live = await binance_signed_request(session, "GET", "/fapi/v3/balance")
                     usdt_live = next((x for x in bal_live if x.get("asset") == "USDT"), None) or {}
@@ -7764,7 +7774,7 @@ async def autotrade_reconcile_loop(session):
                                 continue
                             # Re-read account state after cancellation so a concurrent fill can
                             # never make the fallback order over-close or flip the position.
-                            fresh_positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=True)
+                            _, _, fresh_positions = await _at_account_snapshot(session, priority=True, positions_only=True)
                             remaining=0.0
                             for fp in fresh_positions:
                                 if str(fp.get("symbol") or "")!=sym:
@@ -7821,7 +7831,7 @@ async def autotrade_reconcile_loop(session):
                                         _at_log_event("TP2_LIMIT_CANCEL_UNCERTAIN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
                                                       detail=f"order_id={actual_order_id}; legacy=1; fallback_deferred=1")
                                         continue
-                                    fresh_positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=True)
+                                    _, _, fresh_positions = await _at_account_snapshot(session, priority=True, positions_only=True)
                                     remaining=0.0
                                     for fp in fresh_positions:
                                         if str(fp.get("symbol") or "")!=sym:
