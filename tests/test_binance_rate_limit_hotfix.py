@@ -26,8 +26,8 @@ def test_account_config_is_cached_instead_of_polled_each_reconcile_tick():
     reconcile = block('async def autotrade_reconcile_loop', 'def _at_panel_text')
     assert 'BINANCE_ACCOUNT_CONFIG_CACHE_SECONDS' in snapshot
     assert '"/fapi/v1/accountConfig"' in snapshot
-    assert '_at_account_snapshot(session)' not in reconcile
-    assert 'positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk")' in reconcile
+    assert 'positions_only=True' in reconcile
+    assert 'accountConfig+balance pair' in snapshot
 
 
 def test_reconcile_balance_poll_is_throttled_and_execution_uses_priority_lane():
@@ -44,5 +44,5 @@ def test_reconcile_balance_poll_is_throttled_and_execution_uses_priority_lane():
 
 def test_tp_fallback_race_check_does_not_fetch_full_account_snapshot():
     reconcile = block('async def autotrade_reconcile_loop', 'def _at_panel_text')
-    assert reconcile.count('"/fapi/v3/positionRisk", priority=True') == 2
-    assert 'fresh_positions = await _at_account_snapshot' not in reconcile
+    assert reconcile.count('_at_account_snapshot(session, priority=True, positions_only=True)') == 2
+    assert 'fresh_positions = await binance_signed_request' not in reconcile
