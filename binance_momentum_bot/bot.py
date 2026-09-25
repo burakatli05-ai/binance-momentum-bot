@@ -332,6 +332,15 @@ AUTO_TRADE_RUNNER_FRACTION_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_FRACTION
 AUTO_TRADE_RUNNER_TARGET_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_TARGET_PCT", "5.0"))
 AUTO_TRADE_CLIENT_PREFIX = os.getenv("AUTO_TRADE_CLIENT_PREFIX", "MBOT").strip()[:8] or "MBOT"
 
+# Binance REST protection. The exchange currently exposes a 2400 REQUEST_WEIGHT/minute
+# IP budget; reserve headroom for execution by throttling background REST work well
+# before the hard ceiling. accountConfig is effectively static during normal operation
+# and must never be polled on every reconcile tick.
+BINANCE_RATE_LIMIT_SOFT_WEIGHT = max(100, int(os.getenv("BINANCE_RATE_LIMIT_SOFT_WEIGHT", "1800")))
+BINANCE_RATE_LIMIT_SOFT_COOLDOWN_SECONDS = max(1.0, float(os.getenv("BINANCE_RATE_LIMIT_SOFT_COOLDOWN_SECONDS", "10")))
+BINANCE_RATE_LIMIT_429_FALLBACK_SECONDS = max(5.0, float(os.getenv("BINANCE_RATE_LIMIT_429_FALLBACK_SECONDS", "60")))
+BINANCE_ACCOUNT_CONFIG_CACHE_SECONDS = max(15.0, float(os.getenv("BINANCE_ACCOUNT_CONFIG_CACHE_SECONDS", "60")))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -658,6 +667,15 @@ autotrade_account_cache = {
     "available_balance": None,
     "updated_ts": 0.0,
     "error": "",
+}
+autotrade_account_config_cache = {
+    "value": None,
+    "updated_ts": 0.0,
+}
+binance_rate_state = {
+    "used_weight_1m": 0,
+    "observed_mono": 0.0,
+    "blocked_until_mono": 0.0,
 }
 exchange_filters: Dict[str, dict] = {}
 
@@ -5022,8 +5040,54 @@ async def create_approval_invite_link(session: aiohttp.ClientSession) -> Optiona
     return None
 
 
+def _binance_observe_rate_headers(headers, status: int = 200):
+    """Track Binance's actual IP request-weight header and any 429 cooldown."""
+    now = time.monotonic()
+    try:
+        raw = headers.get("X-MBX-USED-WEIGHT-1M")
+        if raw is not None:
+            binance_rate_state["used_weight_1m"] = max(0, int(float(raw)))
+            binance_rate_state["observed_mono"] = now
+    except Exception:
+        pass
+    if int(status or 0) == 429:
+        retry = BINANCE_RATE_LIMIT_429_FALLBACK_SECONDS
+        try:
+            raw_retry = headers.get("Retry-After")
+            if raw_retry is not None:
+                retry = max(1.0, float(raw_retry))
+        except Exception:
+            pass
+        binance_rate_state["blocked_until_mono"] = max(
+            float(binance_rate_state.get("blocked_until_mono") or 0.0), now + retry
+        )
+
+
+async def _binance_rate_gate(*, priority: bool = False):
+    """Reserve Binance REST capacity for execution; 429 cooldown applies to everyone."""
+    now = time.monotonic()
+    blocked_until = float(binance_rate_state.get("blocked_until_mono") or 0.0)
+    if blocked_until > now:
+        await asyncio.sleep(blocked_until - now)
+        now = time.monotonic()
+
+    used = int(binance_rate_state.get("used_weight_1m") or 0)
+    observed = float(binance_rate_state.get("observed_mono") or 0.0)
+    # Discard stale observations. A minute-budget sample older than ~70s cannot
+    # describe the current Binance interval anymore.
+    if observed and now - observed > 70.0:
+        binance_rate_state["used_weight_1m"] = 0
+        used = 0
+    if not priority and used >= BINANCE_RATE_LIMIT_SOFT_WEIGHT:
+        # A short back-pressure pause is enough to let newer headers/reset state
+        # arrive while keeping a sizeable reserve for order-management calls.
+        await asyncio.sleep(BINANCE_RATE_LIMIT_SOFT_COOLDOWN_SECONDS)
+
+
 async def fetch_json(session, path, params=None):
+    await _binance_rate_gate(priority=False)
     async with session.get(REST + path, params=params, timeout=15) as r:
+        _binance_observe_rate_headers(r.headers, r.status)
         r.raise_for_status()
         return await r.json()
 
@@ -7122,9 +7186,12 @@ def _at_client(tag: str, signal_id: int) -> str:
     return raw[:36]
 
 
-async def binance_signed_request(session: aiohttp.ClientSession, method: str, path: str, params: Optional[dict] = None, *, timeout_s: int = 15):
+async def binance_signed_request(session: aiohttp.ClientSession, method: str, path: str, params: Optional[dict] = None, *, timeout_s: int = 15, priority: bool = False):
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET eksik")
+    # Signed writes are execution-critical by definition. Reads are background
+    # unless their caller explicitly asks for the reserved execution lane.
+    await _binance_rate_gate(priority=bool(priority or method.upper() in ("POST", "DELETE")))
     data = dict(params or {})
     data.setdefault("recvWindow", 5000)
     data["timestamp"] = now_ms()
@@ -7142,6 +7209,7 @@ async def binance_signed_request(session: aiohttp.ClientSession, method: str, pa
         else:
             req = session.request(method.upper(), url, data=signed, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s))
         async with req as r:
+            _binance_observe_rate_headers(r.headers, r.status)
             body = await r.text()
             try: payload = json.loads(body)
             except Exception: payload = {"code": r.status, "msg": body[:500]}
@@ -7152,11 +7220,23 @@ async def binance_signed_request(session: aiohttp.ClientSession, method: str, pa
         raise
 
 
-async def _at_account_snapshot(session):
-    cfg = await binance_signed_request(session, "GET", "/fapi/v1/accountConfig")
-    bal = await binance_signed_request(session, "GET", "/fapi/v3/balance")
+async def _at_get_account_config(session, *, priority: bool = False, force: bool = False):
+    cached = autotrade_account_config_cache.get("value")
+    age = time.time() - float(autotrade_account_config_cache.get("updated_ts") or 0.0)
+    if not force and isinstance(cached, dict) and age < BINANCE_ACCOUNT_CONFIG_CACHE_SECONDS:
+        return dict(cached)
+    cfg = await binance_signed_request(session, "GET", "/fapi/v1/accountConfig", priority=priority)
+    if isinstance(cfg, dict):
+        autotrade_account_config_cache["value"] = dict(cfg)
+        autotrade_account_config_cache["updated_ts"] = time.time()
+    return cfg
+
+
+async def _at_account_snapshot(session, *, priority: bool = False):
+    cfg = await _at_get_account_config(session, priority=priority)
+    bal = await binance_signed_request(session, "GET", "/fapi/v3/balance", priority=priority)
     usdt = next((x for x in bal if x.get("asset") == "USDT"), None) or {}
-    positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk")
+    positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=priority)
     return cfg, usdt, positions
 
 
@@ -7175,7 +7255,7 @@ def _at_cache_account_balance(usdt: Optional[dict] = None, error: str = ""):
 
 async def _at_query_order_by_client(session, symbol: str, client_id: str):
     try:
-        return await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"origClientOrderId":client_id})
+        return await binance_signed_request(session, "GET", "/fapi/v1/order", {"symbol":symbol,"origClientOrderId":client_id}, priority=True)
     except Exception:
         return None
 
@@ -7391,7 +7471,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="API_KEY_MISSING")
         return
-    cfg, usdt, positions = await _at_account_snapshot(session)
+    cfg, usdt, positions = await _at_account_snapshot(session, priority=True)
     _at_cache_account_balance(usdt)
     if not cfg.get("canTrade", False):
         raise RuntimeError("Binance Futures API canTrade=false")
@@ -7598,13 +7678,20 @@ async def autotrade_reconcile_loop(session):
             # This does not enable trading and does not alter the LIVE daily risk base.
             if BINANCE_API_KEY and BINANCE_API_SECRET and not live and (time.time()-float(autotrade_account_cache.get("updated_ts") or 0) >= 30):
                 try:
-                    _, usdt_cache, _ = await _at_account_snapshot(session)
+                    bal_cache = await binance_signed_request(session, "GET", "/fapi/v3/balance")
+                    usdt_cache = next((x for x in bal_cache if x.get("asset") == "USDT"), None) or {}
                     _at_cache_account_balance(usdt_cache)
                 except Exception as e:
                     _at_cache_account_balance(error=str(e))
             if live and BINANCE_API_KEY and BINANCE_API_SECRET:
-                cfg, usdt, positions = await _at_account_snapshot(session)
-                _at_cache_account_balance(usdt)
+                # Reconcile only needs positionRisk every tick. accountConfig is cached
+                # separately and balance is informational, so polling all three every
+                # two seconds wastes a large part of the shared IP request-weight budget.
+                positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk")
+                if time.time()-float(autotrade_account_cache.get("updated_ts") or 0) >= 30:
+                    bal_live = await binance_signed_request(session, "GET", "/fapi/v3/balance")
+                    usdt_live = next((x for x in bal_live if x.get("asset") == "USDT"), None) or {}
+                    _at_cache_account_balance(usdt_live)
                 posmap=defaultdict(float)
                 for p in positions:
                     sym=str(p.get("symbol") or ""); ps=str(p.get("positionSide") or "BOTH"); amt=float(p.get("positionAmt",0) or 0)
@@ -7677,7 +7764,7 @@ async def autotrade_reconcile_loop(session):
                                 continue
                             # Re-read account state after cancellation so a concurrent fill can
                             # never make the fallback order over-close or flip the position.
-                            _, _, fresh_positions = await _at_account_snapshot(session)
+                            fresh_positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=True)
                             remaining=0.0
                             for fp in fresh_positions:
                                 if str(fp.get("symbol") or "")!=sym:
@@ -7734,7 +7821,7 @@ async def autotrade_reconcile_loop(session):
                                         _at_log_event("TP2_LIMIT_CANCEL_UNCERTAIN",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
                                                       detail=f"order_id={actual_order_id}; legacy=1; fallback_deferred=1")
                                         continue
-                                    _, _, fresh_positions = await _at_account_snapshot(session)
+                                    fresh_positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=True)
                                     remaining=0.0
                                     for fp in fresh_positions:
                                         if str(fp.get("symbol") or "")!=sym:
@@ -7893,7 +7980,7 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
     allowed,why=_at_risk_allowed("LIVE")
     if not allowed: return f"❌ Risk kilidi nedeniyle LIVE açılamadı: {why}"
     try:
-        cfg,usdt,positions=await _at_account_snapshot(session)
+        cfg,usdt,positions=await _at_account_snapshot(session, priority=True)
         _at_cache_account_balance(usdt)
         if not cfg.get("canTrade",False): return "❌ Binance API canTrade=false. Futures trading izni açık değil."
         _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
