@@ -7232,7 +7232,7 @@ async def _at_get_account_config(session, *, priority: bool = False, force: bool
     return cfg
 
 
-async def _at_account_snapshot(session, *, priority: bool = False):
+async def _at_account_snapshot(session, *, priority: bool = True):
     cfg = await _at_get_account_config(session, priority=priority)
     bal = await binance_signed_request(session, "GET", "/fapi/v3/balance", priority=priority)
     usdt = next((x for x in bal if x.get("asset") == "USDT"), None) or {}
@@ -7471,7 +7471,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="API_KEY_MISSING")
         return
-    cfg, usdt, positions = await _at_account_snapshot(session, priority=True)
+    cfg, usdt, positions = await _at_account_snapshot(session)
     _at_cache_account_balance(usdt)
     if not cfg.get("canTrade", False):
         raise RuntimeError("Binance Futures API canTrade=false")
@@ -7980,7 +7980,7 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
     allowed,why=_at_risk_allowed("LIVE")
     if not allowed: return f"❌ Risk kilidi nedeniyle LIVE açılamadı: {why}"
     try:
-        cfg,usdt,positions=await _at_account_snapshot(session, priority=True)
+        cfg,usdt,positions=await _at_account_snapshot(session)
         _at_cache_account_balance(usdt)
         if not cfg.get("canTrade",False): return "❌ Binance API canTrade=false. Futures trading izni açık değil."
         _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
