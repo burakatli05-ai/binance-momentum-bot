@@ -36,7 +36,9 @@ def test_reconcile_balance_poll_is_throttled_and_execution_uses_priority_lane():
     lookup = block('async def _at_query_order_by_client', 'async def _at_place_market_entry')
     assert '>= 30' in reconcile
     assert '"/fapi/v3/balance"' in reconcile
-    assert '_at_account_snapshot(session, priority=True)' in entry
+    assert '_at_account_snapshot(session)' in entry
+    snapshot = block('async def _at_account_snapshot', 'def _at_cache_account_balance')
+    assert 'priority: bool = True' in snapshot
     assert 'priority=True' in lookup
 
 
