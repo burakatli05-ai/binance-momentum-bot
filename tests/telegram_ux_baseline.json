@@ -1,12 +1,12 @@
 {
-  "base_sha": "9573df0ea22d7463e464b2b07decd2ca1ba475ac",
+  "base_sha": "5c0ebdfc6c0bdaff25394ad801602b5a893cd2d6",
   "ui_functions": [
     "_at_command",
     "_at_show_positions",
     "handle_autotrade_callback",
     "telegram_command_loop"
   ],
-  "protected_bot_ast": "12c0cae22343022853d5c0d1852925093a3d5b8bf84ac70210678236d11f0ed9",
+  "protected_bot_ast": "1080eab1d278f9282cd20d1d3384603ae57419b0dfdd184e6267a5b28a739d64",
   "files": {
     "binance_momentum_bot/.env.example": "40b8284d36bfb3dd8a1e320d7b16f25f3b2bd026d230a3f8cf4e22ea3739694c",
     "binance_momentum_bot/alt_shadow.py": "bb9c4c9576bce99a0a79eddc9ed708f5ce49b3fd9e3e26b5a193d3c5a03475f9",
