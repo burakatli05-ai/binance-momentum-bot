@@ -7234,13 +7234,19 @@ async def _at_get_account_config(session, *, priority: bool = False, force: bool
 
 async def _at_account_snapshot(session, *, priority: bool = True, positions_only: bool = False):
     if positions_only:
-        # Preserve the historical snapshot interface for reconciliation/tests while
-        # avoiding the expensive accountConfig+balance pair when only positions are needed.
+        # Preserve the historical snapshot interface while avoiding accountConfig on
+        # reconcile ticks. Balance is refreshed only when its 30s informational cache
+        # expires; positionRisk remains the only per-tick private read.
         cfg = dict(autotrade_account_config_cache.get("value") or {})
-        usdt = {
-            "balance": autotrade_account_cache.get("wallet_balance"),
-            "availableBalance": autotrade_account_cache.get("available_balance"),
-        }
+        cache_age = time.time() - float(autotrade_account_cache.get("updated_ts") or 0.0)
+        if cache_age >= 30:
+            bal = await binance_signed_request(session, "GET", "/fapi/v3/balance", priority=priority)
+            usdt = next((x for x in bal if x.get("asset") == "USDT"), None) or {}
+        else:
+            usdt = {
+                "balance": autotrade_account_cache.get("wallet_balance"),
+                "availableBalance": autotrade_account_cache.get("available_balance"),
+            }
         positions = await binance_signed_request(session, "GET", "/fapi/v3/positionRisk", priority=priority)
         return cfg, usdt, positions
     cfg = await _at_get_account_config(session, priority=priority)
@@ -7697,10 +7703,8 @@ async def autotrade_reconcile_loop(session):
                 # Reconcile only needs positionRisk every tick. accountConfig is cached
                 # separately and balance is informational, so polling all three every
                 # two seconds wastes a large part of the shared IP request-weight budget.
-                _, _, positions = await _at_account_snapshot(session, priority=False, positions_only=True)
-                if time.time()-float(autotrade_account_cache.get("updated_ts") or 0) >= 30:
-                    bal_live = await binance_signed_request(session, "GET", "/fapi/v3/balance")
-                    usdt_live = next((x for x in bal_live if x.get("asset") == "USDT"), None) or {}
+                _, usdt_live, positions = await _at_account_snapshot(session, priority=False, positions_only=True)
+                if usdt_live and usdt_live.get("balance") is not None:
                     _at_cache_account_balance(usdt_live)
                 posmap=defaultdict(float)
                 for p in positions:
