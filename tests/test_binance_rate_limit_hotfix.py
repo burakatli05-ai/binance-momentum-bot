@@ -27,15 +27,15 @@ def test_account_config_is_cached_instead_of_polled_each_reconcile_tick():
     assert 'BINANCE_ACCOUNT_CONFIG_CACHE_SECONDS' in snapshot
     assert '"/fapi/v1/accountConfig"' in snapshot
     assert 'positions_only=True' in reconcile
-    assert 'accountConfig+balance pair' in snapshot
+    assert 'avoiding accountConfig on' in snapshot
 
 
 def test_reconcile_balance_poll_is_throttled_and_execution_uses_priority_lane():
     reconcile = block('async def autotrade_reconcile_loop', 'def _at_panel_text')
     entry = block('async def autotrade_handle_premium', 'def autotrade_on_tick')
     lookup = block('async def _at_query_order_by_client', 'async def _at_place_market_entry')
-    assert '>= 30' in reconcile
-    assert '"/fapi/v3/balance"' in reconcile
+    assert 'cache_age >= 30' in snapshot
+    assert '"/fapi/v3/balance"' in snapshot
     assert '_at_account_snapshot(session)' in entry
     snapshot = block('async def _at_account_snapshot', 'def _at_cache_account_balance')
     assert 'priority: bool = True' in snapshot
