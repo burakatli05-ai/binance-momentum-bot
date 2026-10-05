@@ -40,11 +40,11 @@ class EarlyExitExportTests(unittest.TestCase):
         c = sqlite3.connect(self.path)
         c.execute(SCHEMA)
         rows = [
-            (1,"AAAUSDT",101,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.START_TS_MS-1,16.0,100.0,97.0,101.0,102.0,5.0,-3.2,104.0,1),
-            (2,"BBBUSDT",102,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.START_TS_MS,16.0,200.0,194.0,202.0,204.0,2.2,-1.0,201.0,1),
-            (3,"CCCUSDT",103,"PREMIUM",3,"IMMEDIATE_PREMIUM",ex.START_TS_MS+1000,0.0,300.0,291.0,303.0,306.0,6.0,-0.5,310.0,1),
-            (4,"DDDUSDT",104,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.END_TS_MS-1,31.0,400.0,388.0,404.0,408.0,1.5,-2.0,399.0,1),
-            (5,"EEEUSDT",105,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.END_TS_MS,16.0,500.0,485.0,505.0,510.0,0.5,-0.4,501.0,1),
+            (ex.MIN_STAGE_ID-1,"AAAUSDT",101,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.START_TS_MS,16.0,100.0,97.0,101.0,102.0,5.0,-3.2,104.0,1),
+            (ex.MIN_STAGE_ID,"BBBUSDT",102,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.START_TS_MS,16.0,200.0,194.0,202.0,204.0,2.2,-1.0,201.0,1),
+            (ex.MIN_STAGE_ID+1,"CCCUSDT",103,"PREMIUM",3,"IMMEDIATE_PREMIUM",ex.START_TS_MS+1000,0.0,300.0,291.0,303.0,306.0,6.0,-0.5,310.0,1),
+            (ex.MAX_STAGE_ID,"DDDUSDT",104,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.END_TS_MS-1,31.0,400.0,388.0,404.0,408.0,1.5,-2.0,399.0,1),
+            (ex.MAX_STAGE_ID+1,"EEEUSDT",105,"EARLY",None,"PUBLIC_EARLY_2OF3",ex.END_TS_MS-1,16.0,500.0,485.0,505.0,510.0,0.5,-0.4,501.0,1),
         ]
         c.executemany(
             "INSERT INTO entry_stage_forward_shadow VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
