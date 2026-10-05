@@ -9129,6 +9129,7 @@ async def main():
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        early_exit_task = asyncio.create_task(early_exit_export_once())
         symbols = await load_symbols(session)
         for s in symbols:
             states[s]
@@ -9172,7 +9173,7 @@ async def main():
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         tasks.extend((alt_shadow_loop(),research_export_loop(),quality_shadow_loop()))
-        tasks.append(early_exit_export_once())
+        tasks.append(early_exit_task)
         tasks.append(early_v2.run(session))
         await asyncio.gather(*tasks)
 
