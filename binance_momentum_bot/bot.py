@@ -34,6 +34,7 @@ import research_export
 import daytrades
 import telegram_ux
 import early_v2_adapter
+import early_checkpoint_shadow
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -1507,6 +1508,7 @@ def init_db():
          "V5.13.4: trend-build REAL EARLY watch + liquidity/OI transition V3 shadow + all-position observer + projected-risk guard; production Premium thresholds unchanged",int(time.time())),
     )
     audit.migrate(conn)
+    early_checkpoint_shadow.migrate(conn)
     alt_shadow.migrate(conn)
     from x_watcher import migrate as migrate_x
     migrate_x(conn)
@@ -4054,6 +4056,7 @@ def end_episode(symbol: str, reason: str, m: Optional[dict] = None, score: Optio
     st = states[symbol]
     if not st.episode_id:
         return
+    early_checkpoint_shadow.end(db_connect, episode_id=st.episode_id, end_ts_ms=now_ms(), reason=reason)
     price = float((m or {}).get("price") or st.last_price or 0.0)
     update_episode_peak(symbol, price)
     peak_ret = pct_change(st.episode_peak_price, st.episode_start_price) if st.episode_start_price else 0.0
@@ -5560,6 +5563,57 @@ def early_notify_pass(m: dict, score: int, st: SymbolState) -> bool:
     )
 
 
+def _early_notify_failures(m: dict, score: int, st: SymbolState) -> List[str]:
+    """Shadow explanation of the existing Public Early gate; never changes a decision."""
+    failed = []
+    if st.candidate_passes < 2: failed.append("CONFIRM_LT_2")
+    if score < EARLY_NOTIFY_MIN_SCORE: failed.append("SCORE")
+    if m["chg30"] < EARLY_NOTIFY_MIN_CHG30: failed.append("CHG30")
+    if m["chg60"] < EARLY_NOTIFY_MIN_CHG60: failed.append("CHG60")
+    if m["flow30"] < EARLY_NOTIFY_MIN_FLOW30: failed.append("FLOW30")
+    if not (EARLY_NOTIFY_MIN_BUY30 <= m["buy30"] <= EARLY_NOTIFY_MAX_BUY30): failed.append("BUY30")
+    if m["chg5"] > EARLY_NOTIFY_MAX_CHG5: failed.append("CHG5_MAX")
+    if m["book_imbalance"] > EARLY_ALERT_MAX_BOOK: failed.append("BOOK")
+    if m["spread"] > min(MAX_SPREAD_PCT, 0.30): failed.append("SPREAD")
+    if m["extended"]: failed.append("EXTENDED")
+    if not (m["breakout"] or m["rel30"] >= 0.20): failed.append("BREAKOUT_OR_REL30")
+    return failed
+
+
+def _h1_observe_early_checkpoint_shadow(symbol: str, m: dict, score: int, now: float):
+    """Measure when unchanged Public Early conditions first become true between 15s checkpoints."""
+    try:
+        st = states[symbol]
+        if not st.episode_id or st.candidate_passes < 2 or st.active_radar_notified:
+            return
+        failures = _early_notify_failures(m, score, st)
+        can_create_radar = bool(
+            st.active_radar_id or (
+                early_watch_pass(m, score)
+                and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS
+            )
+        )
+        cooldown_ok = now - st.early_alert_ts >= EARLY_ALERT_COOLDOWN_SECONDS
+        ready = bool(can_create_radar and cooldown_ok and not failures)
+        shadow_failures = list(failures)
+        if not can_create_radar: shadow_failures.append("NO_RADAR_ELIGIBILITY")
+        if not cooldown_ok: shadow_failures.append("EARLY_COOLDOWN")
+        early_checkpoint_shadow.observe(
+            db_connect,
+            episode_id=st.episode_id,
+            symbol=symbol,
+            candidate_start_ts_ms=int(st.candidate_since * 1000),
+            observed_ts_ms=int(now * 1000),
+            price=m["price"],
+            confirm_passes=st.candidate_passes,
+            ready=ready,
+            failed_gates=shadow_failures,
+            would_create_radar=bool(not st.active_radar_id and can_create_radar),
+        )
+    except Exception:
+        log.exception("H1_CHECKPOINT_SHADOW_ERROR operation=bot_observe")
+
+
 def premium_trade_guard(m: dict, score: int, quality: int, rise_score: int, st: SymbolState):
     reasons = []
     runup = candidate_runup_pct(st, m["price"])
@@ -5937,6 +5991,7 @@ async def evaluate(session, symbol: str):
             reset_candidate(st)
             return
 
+        _h1_observe_early_checkpoint_shadow(symbol, m, score, now)
         if now - st.candidate_last_check < CONFIRM_INTERVAL_SECONDS:
             return
         st.candidate_last_check = now
@@ -5951,6 +6006,7 @@ async def evaluate(session, symbol: str):
                 st.candidate_passes += 1
                 funnel_hit("confirm_pass")
                 save_candidate_event(symbol, "confirm_pass", m, score, st)
+                _h1_observe_early_checkpoint_shadow(symbol, m, score, now)
                 if (not st.active_radar_id and early_watch_pass(m, score)
                         and now - st.radar_record_ts >= EARLY_RADAR_RECORD_COOLDOWN_SECONDS):
                     st.radar_record_ts = now
@@ -5971,6 +6027,15 @@ async def evaluate(session, symbol: str):
                     quality_arm('EARLY', st.active_radar_id, symbol, st.episode_id, m)
                     funnel_hit("early_alert")
                     save_candidate_event(symbol, "early_alert", m, score, st, "V5.7 2/3 selective notify; production thresholds unchanged")
+                    early_checkpoint_shadow.public_early(
+                        db_connect,
+                        episode_id=st.episode_id,
+                        symbol=symbol,
+                        candidate_start_ts_ms=int(st.candidate_since * 1000),
+                        actual_ts_ms=int(now * 1000),
+                        actual_price=m["price"],
+                        confirm_passes=st.candidate_passes,
+                    )
                     _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
                     if early_v2:
                         early_v2.arm(st.active_radar_id, symbol, m, score)
