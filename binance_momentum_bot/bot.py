@@ -35,6 +35,7 @@ import daytrades
 import telegram_ux
 import early_v2_adapter
 import early_checkpoint_shadow
+import early_exit_export
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -9096,6 +9097,10 @@ async def main():
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
+    try:
+        early_exit_export.emit(DB_PATH)
+    except Exception as exc:
+        log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
     measurements=audit.Measurements(db_connect)
     if ALT_SHADOW_ENABLED:
         alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
