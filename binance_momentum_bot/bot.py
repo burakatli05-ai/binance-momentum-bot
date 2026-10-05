@@ -9073,6 +9073,21 @@ async def research_export_loop():
         await asyncio.sleep(30)
 
 
+async def early_exit_export_once():
+    """One-shot bounded research export after scanner bootstrap; never blocks the event loop."""
+    if os.getenv("RAILWAY_SERVICE_ID") != "c5e4a28a-8829-4434-bfee-16297373244f":
+        return
+    await asyncio.sleep(5)
+    try:
+        await asyncio.to_thread(
+            early_exit_export.emit,
+            DB_PATH,
+            lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
+        )
+    except Exception as exc:
+        log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
+
+
 def _x_market(symbol):
     if symbol is None: return set(symbols)
     if symbol not in states: return {}
@@ -9097,14 +9112,6 @@ async def main():
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
-    if os.getenv("RAILWAY_SERVICE_ID") == "c5e4a28a-8829-4434-bfee-16297373244f":
-        try:
-            early_exit_export.emit(
-                DB_PATH,
-                printer=lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
-            )
-        except Exception as exc:
-            log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
     measurements=audit.Measurements(db_connect)
     if ALT_SHADOW_ENABLED:
         alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
@@ -9165,6 +9172,7 @@ async def main():
         ]
         tasks.extend(aggtrade_chunk_ws(session, c, i + 1) for i, c in enumerate(chunks))
         tasks.extend((alt_shadow_loop(),research_export_loop(),quality_shadow_loop()))
+        tasks.append(early_exit_export_once())
         tasks.append(early_v2.run(session))
         await asyncio.gather(*tasks)
 
