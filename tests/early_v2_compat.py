@@ -33,14 +33,20 @@ else:
 )''',
 '''early_checkpoint_shadow.end(db_connect, episode_id=st.episode_id, end_ts_ms=now_ms(), reason=reason)''',
 '''early_checkpoint_shadow.migrate(conn)''',
-'''if os.getenv("RAILWAY_SERVICE_ID") == "c5e4a28a-8829-4434-bfee-16297373244f":
+'''async def early_exit_export_once():
+    """One-shot bounded research export after scanner bootstrap; never blocks the event loop."""
+    if os.getenv("RAILWAY_SERVICE_ID") != "c5e4a28a-8829-4434-bfee-16297373244f":
+        return
+    await asyncio.sleep(5)
     try:
-        early_exit_export.emit(
+        await asyncio.to_thread(
+            early_exit_export.emit,
             DB_PATH,
-            printer=lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
+            lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
         )
     except Exception as exc:
         log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)''',
+'''tasks.append(early_exit_export_once())''',
 'import early_checkpoint_shadow',
 'import early_exit_export',
 '''def _early_notify_failures(m: dict, score: int, st: SymbolState) -> List[str]:
