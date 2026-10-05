@@ -33,7 +33,12 @@ else:
 )''',
 '''early_checkpoint_shadow.end(db_connect, episode_id=st.episode_id, end_ts_ms=now_ms(), reason=reason)''',
 '''early_checkpoint_shadow.migrate(conn)''',
+'''try:
+    early_exit_export.emit(DB_PATH)
+except Exception as exc:
+    log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)''',
 'import early_checkpoint_shadow',
+'import early_exit_export',
 '''def _early_notify_failures(m: dict, score: int, st: SymbolState) -> List[str]:
     """Shadow explanation of the existing Public Early gate; never changes a decision."""
     failed = []
