@@ -33,7 +33,7 @@ else:
 )''',
 '''early_checkpoint_shadow.end(db_connect, episode_id=st.episode_id, end_ts_ms=now_ms(), reason=reason)''',
 '''early_checkpoint_shadow.migrate(conn)''',
-'''if os.getenv("RAILWAY_DEPLOYMENT_ID"):
+'''if os.getenv("RAILWAY_SERVICE_ID") == "c5e4a28a-8829-4434-bfee-16297373244f":
     try:
         early_exit_export.emit(
             DB_PATH,
