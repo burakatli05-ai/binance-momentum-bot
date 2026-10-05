@@ -9097,7 +9097,7 @@ async def main():
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
-    if os.getenv("RAILWAY_DEPLOYMENT_ID"):
+    if os.getenv("RAILWAY_SERVICE_ID") == "c5e4a28a-8829-4434-bfee-16297373244f":
         try:
             early_exit_export.emit(
                 DB_PATH,
