@@ -17,6 +17,10 @@ LOG_PREFIX = "EARLY_EXIT_EXPORT_V1"
 CHUNK_CHARS = 12000
 START_TS_MS = 1790629200000  # 2026-09-29 00:00 TRT
 END_TS_MS = 1791234000000    # 2026-10-06 00:00 TRT
+MIN_STAGE_ID = 282763
+MAX_STAGE_ID = 373429
+MAX_ROWS = 5000
+MAX_RAW_BYTES = 2_000_000
 
 COLUMNS = (
     "id","symbol","episode_id","stage","signal_id","decision","created_ts_ms",
@@ -48,11 +52,15 @@ def build_payload(db_path, start_ts_ms=START_TS_MS, end_ts_ms=END_TS_MS):
             list(row) for row in conn.execute(
                 f"""SELECT {select}
                     FROM entry_stage_forward_shadow
-                    WHERE stage='EARLY' AND created_ts_ms>=? AND created_ts_ms<?
+                    WHERE id BETWEEN ? AND ?
+                      AND stage='EARLY'
+                      AND created_ts_ms>=? AND created_ts_ms<?
                     ORDER BY created_ts_ms,id""",
-                (int(start_ts_ms), int(end_ts_ms)),
+                (MIN_STAGE_ID, MAX_STAGE_ID, int(start_ts_ms), int(end_ts_ms)),
             )
         ]
+        if len(rows) > MAX_ROWS:
+            raise ValueError("early export row budget exceeded")
     return {
         "version": VERSION,
         "window_start_ts_ms": int(start_ts_ms),
@@ -65,6 +73,8 @@ def build_payload(db_path, start_ts_ms=START_TS_MS, end_ts_ms=END_TS_MS):
 
 def encode_payload(payload):
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_RAW_BYTES:
+        raise ValueError("early export byte budget exceeded")
     compressed = zlib.compress(raw, 9)
     encoded = base64.b64encode(compressed).decode("ascii")
     digest = hashlib.sha256(raw).hexdigest()
