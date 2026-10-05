@@ -1,4 +1,4 @@
-"""Recognize exact reviewed Early hooks; preserve all legacy AST fingerprints."""
+"""Recognize exact reviewed additive research hooks; preserve all legacy AST fingerprints."""
 import ast
 
 SNIPPETS = [
@@ -21,6 +21,16 @@ else:
 'early_v2 = None',
 'import early_v2_adapter',
 ' tasks.append(early_v2.run(session))'.strip(),
+'''_h1_observe_early_checkpoint_shadow(symbol, m, score, now)''',
+'''early_checkpoint_shadow.public_early(
+    db_connect,
+    episode_id=st.episode_id,
+    symbol=symbol,
+    candidate_start_ts_ms=int(st.candidate_since * 1000),
+    actual_ts_ms=int(now * 1000),
+    actual_price=m["price"],
+    confirm_passes=st.candidate_passes,
+)''',
 ]
 APPROVED={ast.dump(ast.parse(s).body[0],include_attributes=False) for s in SNIPPETS}
 
