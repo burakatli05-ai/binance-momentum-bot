@@ -9097,10 +9097,14 @@ async def main():
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
     init_db()
-    try:
-        early_exit_export.emit(DB_PATH)
-    except Exception as exc:
-        log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
+    if os.getenv("RAILWAY_DEPLOYMENT_ID"):
+        try:
+            early_exit_export.emit(
+                DB_PATH,
+                printer=lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
+            )
+        except Exception as exc:
+            log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
     measurements=audit.Measurements(db_connect)
     if ALT_SHADOW_ENABLED:
         alt_engine=alt_shadow.ShadowEngine(db_connect,audit.nonnegative('ALT_SHADOW_STARTING_BALANCE',2000))
