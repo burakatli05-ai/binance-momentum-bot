@@ -46,7 +46,8 @@ else:
         )
     except Exception as exc:
         log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)''',
-'''tasks.append(early_exit_export_once())''',
+'''early_exit_task = asyncio.create_task(early_exit_export_once())''',
+'''tasks.append(early_exit_task)''',
 'import early_checkpoint_shadow',
 'import early_exit_export',
 '''def _early_notify_failures(m: dict, score: int, st: SymbolState) -> List[str]:
