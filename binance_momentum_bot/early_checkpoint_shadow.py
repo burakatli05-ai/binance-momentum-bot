@@ -99,28 +99,31 @@ def observe(connect, *, episode_id, symbol, candidate_start_ts_ms, observed_ts_m
                 last_eval_ts_ms=(existing or {}).get("prior_eval_ts_ms"),
                 last_failed=tuple((existing or {}).get("prior_failed") or ()),
                 restart_gap=1 if existing else 0,
+                persisted=bool(existing),
             )
             _state[episode_id] = state
 
         if state["first_pass2_ts_ms"] is None:
             state["first_pass2_ts_ms"] = observed_ts_ms
 
-        c = connect()
-        try:
-            c.execute(
-                """INSERT OR IGNORE INTO early_checkpoint_latency_shadow_v1(
-                       episode_id,symbol,candidate_start_ts_ms,first_pass2_ts_ms,
-                       status,restart_gap,version,updated_ts_ms)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (
-                    episode_id, str(symbol), int(candidate_start_ts_ms),
-                    int(state["first_pass2_ts_ms"]), "TRACKING",
-                    int(state["restart_gap"]), VERSION, observed_ts_ms,
-                ),
-            )
-            c.commit()
-        finally:
-            c.close()
+        if not state["persisted"]:
+            c = connect()
+            try:
+                c.execute(
+                    """INSERT OR IGNORE INTO early_checkpoint_latency_shadow_v1(
+                           episode_id,symbol,candidate_start_ts_ms,first_pass2_ts_ms,
+                           status,restart_gap,version,updated_ts_ms)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        episode_id, str(symbol), int(candidate_start_ts_ms),
+                        int(state["first_pass2_ts_ms"]), "TRACKING",
+                        int(state["restart_gap"]), VERSION, observed_ts_ms,
+                    ),
+                )
+                c.commit()
+            finally:
+                c.close()
+            state["persisted"] = True
 
         if ready and state["first_ready_ts_ms"] is None:
             prior_ts = state.get("last_eval_ts_ms")
