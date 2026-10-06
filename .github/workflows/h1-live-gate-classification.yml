@@ -1,0 +1,209 @@
+name: H1 LIVE gate paired classification only
+on:
+  push:
+    branches: ['research/h1-live-gate-classification-20261006']
+permissions:
+  contents: read
+jobs:
+  paired-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f2ee92421104d09517cd6d411ba26ae25f96867e
+          path: base_1
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 29cc15ea261c0a148cd57cee46b986946b4c492f
+          path: head_1
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f2ee92421104d09517cd6d411ba26ae25f96867e
+          path: base_2
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 29cc15ea261c0a148cd57cee46b986946b4c492f
+          path: head_2
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f2ee92421104d09517cd6d411ba26ae25f96867e
+          path: base_full
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 29cc15ea261c0a148cd57cee46b986946b4c492f
+          path: head_full
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.14'
+      - run: pip install -r head_1/binance_momentum_bot/requirements.txt -r head_1/research/requirements.txt
+      - name: Single controlled classification and conditional gate completion
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, platform, re, subprocess, sys, time, traceback
+          from pathlib import Path
+          
+          BASE = "f2ee92421104d09517cd6d411ba26ae25f96867e"
+          HEAD = "29cc15ea261c0a148cd57cee46b986946b4c492f"
+          ROOT = Path.cwd()
+          OUT = ROOT / "evidence"
+          OUT.mkdir(exist_ok=False)
+          LIVE = ["python", "-m", "unittest", "-v", "test_live_capability", "test_startup", "test_railpack_startup", "test_early_autotrader_v2", "test_early_fallback_tp", "test_position_management_v2"]
+          TARGET = "test_env_flags_do_not_activate_modes_and_startup_logs_both_systems"
+          TARGET_OWNER = "test_early_fallback_tp.FallbackTests"
+          state = {"classification": "INSUFFICIENT_EVIDENCE", "final_status": "H1_PREDEPLOY_BLOCKED_INSUFFICIENT_EVIDENCE", "paired_results": [], "remaining": {}, "source_code_changes": 0, "production_changes": 0, "deployment_changes": 0, "selector_changes": 0, "original_failure_preserved": True}
+          def save(name, data):
+              (OUT / name).write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          def git(path, *args):
+              return subprocess.check_output(["git", "-C", str(path), *args])
+          def manifest(path):
+              names = git(path, "ls-files", "-z").decode().split("\0")
+              return {n: hashlib.sha256((path / n).read_bytes()).hexdigest() for n in names if n}
+          def env_identity():
+              freeze = subprocess.check_output(["python", "-m", "pip", "freeze", "--all"]).decode()
+              return {"python_version": platform.python_version(), "python_executable": sys.executable, "python_binary_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(), "platform": platform.platform(), "machine": platform.machine(), "runner_os": os.getenv("RUNNER_OS"), "runner_arch": os.getenv("RUNNER_ARCH"), "runner_name": os.getenv("RUNNER_NAME"), "image_os": os.getenv("ImageOS"), "image_version": os.getenv("ImageVersion"), "run_id": os.getenv("GITHUB_RUN_ID"), "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"), "dependencies": freeze, "dependencies_sha256": hashlib.sha256(freeze.encode()).hexdigest(), "python_dotenv_disabled": os.getenv("PYTHON_DOTENV_DISABLED"), "live_pythonpath": "binance_momentum_bot:tests"}
+          def parse_unittest(stderr, returncode):
+              runs = re.findall(r"(?m)^Ran (\d+) tests? in ([0-9.]+)s$", stderr)
+              summaries = re.findall(r"(?m)^(OK(?: \([^\n]*\))?|FAILED \([^\n]*\))$", stderr)
+              if len(runs) != 1 or len(summaries) != 1:
+                  raise RuntimeError("UNPARSEABLE_UNITTEST_SUMMARY")
+              count, seconds = runs[0]
+              info = {k.strip(): v for k, v in re.findall(r"([a-z ]+)=(\d+)", summaries[0])}
+              counts = {k: int(info.get(k, 0)) for k in ("failures", "errors", "skipped", "expected failures", "unexpected successes")}
+              blocks = re.findall(r"(?ms)^(ERROR|FAIL): ([^\n]+)\n-{5,}\n(.*?)(?=^={5,}\n|^-{5,}\nRan |\Z)", stderr)
+              evidence = []
+              for kind, label, tb in blocks:
+                  phase = "TEARDOWN_CLEANUP" if "asyncTearDown" in tb and "self.tmp.cleanup()" in tb else ("ASSERTION_OR_BODY" if "AssertionError" in tb else "OTHER_OR_UNKNOWN")
+                  evidence.append({"kind": kind, "test_label": label, "traceback": tb, "phase": phase})
+              if len(blocks) != counts["failures"] + counts["errors"]:
+                  raise RuntimeError("FAILURE_BLOCK_COUNT_MISMATCH")
+              passed = summaries[0].startswith("OK") and returncode == 0
+              target = (returncode == 1 and counts["errors"] == 1 and counts["failures"] == 0 and len(evidence) == 1
+                  and TARGET in evidence[0]["test_label"] and TARGET_OWNER in evidence[0]["test_label"]
+                  and evidence[0]["phase"] == "TEARDOWN_CLEANUP"
+                  and "OSError: [Errno 39] Directory not empty" in evidence[0]["traceback"])
+              return {"tests_run": int(count), "unittest_elapsed_s": float(seconds), "counts": counts, "success_count": int(count)-sum(counts.values()), "passed": passed, "same_target_cleanup_error": target, "failures": evidence}
+          def execute(label, path, command, test_env=False, parse=False):
+              before = env_identity()
+              if before != ENV:
+                  raise RuntimeError("ENVIRONMENT_CHANGED_BEFORE_" + label)
+              before_source = manifest(path)
+              if before_source != INITIAL[path.name]:
+                  raise RuntimeError("TRACKED_SOURCE_CHANGED_BEFORE_" + label)
+              env = os.environ.copy()
+              if test_env:
+                  env["PYTHONPATH"] = "binance_momentum_bot:tests"
+              else:
+                  env.pop("PYTHONPATH", None)
+              started = time.time()
+              t = time.perf_counter()
+              result = subprocess.run(command, cwd=path, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=240)
+              elapsed = time.perf_counter() - t
+              (OUT / (label + ".stdout.log")).write_bytes(result.stdout)
+              (OUT / (label + ".stderr.log")).write_bytes(result.stderr)
+              stdout, stderr = result.stdout.decode("utf-8", errors="strict"), result.stderr.decode("utf-8", errors="strict")
+              print("=== " + label + " ===", flush=True)
+              print(stdout, end="", flush=True)
+              print(stderr, end="", flush=True)
+              record = {"label": label, "commit": git(path, "rev-parse", "HEAD").decode().strip(), "cwd": str(path), "command": command, "pythonpath": env.get("PYTHONPATH"), "started_epoch_s": started, "elapsed_wall_s": elapsed, "exit_code": result.returncode, "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(), "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(), "environment_equal": env_identity() == ENV, "tracked_source_equal": manifest(path) == before_source}
+              if parse:
+                  record.update(parse_unittest(stderr, result.returncode))
+              save(label + ".json", record)
+              if not record["environment_equal"] or not record["tracked_source_equal"]:
+                  raise RuntimeError("ENVIRONMENT_OR_SOURCE_CHANGED_AFTER_" + label)
+              return record
+          try:
+              ENV = env_identity()
+              if ENV["python_version"] != "3.12.14":
+                  raise RuntimeError("PYTHON_VERSION_MISMATCH")
+              INITIAL = {}
+              for name, sha in (("base_1", BASE), ("head_1", HEAD), ("base_2", BASE), ("head_2", HEAD), ("base_full", BASE), ("head_full", HEAD)):
+                  path = ROOT / name
+                  if git(path, "rev-parse", "HEAD").decode().strip() != sha:
+                      raise RuntimeError("CHECKOUT_IDENTITY_MISMATCH_" + name)
+                  INITIAL[name] = manifest(path)
+                  save(name + "_source_before.json", INITIAL[name])
+              for req in ("binance_momentum_bot/requirements.txt", "research/requirements.txt"):
+                  if len({v[req] for v in INITIAL.values()}) != 1:
+                      raise RuntimeError("DEPENDENCY_SPEC_MISMATCH")
+              save("Environment.json", ENV)
+              print("ENVIRONMENT " + json.dumps(ENV), flush=True)
+              save("Plan.json", {"base": BASE, "head": HEAD, "command": LIVE, "max_paired_runs_per_revision": 2, "second_pair_only_if_first_pair_has_exact_target_cleanup_error": True, "additional_gate_authority": "only classifications A or C", "source_test_changes": 0})
+              for revision in ("base", "head"):
+                  r = execute(revision.upper() + "_1", ROOT / (revision + "_1"), LIVE, True, True)
+                  state["paired_results"].append(r)
+                  if r["tests_run"] != 149:
+                      raise RuntimeError("LIVE_TEST_COUNT_MISMATCH")
+              first = state["paired_results"]
+              if any(r["same_target_cleanup_error"] for r in first):
+                  if any(not r["passed"] and not r["same_target_cleanup_error"] for r in first):
+                      state["reason"] = "OTHER_FAILURE_IN_FIRST_PAIR"
+                  else:
+                      for revision in ("base", "head"):
+                          r = execute(revision.upper() + "_2", ROOT / (revision + "_2"), LIVE, True, True)
+                          state["paired_results"].append(r)
+                          if r["tests_run"] != 149:
+                              raise RuntimeError("LIVE_TEST_COUNT_MISMATCH")
+                      b1,h1,b2,h2 = state["paired_results"]
+                      if all(r["same_target_cleanup_error"] for r in (b1,h1,b2,h2)):
+                          state["classification"] = "REPRODUCIBLE_ON_BASE_AND_HEAD"
+                      elif b1["passed"] and b2["passed"] and h1["same_target_cleanup_error"] and h2["same_target_cleanup_error"]:
+                          state["classification"] = "HEAD_ONLY_REPRODUCIBLE_REGRESSION_SUSPECT"
+                          state["final_status"] = "H1_PREDEPLOY_BLOCKED_HEAD_REGRESSION"
+                      else:
+                          state["reason"] = "CONFLICTING_PAIRED_RESULTS"
+              elif all(r["passed"] for r in first):
+                  state["classification"] = "NON_REPRODUCIBLE_ENVIRONMENT_OR_FIXTURE_FLAKE"
+              else:
+                  state["reason"] = "OTHER_FAILURE_OR_INSUFFICIENT_EVIDENCE"
+              save("Classification.json", state)
+              print("PAIRED_CLASSIFICATION " + json.dumps(state), flush=True)
+              if state["classification"] in ("REPRODUCIBLE_ON_BASE_AND_HEAD", "NON_REPRODUCIBLE_ENVIRONMENT_OR_FIXTURE_FLAKE"):
+                  hook = execute("HEAD_H1_HOOK", ROOT / "head_full", ["python", "-m", "unittest", "-v", "test_early_checkpoint_shadow", "test_early_autotrader_v2.IsolationTests"], True, True)
+                  state["remaining"]["h1_hook"] = hook
+                  if not hook["passed"]:
+                      state["reason"] = "HEAD_HOOK_FAILED_CAUSALITY_NOT_ESTABLISHED"
+                  else:
+                      runner = str(ROOT / "head_full/tests/h1_export_gate_runner.py")
+                      for revision in ("base", "head"):
+                          path = ROOT / (revision + "_full")
+                          result = execute(revision.upper() + "_FULL", path, ["python", runner, "--root", str(path), "--output", str(OUT / (revision + "_full.json"))])
+                          state["remaining"][revision + "_full_command"] = result
+                          if result["exit_code"] != 0:
+                              raise RuntimeError("REGRESSION_EVIDENCE_COLLECTOR_FAILED")
+                          data = json.loads((OUT / (revision + "_full.json")).read_text())
+                          state["remaining"][revision + "_full"] = data
+                      compare = execute("COMPARE", ROOT / "head_full", ["python", str(ROOT / "head_full/tests/h1_export_compare_regression.py"), str(OUT / "base_full.json"), str(OUT / "head_full.json"), str(OUT / "comparison.json")])
+                      state["remaining"]["comparison_command"] = compare
+                      state["remaining"]["comparison"] = json.loads((OUT / "comparison.json").read_text())
+                      if compare["exit_code"] == 0 and state["remaining"]["comparison"]["status"] == "NO_NEW_REGRESSION":
+                          state["final_status"] = "H1_PREDEPLOY_GATES_CLEAN_READY_FOR_DEPLOY_APPROVAL_REUSE"
+                      elif compare["exit_code"] == 1:
+                          state["final_status"] = "H1_PREDEPLOY_BLOCKED_HEAD_REGRESSION"
+                      else:
+                          raise RuntimeError("REGRESSION_COMPARISON_ERROR")
+          except Exception as exc:
+              state["controller_error"] = {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}
+              state["final_status"] = "H1_PREDEPLOY_BLOCKED_INSUFFICIENT_EVIDENCE"
+          finally:
+              save("Final_Result.json", state)
+              print("FINAL_RESULT " + json.dumps(state), flush=True)
+              files = {p.name: {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(OUT.iterdir()) if p.is_file()}
+              save("SHA256_Manifest.json", files)
+          sys.exit(0 if state["final_status"] == "H1_PREDEPLOY_GATES_CLEAN_READY_FOR_DEPLOY_APPROVAL_REUSE" else 1)
+          PY
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h1-live-gate-classification
+          path: evidence/
+          if-no-files-found: error
