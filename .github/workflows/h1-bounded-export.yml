@@ -1,0 +1,57 @@
+name: H1 bounded exporter pre-deploy gates
+on:
+  push:
+    branches: ['research/h1-bounded-export-20261006']
+permissions:
+  contents: read
+jobs:
+  h1-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: head
+      - uses: actions/checkout@v4
+        with:
+          ref: f2ee92421104d09517cd6d411ba26ae25f96867e
+          path: base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r head/binance_momentum_bot/requirements.txt -r head/research/requirements.txt
+      - name: Focused H1 export and legacy exporter compatibility
+        working-directory: head
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+        run: python -m unittest -v test_h1_bounded_export test_early_exit_export
+      - name: P0 production invariants
+        working-directory: head
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+        run: python -m unittest -v test_telemetry_p0 test_v5135 test_integration test_runner_shadow_v1 test_information_only test_runner_notify_safety.RunnerNotifySafetyTests.test_default_off_preserves_fast_and_reacquire_decisions_and_telemetry test_runner_notify_safety.RunnerNotifySafetyTests.test_unset_off_empty_and_invalid_values_never_queue_or_start_transport test_runner_notify_safety.RunnerNotifySafetyTests.test_explicit_opt_in_queues_with_mocked_worker
+      - name: LIVE execution and startup isolation
+        working-directory: head
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+        run: python -m unittest -v test_live_capability test_startup test_railpack_startup test_early_autotrader_v2 test_early_fallback_tp test_position_management_v2
+      - name: H1 shadow and exact hook isolation
+        working-directory: head
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+        run: python -m unittest -v test_early_checkpoint_shadow test_early_autotrader_v2.IsolationTests
+      - name: Pinned base full regression evidence
+        run: python head/tests/h1_export_gate_runner.py --root base --output evidence/base.json
+      - name: Head full regression evidence
+        run: python head/tests/h1_export_gate_runner.py --root head --output evidence/head.json
+      - name: Reject new regressions without changing baseline
+        run: python head/tests/h1_export_compare_regression.py evidence/base.json evidence/head.json evidence/comparison.json
+      - name: Preserve gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h1-bounded-export-gates
+          path: evidence/
+          if-no-files-found: ignore
