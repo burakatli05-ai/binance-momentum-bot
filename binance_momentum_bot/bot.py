@@ -9074,16 +9074,17 @@ async def research_export_loop():
 
 
 async def early_exit_export_once():
-    """One-shot bounded research export after scanner bootstrap; never blocks the event loop."""
-    if os.getenv("RAILWAY_SERVICE_ID") != "c5e4a28a-8829-4434-bfee-16297373244f":
-        return
+    """One-shot bounded read-only export; never gates production and never writes the DB."""
     await asyncio.sleep(5)
     try:
-        await asyncio.to_thread(
+        log.info("EARLY_EXIT_EXPORT_V1 START")
+        meta = await asyncio.to_thread(
             early_exit_export.emit,
             DB_PATH,
             lambda *parts, **kwargs: log.info("%s", " ".join(str(x) for x in parts)),
         )
+        log.info("EARLY_EXIT_EXPORT_V1 COMPLETE rows=%s chunks=%s sha256=%s",
+                 meta.get("rows"), meta.get("chunks"), meta.get("sha256"))
     except Exception as exc:
         log.error("EARLY_EXIT_EXPORT_V1 ERROR %s", type(exc).__name__)
 
