@@ -101,6 +101,7 @@ class FakeDemo:
         if route.endswith('/openOrders'):return []
         if route.endswith('/openAlgoOrders'):return [deepcopy(s) for s in self.algos.values() if s['algoStatus']=='NEW']
         if route.endswith('/symbolConfig'):return [{'symbol':'BTCUSDT','marginType':'ISOLATED','leverage':1}]
+        if route.endswith('/balance'):return [{'asset':'USDT','availableBalance':'1000'}]
         if route.endswith('/ticker/price'):return {'price':'100000'}
         if route.endswith('/exchangeInfo'):return {'symbols':[{'symbol':'BTCUSDT','status':'TRADING','contractType':'PERPETUAL','filters':[
             {'filterType':'PRICE_FILTER','tickSize':'0.1'},

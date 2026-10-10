@@ -28,7 +28,7 @@ KEY_NAMES = ('BINANCE_DEMO_API_KEY', 'BINANCE_DEMO_API_SECRET')
 PUBLIC = {'/fapi/v1/time', '/fapi/v1/exchangeInfo', '/fapi/v1/ticker/price'}
 ROUTES = {'GET': PUBLIC | {'/fapi/v3/positionRisk','/fapi/v1/openOrders',
           '/fapi/v1/openAlgoOrders','/fapi/v1/positionSide/dual',
-          '/fapi/v1/symbolConfig','/fapi/v1/algoOrder','/fapi/v1/order'},
+          '/fapi/v1/symbolConfig','/fapi/v1/algoOrder','/fapi/v1/order','/fapi/v3/balance'},
           'POST': {'/fapi/v1/marginType','/fapi/v1/leverage','/fapi/v1/order','/fapi/v1/algoOrder'},
           'DELETE': {'/fapi/v1/algoOrder'}}
 WORKING = {'NEW','WORKING'}
@@ -92,6 +92,16 @@ def size_for(symbol,price):
     require(qty>0 and qty<=min(dec(market['maxQty']),dec(lot['maxQty'])),'QUANTITY_FILTER')
     require(qty*price<=250,'DEMO_NOTIONAL_SAFETY_CAP')
     return qty,tick,minimum
+
+def funding_for(balances,notional):
+    require(isinstance(balances,list),'BALANCE_SCHEMA')
+    rows=[b for b in balances if isinstance(b,dict) and b.get('asset')=='USDT']
+    require(len(rows)==1,'USDT_BALANCE_IDENTITY')
+    available=dec(rows[0]['availableBalance'])
+    # Operational Demo reserve only; does not alter quantity or economic profile.
+    required=notional+Decimal('1')
+    require(available>=required,'INSUFFICIENT_DEMO_BALANCE')
+    return available,required
 
 class DemoConnection(http.client.HTTPSConnection):
     def connect(self):
@@ -244,7 +254,11 @@ class Run:
         # An entry intent must be resolved before any quantity can be owned/closed.
         e=self.state['entry']
         if e and e.get('status')!='FILLED': self.resolve_entry()
-        self.flatten()
+        if e and e.get('status')=='FILLED':
+            self.flatten()
+        else:
+            # An absent/rejected entry owns no position, even if size matches.
+            _,_,_,counts=self.snapshot();require_clean(counts)
         open_algos=self.request('GET','/fapi/v1/openAlgoOrders')
         require(all(x.get('clientAlgoId') in self.state['stops'] for x in open_algos),'UNOWNED_ALGO_CLEANUP_BLOCK')
         for cid,s in self.state['stops'].items():
@@ -264,7 +278,18 @@ class Run:
         self.state['final_cleanup']=counts;self.save();self.event('FINAL_CLEANUP_PASS',**counts)
     def resolve_entry(self):
         e=self.state['entry'];cid=e['client_id']
-        q=self.request('GET','/fapi/v1/order',{'symbol':SYMBOL,'origClientOrderId':cid})
+        require(cid=='DPSL-'+self.state['run_id']+'-entry' and dec(e['quantity'])>0,'ENTRY_INTENT_IDENTITY')
+        rejected=e.get('post_http_status')==400 and e.get('post_exchange_code')==-2019
+        try:q=self.request('GET','/fapi/v1/order',{'symbol':SYMBOL,'origClientOrderId':cid})
+        except ExchangeError as ex:
+            if not (rejected and ex.status==400 and ex.code==-2013):raise
+            _,_,_,counts=self.snapshot();require_clean(counts)
+            e.update(status='REJECTED_NO_ORDER_CREATED',resolution='EXPLICIT_REJECTION_EXACT_ABSENCE_CLEAN_ACCOUNT')
+            for key in ('pending','unresolved'):
+                if cid in self.state[key]:self.state[key].remove(cid)
+            self.save();self.event('ENTRY_REJECTION_RECONCILED',client_id=cid,post_code=-2019,query_code=-2013,**counts)
+            return False
+        require(not rejected,'REJECTED_ENTRY_CONTRADICTORY_ORDER')
         require(q.get('clientOrderId')==cid and q.get('symbol')==SYMBOL and q.get('side')=='BUY' and
                 q.get('positionSide')=='BOTH' and q.get('type')=='MARKET' and q.get('status')=='FILLED' and
                 dec(q['executedQty'])==dec(e['quantity']) and dec(q['avgPrice'])>0,'ENTRY_IDENTITY')
@@ -272,6 +297,7 @@ class Run:
         for key in ('pending','unresolved'):
             if cid in self.state[key]:self.state[key].remove(cid)
         self.save();self.event('ENTRY_FILL_VERIFIED',**e)
+        return True
     def execute(self):
         started_clean=False
         try:
@@ -284,6 +310,8 @@ class Run:
             price=dec(self.request('GET','/fapi/v1/ticker/price',{'symbol':SYMBOL})['price'])
             qty,tick,minimum=size_for(spec,price)
             self.event('SYMBOL_FILTERS',quantity=fixed(qty),tick=fixed(tick),min_notional=fixed(minimum),reference_price=fixed(price),notional=fixed(qty*price))
+            available,required=funding_for(self.request('GET','/fapi/v3/balance'),qty*price)
+            self.event('DEMO_FUNDING_VERIFIED',available_usdt=fixed(available),required_usdt=fixed(required))
             config=self.request('GET','/fapi/v1/symbolConfig',{'symbol':SYMBOL})
             require(len(config)==1 and config[0]['symbol']==SYMBOL,'SYMBOL_CONFIG_SCHEMA')
             if config[0]['marginType']!='ISOLATED':self.request('POST','/fapi/v1/marginType',{'symbol':SYMBOL,'marginType':'ISOLATED'})
@@ -297,8 +325,14 @@ class Run:
                 entry={'client_id':cid,'quantity':fixed(qty),'status':'INTENT'})
             self.state['pending'].append(cid);self.state['unresolved'].append(cid);self.save()
             try:self.request('POST','/fapi/v1/order',dict(symbol=SYMBOL,side='BUY',positionSide='BOTH',type='MARKET',quantity=fixed(qty),newClientOrderId=cid,newOrderRespType='RESULT'))
+            except ExchangeError as ex:
+                self.state['entry'].update(post_http_status=ex.status,post_exchange_code=ex.code)
+                self.save();self.event('ENTRY_POST_ERROR_RECEIPT',client_id=cid,http_status=ex.status,exchange_code=ex.code)
             except Exception:self.event('ENTRY_RESPONSE_UNCERTAIN',client_id=cid)
-            self.resolve_entry();self.position()
+            if not self.resolve_entry():
+                self.state['cycle_result']='ENTRY_REJECTED_CLEANLY_RESOLVED';self.save()
+                return self.state
+            self.position()
             fill=dec(self.state['entry']['fill_vwap'])
             # Existing Premium test plan entry_mid=100/invalidation=98.7: 1.3% from actual fill.
             # Higher test stop is a technical overlap witness, NOT a new economic profile/step.
