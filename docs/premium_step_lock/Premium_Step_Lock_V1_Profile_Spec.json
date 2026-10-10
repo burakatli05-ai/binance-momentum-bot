@@ -1,0 +1,22 @@
+{
+  "close_at_maximum_trigger": false,
+  "default_profile": "CURRENT_TP2",
+  "first_lock_bp": 25,
+  "first_trigger_bp": 50,
+  "frozen_at_entry": true,
+  "initial_stop": "existing_premium_plan_from_fill",
+  "legacy_positions_migrated": false,
+  "maximum_lock_bp": 950,
+  "maximum_trigger_bp": 1000,
+  "name": "PREMIUM_STEP_LOCK_V1",
+  "partial_sales": false,
+  "reference": "verified_exchange_fill_vwap",
+  "rounding": "floor_to_price_filter_tick",
+  "runner": false,
+  "scope": "new_premium_autotrade_long_positions_only",
+  "step_interval_bp": 50,
+  "stop_monotonic": true,
+  "tp1": false,
+  "tp2_limit": false,
+  "version": "1.0"
+}

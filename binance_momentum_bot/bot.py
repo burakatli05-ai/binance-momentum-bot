@@ -36,6 +36,9 @@ import telegram_ux
 import early_v2_adapter
 import early_checkpoint_shadow
 import early_exit_export
+import premium_step_lock as premium_lock
+
+_premium_step_tick_watermarks = {}
 from position_observer import PositionObserver, roe_values
 from x_watcher import XWatcher, X_WATCHER_ENABLED, X_WATCHER_NOTIFY, X_WATCHER_ACCOUNTS
 
@@ -328,8 +331,7 @@ AUTO_TRADE_TP_LIMIT_FALLBACK_SECONDS = max(0.5, min(15.0, float(os.getenv("AUTO_
 AUTO_TRADE_TP_RETRACE_FALLBACK_PCT = max(0.05, min(1.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_FALLBACK_PCT", "0.15"))))
 AUTO_TRADE_TP_RETRACE_MIN_SECONDS = max(0.0, min(30.0, float(os.getenv("AUTO_TRADE_TP_RETRACE_MIN_SECONDS", "1.0"))))
 AUTO_TRADE_EXIT_PROFILE_DEFAULT = os.getenv("AUTO_TRADE_EXIT_PROFILE", "CURRENT_TP2").strip().upper()
-if AUTO_TRADE_EXIT_PROFILE_DEFAULT not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
-    AUTO_TRADE_EXIT_PROFILE_DEFAULT = "CURRENT_TP2"
+# Unknown configured profiles are retained and fail closed at entry/management.
 AUTO_TRADE_RUNNER_FRACTION_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_FRACTION", "0.50"))
 AUTO_TRADE_RUNNER_TARGET_PCT_DEFAULT = float(os.getenv("AUTO_TRADE_RUNNER_TARGET_PCT", "5.0"))
 AUTO_TRADE_CLIENT_PREFIX = os.getenv("AUTO_TRADE_CLIENT_PREFIX", "MBOT").strip()[:8] or "MBOT"
@@ -1430,6 +1432,7 @@ def init_db():
            )"""
     )
 
+    premium_lock.migrate(conn)
     ensure_column(conn, "autotrade_trades", "tp2_order_id", "TEXT")
     ensure_column(conn, "autotrade_trades", "tp2_order_client_id", "TEXT")
     ensure_column(conn, "autotrade_trades", "tp2_target_seen_ts_ms", "INTEGER")
@@ -7060,8 +7063,8 @@ def load_autotrade_settings():
     autotrade_cfg["runner_fraction"] = max(0.05, min(0.95, float(autotrade_cfg["runner_fraction"])))
     autotrade_cfg["runner_target_pct"] = max(0.25, min(25.0, float(autotrade_cfg["runner_target_pct"])))
     autotrade_cfg["exit_profile"] = str(autotrade_cfg["exit_profile"]).upper()
-    if autotrade_cfg["exit_profile"] not in ("CURRENT_TP2", "PARTIAL_RUNNER"):
-        autotrade_cfg["exit_profile"] = "CURRENT_TP2"
+    # Do not reinterpret an unknown configured profile as CURRENT_TP2.
+    _premium_step_tick_watermarks.clear()
     # Never resume LIVE after a deploy/restart. Existing live positions are still reconciled/managed.
     autotrade_cfg["mode"] = "OFF"
     autotrade_live_confirm.clear()
@@ -7464,7 +7467,10 @@ async def _at_emergency_close(session, symbol: str, qty: float, position_side: s
 
 
 def _at_insert_trade(signal_id: int, symbol: str, mode: str, signal_price: float, entry_price: float, qty: float, levels: dict, plan: dict,
-                     *, position_side="BOTH", entry_order_id=None, entry_client_id=None) -> int:
+                     *, position_side="BOTH", entry_order_id=None, entry_client_id=None, frozen_profile=None) -> int:
+    frozen_profile = premium_lock.profile(autotrade_cfg["exit_profile"] if frozen_profile is None else frozen_profile)
+    if frozen_profile == premium_lock.PROFILE and mode == "LIVE":
+        raise ValueError(premium_lock.LIVE_BLOCK_REASON)
     margin=float(autotrade_cfg["trade_margin_usdt"]); lev=int(autotrade_cfg["leverage"]); notional=margin*lev
     conn=db_connect()
     try:
@@ -7473,11 +7479,15 @@ def _at_insert_trade(signal_id: int, symbol: str, mode: str, signal_price: float
              stop_price,tp1_price,tp2_price,runner_price,exit_profile,runner_fraction,runner_target_pct,entry_order_id,entry_client_id,opened_ts_ms,updated_ts)
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (signal_id,symbol,mode,"OPEN","LONG",position_side,margin,lev,notional,signal_price,entry_price,qty,qty,levels["stop"],levels["tp1"],levels["tp2"],levels["runner"],
-             autotrade_cfg["exit_profile"],autotrade_cfg["runner_fraction"],autotrade_cfg["runner_target_pct"],str(entry_order_id or ""),entry_client_id or "",now_ms(),int(time.time())))
+             frozen_profile,autotrade_cfg["runner_fraction"],autotrade_cfg["runner_target_pct"],str(entry_order_id or ""),entry_client_id or "",now_ms(),int(time.time())))
         if cur.rowcount == 0:
             row=conn.execute("SELECT id FROM autotrade_trades WHERE signal_id=?",(signal_id,)).fetchone(); trade_id=int(row[0])
         else:
             trade_id=int(cur.lastrowid)
+            if frozen_profile == premium_lock.PROFILE:
+                opened = conn.execute("SELECT opened_ts_ms FROM autotrade_trades WHERE id=?", (trade_id,)).fetchone()[0]
+                fields = premium_lock.entry_fields(entry_price, levels["stop"], opened, dry=mode=="DRY")
+                conn.execute("UPDATE autotrade_trades SET "+",".join(k+"=?" for k in fields)+" WHERE id=?", list(fields.values())+[trade_id])
             if mode == "DRY":
                 conn.execute("UPDATE autotrade_trades SET cost_model_version='5.13.5',fee_pct_per_side=?,slippage_pct_per_side=? WHERE id=?",(audit.DRY_FEE_PCT,audit.DRY_SLIPPAGE_PCT,trade_id))
         conn.commit()
@@ -7488,6 +7498,8 @@ def _at_insert_trade(signal_id: int, symbol: str, mode: str, signal_price: float
 
 def _at_update_trade(trade_id: int, **fields):
     if not fields: return
+    if premium_lock.FROZEN_FIELDS.intersection(fields):
+        raise ValueError("FROZEN_EXIT_PROFILE_IMMUTABLE")
     fields["updated_ts"] = int(time.time())
     keys=list(fields); vals=[fields[k] for k in keys]
     conn=db_connect()
@@ -7520,6 +7532,14 @@ def _at_close_trade(trade_id: int, reason: str, exit_price: float, realized_pnl:
 async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict, plan: dict):
     mode=str(autotrade_cfg.get("mode","OFF")).upper()
     if mode == "OFF": return
+    try:
+        frozen_profile = premium_lock.profile(autotrade_cfg.get("exit_profile"))
+    except ValueError:
+        _at_log_event(premium_lock.UNKNOWN,signal_id=signal_id,symbol=symbol)
+        return
+    if frozen_profile == premium_lock.PROFILE and mode == "LIVE":
+        _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail=premium_lock.LIVE_BLOCK_REASON)
+        return
     if mode == "DRY":
         allowed, why = _at_risk_allowed("DRY")
         if not allowed:
@@ -7542,7 +7562,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
         allowed,why=_at_risk_allowed("DRY",proposed)
         if not allowed:
             _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
-        tid=_at_insert_trade(signal_id,symbol,"DRY",signal_price,entry_ref,qty,levels,plan)
+        tid=_at_insert_trade(signal_id,symbol,"DRY",signal_price,entry_ref,qty,levels,plan,frozen_profile=frozen_profile)
         _at_log_event("DRY_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"entry={entry_ref}; qty={qty}; profile={autotrade_cfg['exit_profile']}")
         await telegram_send(session, f"🟡 DRY RUN — {symbol}\n{margin:.0f} USDT × {lev}x | giriş ~{fmt_price(entry_ref)}\nStop {fmt_price(levels['stop'])} | TP2 {fmt_price(levels['tp2'])}\nGerçek emir gönderilmedi.", chat_id=TELEGRAM_ADMIN_CHAT_ID)
         return
@@ -7597,7 +7617,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if fill<=0:
         cq=float(order.get("cumQuote") or 0); fill=(cq/exec_qty) if cq and exec_qty else entry_ref
     levels=_at_levels_from_fill(symbol,fill,plan)
-    tid=_at_insert_trade(signal_id,symbol,"LIVE",signal_price,fill,exec_qty,levels,plan,position_side=position_side,entry_order_id=order.get("orderId"),entry_client_id=entry_client)
+    tid=_at_insert_trade(signal_id,symbol,"LIVE",signal_price,fill,exec_qty,levels,plan,position_side=position_side,entry_order_id=order.get("orderId"),entry_client_id=entry_client,frozen_profile=frozen_profile)
     try:
         # Protective STOP first. If it cannot be created, flatten immediately.
         stop_client=_at_client("S",signal_id)
@@ -7611,7 +7631,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
         await telegram_send(session,f"🚨 {symbol} koruyucu STOP kurulamadı; pozisyon acil market emirle kapatılmaya çalışıldı. Hata: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
         return
     try:
-        profile=str(autotrade_cfg["exit_profile"])
+        profile=frozen_profile
         if profile == "PARTIAL_RUNNER":
             runner_frac=float(autotrade_cfg["runner_fraction"])
             runner_qty=_at_quantize(exec_qty*runner_frac,float(f.get("step_size") or 0),ROUND_DOWN)
@@ -7638,6 +7658,67 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     await telegram_send(session,f"🟢 LIVE AÇILDI — {symbol}\n{margin:.0f} USDT × {lev}x | fill {fmt_price(fill)}\nStop {fmt_price(levels['stop'])} | profil {autotrade_cfg['exit_profile']}\nTrade ID #{tid}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
 
 
+def _at_profile_block(tr, reason):
+    if tr.get("last_error") != reason:
+        _at_update_trade(int(tr["id"]), last_error=reason)
+        _at_log_event(reason, trade_id=tr["id"], symbol=tr["symbol"])
+
+
+def _at_step_tick(tr, price, tick_ts):
+    tid = int(tr["id"])
+    try:
+        premium_lock.validate_state(tr)
+        px = premium_lock.decimal(price)
+        stamp = premium_lock.decimal(tick_ts)*1000
+        event_ms = int(stamp)
+        last = _premium_step_tick_watermarks.get(tid, int(tr.get("last_step_event_ts_ms") or 0))
+        if event_ms < int(tr["sl_fill_ts_ms"]) or event_ms <= last:
+            return
+        # On process restart a LIVE trade requires fresh post-boot events.
+        if tr.get("mode") == "LIVE" and event_ms < PROCESS_STARTED_TS_MS:
+            return
+        changes = premium_lock.tick_fields(tr, px, event_ms,
+            exchange_filters.get(tr["symbol"], {}).get("tick_size"), last_seen_ms=last)
+        _premium_step_tick_watermarks[tid] = event_ms
+    except (ValueError, ArithmeticError, TypeError):
+        return
+    if tr.get("mode") == "DRY" and px <= premium_lock.decimal(tr["sl_active_stop_price"]):
+        _at_close_trade(tid, "STOP", float(px), float(tr["expected_qty"])*(float(px)-float(tr["sl_entry_vwap"])), 0)
+        _premium_step_tick_watermarks.pop(tid, None)
+        return
+    if changes:
+        if tr.get("mode") == "DRY" and "desired_stop_price" in changes:
+            changes.update(sl_active_stop_price=changes["desired_stop_price"],
+                           stop_price=float(changes["desired_stop_price"]),
+                           stop_revision=int(tr["stop_revision"])+1, replacement_status="DRY_STABLE")
+        _at_update_trade(tid, **changes)
+
+
+async def _at_step_recovery_check(session, tr, positions):
+    # Read-only quarantine for unexpected/imported LIVE rows. No fallback to TP2,
+    # no stop deletion, and no unproven production replacement adapter.
+    reason = premium_lock.LIVE_BLOCK_REASON
+    try:
+        premium_lock.validate_state(tr)
+        premium_lock.verify_position(tr, positions)
+        for cid, oid, target in ((tr.get("stop_client_id"), tr.get("stop_algo_id"), tr.get("sl_active_stop_price")),
+                                 (tr.get("pending_stop_client_id"), tr.get("pending_stop_algo_id"), tr.get("pending_stop_price"))):
+            if not cid:
+                if target is not None: raise ValueError("STOP_IDENTITY_MISSING")
+                continue
+            order = await binance_signed_request(session, "GET", "/fapi/v1/algoOrder", {"clientAlgoId":cid})
+            premium_lock.verify_order(order, tr, cid, target, order_id=oid)
+        orders = await binance_signed_request(session, "GET", "/fapi/v1/openAlgoOrders", {"symbol":tr["symbol"]})
+        allowed = {tr.get("stop_client_id"), tr.get("pending_stop_client_id")}
+        if not isinstance(orders, list) or any(o.get("clientAlgoId") not in allowed for o in orders):
+            raise ValueError("UNOWNED_OR_EXTRA_ORDER")
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ValueError) else "STEP_RECOVERY_QUERY_UNCERTAIN"
+    if tr.get("last_error") != reason:
+        _at_profile_block(tr, reason)
+        await telegram_send(session, f"⚠️ Premium Step Lock #{tr['id']}: {reason}. Mevcut koruma korunuyor; yönetim engellendi.", chat_id=TELEGRAM_ADMIN_CHAT_ID)
+
+
 def autotrade_on_tick(symbol: str, price: float, tick_ts: float):
     ids=list(autotrade_active_by_symbol.get(symbol) or [])
     if not ids: return
@@ -7645,7 +7726,14 @@ def autotrade_on_tick(symbol: str, price: float, tick_ts: float):
         tr=autotrade_active.get(tid)
         if not tr or tr.get("status") not in ("OPEN","PARTIAL","PROTECTIVE_PARTIAL"): continue
         tp2=float(tr.get("tp2_price") or 0)
-        profile=str(tr.get("exit_profile") or "CURRENT_TP2")
+        try:
+            profile=premium_lock.profile(tr.get("exit_profile"), legacy=True)
+        except ValueError:
+            _at_profile_block(tr, premium_lock.UNKNOWN)
+            continue
+        if profile == premium_lock.PROFILE:
+            _at_step_tick(tr, price, tick_ts)
+            continue
         # LIVE: record the first real-time TP2 touch once. This is one DB write per trade,
         # not per tick, so it does not recreate the old telemetry hot-path backpressure.
         if tr.get("mode") == "LIVE":
@@ -7778,6 +7866,16 @@ async def autotrade_reconcile_loop(session):
                     if abs(amt)>1e-12: posmap[(sym,ps)] += amt
                 for tr in list(live):
                     tid=int(tr["id"]); sym=str(tr["symbol"]); ps=str(tr.get("position_side") or "BOTH")
+                    try:
+                        managed_profile = premium_lock.profile(tr.get("exit_profile"), legacy=True)
+                    except ValueError:
+                        if tr.get("last_error") != premium_lock.UNKNOWN:
+                            _at_profile_block(tr, premium_lock.UNKNOWN)
+                            await telegram_send(session, f"⚠️ {sym}: {premium_lock.UNKNOWN}", chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                        continue
+                    if managed_profile == premium_lock.PROFILE:
+                        await _at_step_recovery_check(session, tr, positions)
+                        continue
                     actual=abs(float(posmap.get((sym,ps),0.0)))
                     expected=abs(float(tr.get("expected_qty") or tr.get("qty") or 0))
                     if actual <= 1e-12:
@@ -8147,6 +8245,23 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
         token=secrets.token_hex(3); autotrade_pending_setting[token]=(key,str(val),time.time()+120)
         markup={"inline_keyboard":[[{"text":"✅ Onayla","callback_data":f"at:confirm:{token}"},{"text":"❌ Vazgeç","callback_data":"at:panel"}]]}
         await telegram_send(session,f"⚠️ {key}: {autotrade_cfg.get(key)} → {val}\nYalnız yeni işlemler etkilenecek.",chat_id=chat_id,reply_markup=markup); return True
+    if low.startswith("/exitprofile"):
+        if not _at_admin_allowed(chat_id,user_id,require_user_id=True): return True
+        parts=text.split()
+        if len(parts) != 2:
+            await telegram_send(session,"Kullanım: /exitprofile CURRENT_TP2 | PARTIAL_RUNNER | PREMIUM_STEP_LOCK_V1 (Step Lock yalnız DRY; LIVE engelli). Yalnız yeni işlemleri etkiler.",chat_id=chat_id)
+            return True
+        try: selected=premium_lock.profile(parts[1].upper())
+        except ValueError:
+            await telegram_send(session,premium_lock.UNKNOWN,chat_id=chat_id); return True
+        if selected == premium_lock.PROFILE and autotrade_cfg["mode"] == "LIVE":
+            await telegram_send(session,premium_lock.LIVE_BLOCK_REASON,chat_id=chat_id); return True
+        _at_save_setting("exit_profile",selected)
+        previous=autotrade_cfg["exit_profile"]
+        autotrade_cfg["exit_profile"]=selected
+        _at_log_event("EXIT_PROFILE_CHANGED",detail=f"{previous}->{selected}; new_trades_only=1; admin={user_id}")
+        await telegram_send(session,f"Çıkış profili {selected}. Yalnız yeni işlemleri etkiler. Step Lock LIVE engeli devam eder.",chat_id=chat_id)
+        return True
     if low.startswith("/runner"):
         if not _at_admin_allowed(chat_id,user_id): return True
         parts=text.split()

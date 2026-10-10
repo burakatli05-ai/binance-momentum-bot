@@ -13,10 +13,10 @@
     "_at_levels_from_fill": "b0ae426ace9e22a22a9f79cec5a8b18dc089a7f25cf76af4152551f5753d6b1b",
     "_at_place_market_entry": "47cb7fdd75bd740369a9347196533f96fbd322d1e1109203bfa68f8139846353",
     "_at_place_algo": "fa8b3fe5aa69bec79a5a655f83164a46862625568691c09d33a54b1365d4c903",
-    "_at_insert_trade": "00837b1ee3af6f69e22d89b79ed9c75ed662b065bde1b2c49c8440170e79155a",
+    "_at_insert_trade": "a6ce30231f122dec43b1f473d9d15d9e42b95376080330b609670a66f92e0b56",
     "_at_close_trade": "5b39f47695cb6b56429459976e5259ece7e1539a2f116e6e02eef2d059d7c004",
-    "autotrade_handle_premium": "a70af585f15ca96ec754ccc1948043504f71a5dba6c7ffdaecd4771ccc811f98",
-    "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
+    "autotrade_handle_premium": "cd1d46c2f3de69e861555d45a0fc226d457aa356d6d95a5e6ac3d12f7b12c09c",
+    "autotrade_on_tick": "3b5bb9767629d0346d4a19fe1536363e6fd407ca4258d7c883b1dc1c6c4b88d6"
   },
   "constants": {
     "EARLY_SCORE": "a36a69a1d40e50e7f3ae4d757c52b3adc4c3ad01b462820c35421548c419e5e9",
@@ -50,5 +50,14 @@
     "binance_momentum_bot/x_watcher.py": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9",
     "binance_momentum_bot/railway.toml": "02451811c0186e8d6b87195a5d9c8942c13ec2aa0982d5f30cbc1ea3c9f106e5"
   },
-  "startup_live_capability_note": "Only startup.py fingerprint updated for explicit env normalization/logging; all strategy, risk, order and other file baselines remain unchanged."
+  "startup_live_capability_note": "Only startup.py fingerprint updated for explicit env normalization/logging; all strategy, risk, order and other file baselines remain unchanged.",
+  "premium_step_lock_review": {
+    "source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+    "reason": "Authorized Premium profile hooks; unchanged functions retain prior assertions",
+    "prior_changed_function_hashes": {
+      "_at_insert_trade": "00837b1ee3af6f69e22d89b79ed9c75ed662b065bde1b2c49c8440170e79155a",
+      "autotrade_handle_premium": "a70af585f15ca96ec754ccc1948043504f71a5dba6c7ffdaecd4771ccc811f98",
+      "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
+    }
+  }
 }

@@ -7,16 +7,25 @@
     "premium_trade_guard": "d5687eac6aae893cdcca2f2ba021e81ab38425459c9e3d5ce4b0313139910945",
     "estimate_trade_plan": "2af605700e2c600226f7bb0c783f57b0d9870821b6fbd554d4b9c70038693b75",
     "evaluate": "946d8301436ba1d760708d3b670f329a8cbeeef22cd573b13cf16f01d49023ab",
-    "load_autotrade_settings": "7352e09c45f1a1b43009cc537602c7b5a58d538cfd917552604e92a2b1c2864f",
+    "load_autotrade_settings": "3c3a32a77c121e0eb42c223ce45cad97b5a6c0dc4795e66c5ca5de234af8e162",
     "_at_levels_from_fill": "b0ae426ace9e22a22a9f79cec5a8b18dc089a7f25cf76af4152551f5753d6b1b",
-    "autotrade_on_tick": "4a7e2de76290e8dbfbe05a0bf9d001202c6ef8131cfbf24fa374bf8bf233d0dd",
+    "autotrade_on_tick": "3b5bb9767629d0346d4a19fe1536363e6fd407ca4258d7c883b1dc1c6c4b88d6",
     "_at_try_live_enable": "492a2933d8a902f288627d71d73f1fa85cda96b32d826f5d7eec0e2bcfe47702",
-    "autotrade_handle_premium": "38c32449474a14f5629a70caf470afc53fd184160ae7c3f3bd424cab563fda8b"
+    "autotrade_handle_premium": "8c753ec9d9bad83514abb5b8ae97a4e493a7f84292ec799d07fdabc6b382df40"
   },
   "files": {
     "binance_momentum_bot/startup.py": "a976d14024105970f3c1709eb5bb90fa439b080f6423fb56f2a05b032130e70a",
     "binance_momentum_bot/db_baseline.json": "1c149ed7d2430525be31c2fef65ff745a646ba5b1da00e562d1a7986df3dad3c",
     "binance_momentum_bot/railway.toml": "02451811c0186e8d6b87195a5d9c8942c13ec2aa0982d5f30cbc1ea3c9f106e5",
     "binance_momentum_bot/x_watcher.py": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9"
+  },
+  "premium_step_lock_review": {
+    "source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+    "reason": "Authorized Premium profile hooks; unchanged functions retain prior assertions",
+    "prior_changed_function_hashes": {
+      "load_autotrade_settings": "7352e09c45f1a1b43009cc537602c7b5a58d538cfd917552604e92a2b1c2864f",
+      "autotrade_handle_premium": "38c32449474a14f5629a70caf470afc53fd184160ae7c3f3bd424cab563fda8b",
+      "autotrade_on_tick": "4a7e2de76290e8dbfbe05a0bf9d001202c6ef8131cfbf24fa374bf8bf233d0dd"
+    }
   }
 }

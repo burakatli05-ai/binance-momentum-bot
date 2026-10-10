@@ -8,7 +8,7 @@
     "premium_trade_guard": "d5687eac6aae893cdcca2f2ba021e81ab38425459c9e3d5ce4b0313139910945",
     "estimate_trade_plan": "2af605700e2c600226f7bb0c783f57b0d9870821b6fbd554d4b9c70038693b75",
     "_at_levels_from_fill": "b0ae426ace9e22a22a9f79cec5a8b18dc089a7f25cf76af4152551f5753d6b1b",
-    "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
+    "autotrade_on_tick": "3b5bb9767629d0346d4a19fe1536363e6fd407ca4258d7c883b1dc1c6c4b88d6"
   },
   "constants": {
     "EARLY_SCORE": "a36a69a1d40e50e7f3ae4d757c52b3adc4c3ad01b462820c35421548c419e5e9",
@@ -36,5 +36,12 @@
     "PREMIUM_REQUIRE_BREAKOUT": "426f376c7adb0829649519d03253a9e4895ea6c331293fef8e4594ba22b16260",
     "ENTRY_ACCEPTANCE_HORIZON_MS": "2c5923c26f9667e25f1244301c08d9fcc24b38077ed65308f2cc1dd046a781f0",
     "TREND_BUILDUP_MIN_SCORE": "314ccdc3891f71141f8afc2cb9f480396ed704b102dd3978f6a7b19231f271f4"
+  },
+  "premium_step_lock_review": {
+    "source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+    "reason": "Authorized Premium profile hooks; unchanged functions retain prior assertions",
+    "prior_changed_function_hashes": {
+      "autotrade_on_tick": "9ef3e9d2aa6484a8e292efe817162ed2a9f05c6ef31ca33827d24631c1a4460b"
+    }
   }
 }

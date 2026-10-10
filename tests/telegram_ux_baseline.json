@@ -6,7 +6,7 @@
     "handle_autotrade_callback",
     "telegram_command_loop"
   ],
-  "protected_bot_ast": "1080eab1d278f9282cd20d1d3384603ae57419b0dfdd184e6267a5b28a739d64",
+  "protected_bot_ast": "f914273bf9924ac227f36cc2df91580b4bb20ed92d824db14fcfa99d229e7c3d",
   "files": {
     "binance_momentum_bot/.env.example": "40b8284d36bfb3dd8a1e320d7b16f25f3b2bd026d230a3f8cf4e22ea3739694c",
     "binance_momentum_bot/alt_shadow.py": "bb9c4c9576bce99a0a79eddc9ed708f5ce49b3fd9e3e26b5a193d3c5a03475f9",
@@ -21,5 +21,7 @@
     "binance_momentum_bot/startup.py": "a976d14024105970f3c1709eb5bb90fa439b080f6423fb56f2a05b032130e70a",
     "binance_momentum_bot/x_watcher.py": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9",
     "binance_momentum_bot/X_WATCHER_SETUP.md": "0066bc1de95e06cd72f4e3ce69c4bc07f3b75c482fc1ee0b221794c76f8c2c23"
-  }
+  },
+  "prior_protected_bot_ast": "1080eab1d278f9282cd20d1d3384603ae57419b0dfdd184e6267a5b28a739d64",
+  "premium_step_lock_source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f"
 }

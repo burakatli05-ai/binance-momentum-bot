@@ -1,4 +1,6 @@
 {
   "base_commit": "5c0ebdfc6c0bdaff25394ad801602b5a893cd2d6",
-  "bot_ast_sha256": "78a612c726e62b3257eec85186530d4a68b3593e47e7c246351bd02b0b19aecf"
+  "bot_ast_sha256": "5759742071cb105cb74dc3dbf39c8f4d386f571795c77d8bb90200a2eeb05b28",
+  "prior_bot_ast_sha256": "78a612c726e62b3257eec85186530d4a68b3593e47e7c246351bd02b0b19aecf",
+  "premium_step_lock_source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f"
 }
