@@ -211,10 +211,12 @@ class Run:
         self.state['pending'].remove(cid);self.state['unresolved'].remove(cid);self.save()
         return q
     def cancel(self,cid):
-        require(cid not in self.cancelled,'DUPLICATE_CANCEL_DENIED')
         q=self.query_stop(cid)
         if q['algoStatus'] in TERMINAL:return
         require(q['algoStatus'] in WORKING,'TERMINAL_UNKNOWN')
+        # A repeated cleanup may verify an already-terminal order, but must never
+        # resubmit a prior uncertain cancel while it is still working.
+        require(cid not in self.cancelled,'DUPLICATE_CANCEL_DENIED')
         self.cancelled.add(cid);self.state['cancel_attempts']+=1;self.save()
         try:self.request('DELETE','/fapi/v1/algoOrder',{'algoId':q['algoId']})
         except Exception:self.event('CANCEL_RESPONSE_UNCERTAIN',client_id=cid)

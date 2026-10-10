@@ -126,6 +126,26 @@ class FakeDemo:
         raise AssertionError('unexpected fixture route')
 
 class Flow(unittest.TestCase):
+    def test_repeated_terminal_cleanup_queries_without_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex=FakeDemo();r=m.Run(d,'0123456789ab',ex)
+            r.create_stop(CID,Decimal('98.7'));r.cancel(CID)
+            before=len([c for c in ex.calls if c[0]=='DELETE'])
+            r.cancel(CID)
+            self.assertEqual(len([c for c in ex.calls if c[0]=='DELETE']),before)
+            self.assertEqual(ex.calls[-1][0],'GET')
+    def test_uncertain_cancel_never_resubmits(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex=FakeDemo();r=m.Run(d,'0123456789ab',ex)
+            r.create_stop(CID,Decimal('98.7'));r.cancelled.add(CID)
+            with self.assertRaisesRegex(m.Blocked,'DUPLICATE_CANCEL_DENIED'):r.cancel(CID)
+            self.assertFalse(any(c[0]=='DELETE' for c in ex.calls))
+    def test_unknown_terminal_status_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex=FakeDemo();r=m.Run(d,'0123456789ab',ex)
+            r.create_stop(CID,Decimal('98.7'));ex.algos[CID]['algoStatus']='UNKNOWN'
+            with self.assertRaisesRegex(m.Blocked,'TERMINAL_UNKNOWN'):r.cancel(CID)
+            self.assertFalse(any(c[0]=='DELETE' for c in ex.calls))
     def test_standard_ordering_and_cleanup(self):
         with tempfile.TemporaryDirectory() as d:
             ex=FakeDemo();r=m.Run(d,'0123456789ab',ex);result=r.execute()

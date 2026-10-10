@@ -1,0 +1,102 @@
+{
+  "version": "r2-frozen-limited-demo-mechanics-probe",
+  "status": "FROZEN_KNOWN_SUBSET_FOR_BOUNDED_DEMO_MECHANICS_ONLY",
+  "reviewed_utc": "2026-10-10T19:24:31.782392+00:00",
+  "base_url": "https://demo-fapi.binance.com",
+  "sources": {
+    "general": "https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/general-info",
+    "trade": "https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade",
+    "account": "https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account",
+    "errors": "https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/error-code",
+    "sdk": "https://github.com/binance/binance-connector-python/blob/master/clients/derivatives_trading_usds_futures/src/binance_sdk_derivatives_trading_usds_futures/rest_api/rest_api.py"
+  },
+  "sdk_blob_sha1": "0968f892a6b5519737548a3e07a56fa10fda04eb",
+  "endpoints": {
+    "create": [
+      "POST",
+      "/fapi/v1/algoOrder"
+    ],
+    "query": [
+      "GET",
+      "/fapi/v1/algoOrder"
+    ],
+    "cancel": [
+      "DELETE",
+      "/fapi/v1/algoOrder"
+    ],
+    "open": [
+      "GET",
+      "/fapi/v1/openAlgoOrders"
+    ]
+  },
+  "identity": {
+    "query_cancel": [
+      "algoId",
+      "clientAlgoId"
+    ],
+    "client_id_regex": "^[\\.A-Z\\:/a-z0-9_-]{1,36}$",
+    "client_id_uniqueness": "open orders",
+    "request_type": "type",
+    "response_type": "orderType",
+    "algoType": "CONDITIONAL"
+  },
+  "closePosition": {
+    "value": "true",
+    "types": [
+      "STOP_MARKET",
+      "TAKE_PROFIT_MARKET"
+    ],
+    "SELL": "closes current long when triggered",
+    "omit": [
+      "quantity",
+      "reduceOnly"
+    ]
+  },
+  "mode": {
+    "one_way": "BOTH",
+    "hedge_long_close": "SELL/LONG",
+    "not_transferable": true
+  },
+  "workingType": [
+    "CONTRACT_PRICE",
+    "MARK_PRICE"
+  ],
+  "algoStatus": {
+    "documented_examples": [
+      "NEW",
+      "CANCELED"
+    ],
+    "exhaustive_enum": "NOT_VERIFIED",
+    "unknown_policy": "FAIL_CLOSED"
+  },
+  "triggerPrice": {
+    "field": "conditional threshold",
+    "SELL_STOP_comparator": "MISSING_IN_CURRENT_PAGE_AND_SDK; NOT_CLAIMED_VERIFIED"
+  },
+  "errors": {
+    "-1006": "execution uncertain",
+    "-1007": "execution uncertain",
+    "-2013": "no such order",
+    "-2021": "immediate trigger",
+    "-4116": "duplicate clientOrderId",
+    "-4120": "use Algo API"
+  },
+  "duplicate_algo_exact_error": "NOT_VERIFIED; no duplicate create permitted",
+  "modify": "Only LIMIT modification documented; conditional amendment support NOT_PROVEN",
+  "weights": {
+    "algo_create_order_10s": 1,
+    "algo_create_order_1m": 1,
+    "algo_create_ip": 0,
+    "algo_query_ip": 1,
+    "algo_cancel_ip": 1,
+    "open_algo_symbol_ip": 1,
+    "open_algo_all_ip": 40,
+    "normal_open_all_ip": 40,
+    "position_risk_ip": 5,
+    "mode_query_ip": 30
+  },
+  "overlap_support": "NOT_PROVEN; no exchange write dispatched",
+  "profile_sha256": "29e695ec40d2c12b6037db8ad6cbede27da5cac0f58a01054e491b2967746cd3",
+  "production_attestation": false,
+  "prior_documentary_gaps_preserved": true
+}
