@@ -1,0 +1,273 @@
+{
+  "official_order": [
+    {
+      "order": 1,
+      "id": "1wYcCfBQh_1Yt9_iLZUZMGCXh_B2VHimQ",
+      "title": "Momentum_Bot_Ana_Referans_2026-09-25.md",
+      "read_utc": "2026-10-11T16:14:12.092Z",
+      "read_mode": "FRESH_OFFICIAL_FETCH",
+      "cached_text_sha256": "2f675e8aae32bf5624f67bf5eda45d8faa906e6456988b339770945bc16a23f6"
+    },
+    {
+      "order": 2,
+      "id": "1zfzU-EBnEwF5qq4ImiCQuR6TV2C3MhB5",
+      "title": "Master_Index_Drive_2026-09-26.md",
+      "read_utc": "2026-10-11T16:14:15.959Z",
+      "read_mode": "FRESH_OFFICIAL_FETCH",
+      "cached_text_sha256": "a86ae8acd61d7d85ed3c18735dcd20f0d1c4db5b0bd3ce33be778c690c7c7b92"
+    },
+    {
+      "order": 3,
+      "id": "1agwCbWT8sSRoBcGT8pepOBiEUTPWNCd1",
+      "title": "Master_Index_Append.md",
+      "read_utc": "2026-10-11T16:14:29.849Z",
+      "read_mode": "FRESH_OFFICIAL_FETCH",
+      "cached_text_sha256": "ef7fc4cc342ab567bc1a4ad1f933c874d256349d6cd910595160e3f79e07b20c"
+    },
+    {
+      "order": 4,
+      "id": "1dvHwGrL3YfNOihFCjQybeaMBtHXxiqTj",
+      "title": "Decision_Log_Append.md",
+      "read_utc": "2026-10-11T16:14:33.949Z",
+      "read_mode": "FRESH_OFFICIAL_FETCH",
+      "cached_text_sha256": "f82adf68311f2bd408d2ce5359a7f829e6c4d6401f7929203cd8c545f1384881"
+    },
+    {
+      "order": 5,
+      "id": "1nX0LKpfo-i1AXVJ-yuCKlF3mVxZtjWFi",
+      "title": "current_status.json",
+      "sha256": "19b59f99e6a8fad6066928ea573845557ddf22c7f900860d4ca80eff47c4608e",
+      "read_mode": "FRESH_FETCH_EMPTY_TEXT_FALLBACK_TO_VERIFIED_RAW_PARENT_ARCHIVE",
+      "cached_text_sha256": "19b59f99e6a8fad6066928ea573845557ddf22c7f900860d4ca80eff47c4608e"
+    },
+    {
+      "order": 6,
+      "id": "1qVYCxG2rXf36afYf2NHnHeYh5hNVs1DYE4k4a1JHMtg",
+      "title": "2026-10-10_Momentum_Bot_Ana_Gunluk",
+      "read_utc": "2026-10-11T16:14:54.709Z",
+      "read_mode": "FRESH_OFFICIAL_FETCH",
+      "cached_text_sha256": "d861616dafefc3273e44c674127e6eb2e8d34e03c75026c6c906b8a70508a0ad"
+    },
+    {
+      "order": 7,
+      "id": "1qCIoUm8U4k8d-lE-uSaL-u4Xl3FF37A2",
+      "title": "Minimum_Immutable_Selector_Receipt_Contract.json",
+      "mime_type": "application/json",
+      "modified_time": "2026-10-10T16:58:01.311Z",
+      "read_utc": "2026-10-11T14:19:48.427Z",
+      "read_mode": "REUSE_PREVIOUSLY_READ_OFFICIAL_CACHE",
+      "cached_text_sha256": "44eb3208c80a9e106dc95d5cba696e2c89376b315ed1bda06ff21dfa49a403bb"
+    },
+    {
+      "order": 8,
+      "id": "1FlM3BalFd7LX1hSADktMGZaqUKTgCLSo",
+      "title": "Parent_V1_Contract_Unchanged.json",
+      "sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+      "read_mode": "RAW_VERIFIED_OFFICIAL_PARENT_ARCHIVE",
+      "cached_text_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f"
+    },
+    {
+      "order": 9,
+      "id": "12htE-j8pa2KHwkjpUeN1w61NW0HBhNrf",
+      "title": "V2_Minimal_Attestation_Implementation_Report.md",
+      "sha256": "6fc9d59dfdc20058648882bc9980d8e82235d6d67ab98c8a996fe100a8b1e194",
+      "read_mode": "RAW_VERIFIED_OFFICIAL_PARENT_ARCHIVE",
+      "cached_text_sha256": "6fc9d59dfdc20058648882bc9980d8e82235d6d67ab98c8a996fe100a8b1e194"
+    },
+    {
+      "order": 10,
+      "id": "1L_oKpWWGYRHUsVJL4TJR-_p5aQoTQ-JS",
+      "title": "Decision_Source_Read_Witness_Map.md",
+      "sha256": "98d72d8ed9e24dce870410d6d795f1316dcbe1c3d9783a7cc1eaa552677096c2",
+      "read_mode": "RAW_VERIFIED_OFFICIAL_PARENT_ARCHIVE",
+      "cached_text_sha256": "98d72d8ed9e24dce870410d6d795f1316dcbe1c3d9783a7cc1eaa552677096c2"
+    },
+    {
+      "order": 11,
+      "id": "1pazvMjWN3PRYUuTMDglyVZDwOXPJCtvD",
+      "title": "Config_Writer_and_Revision_Map.md",
+      "sha256": "4c94a8ec07339ebf0ce35df342715b79e0131f025fb392836855a340ccfe7fe5",
+      "read_mode": "RAW_VERIFIED_OFFICIAL_PARENT_ARCHIVE",
+      "cached_text_sha256": "4c94a8ec07339ebf0ce35df342715b79e0131f025fb392836855a340ccfe7fe5"
+    },
+    {
+      "order": 12,
+      "id": "16QwQ9ZAJuKmglF1dMBXXaT7cG6LCJVpH",
+      "title": "Static_Source_Boundary_Result.json",
+      "sha256": "c8209bfedb94ba13f1a205cbd1b23395a471c5ced761785a5c8210e855b42c87",
+      "read_mode": "RAW_VERIFIED_OFFICIAL_PARENT_ARCHIVE",
+      "cached_text_sha256": "c8209bfedb94ba13f1a205cbd1b23395a471c5ced761785a5c8210e855b42c87"
+    },
+    {
+      "order": 13,
+      "name": "V2_Source_Read_Witness_Boundary_Redesign_Report.md",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1yOiRTgpXB0jNTP26tKeKy6AWFcV2dJZB/view?usp=drivesdk",
+      "bytes": 4738,
+      "sha256": "60efed988074125b0c36dcbb3fa0bad2bba01816ff8d55643651e6db00385692",
+      "cached_text_sha256": "60efed988074125b0c36dcbb3fa0bad2bba01816ff8d55643651e6db00385692"
+    },
+    {
+      "order": 14,
+      "name": "Frozen_Redesign_Question.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1H0D69-5WAkGQCEI-4peCPdo3sCWiO-5_/view?usp=drivesdk",
+      "bytes": 1082,
+      "sha256": "3de731a321d7e13035c1af10d89448f4c7f2c7b14c6a8062707cb78670ac2809",
+      "cached_text_sha256": "3de731a321d7e13035c1af10d89448f4c7f2c7b14c6a8062707cb78670ac2809"
+    },
+    {
+      "order": 15,
+      "name": "Candidate_Design_Comparison.md",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1sXwkFJH_Lma4xX6_6pFK0s6bSITrND2N/view?usp=drivesdk",
+      "bytes": 1415,
+      "sha256": "359e4dae8927581d997814f54e7af76987606f3a3ec060837201507075794a6a",
+      "cached_text_sha256": "359e4dae8927581d997814f54e7af76987606f3a3ec060837201507075794a6a"
+    },
+    {
+      "order": 16,
+      "name": "Exact_Read_Site_Map.csv",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1RwqBTaRLtvebmdbYjtken8JivAc4KNBw/view?usp=drivesdk",
+      "bytes": 3667,
+      "sha256": "b1f69141b147236dd9a40a5e018888525658061581b029221ac734c7c67a1d49",
+      "cached_text_sha256": "b1f69141b147236dd9a40a5e018888525658061581b029221ac734c7c67a1d49"
+    },
+    {
+      "order": 17,
+      "name": "Call_Site_Coverage_Matrix.csv",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1cK49qZTyrk3jf-5xKzp3gPKFKvPakQnw/view?usp=drivesdk",
+      "bytes": 16415,
+      "sha256": "b4aa743d3b18f05d06ac1628179995ade992d6b2391a7630c73d1db84796a4a6",
+      "cached_text_sha256": "b4aa743d3b18f05d06ac1628179995ade992d6b2391a7630c73d1db84796a4a6"
+    },
+    {
+      "order": 18,
+      "name": "Call_Site_Review_Resolution.csv",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1d7fgIfO90VKbyxBIhSlviz8sQ1qh4CCh/view?usp=drivesdk",
+      "bytes": 29050,
+      "sha256": "3267ffb79abfb9d3742dc0680748ae491d3ba1a8bcb2e42e268da41c08d06fed",
+      "cached_text_sha256": "3267ffb79abfb9d3742dc0680748ae491d3ba1a8bcb2e42e268da41c08d06fed"
+    },
+    {
+      "order": 19,
+      "name": "Gate_to_Arm_Identity_Propagation.md",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1wTov_duSJEckj5IylZR2dandeku9YBaU/view?usp=drivesdk",
+      "bytes": 2212,
+      "sha256": "888d8c78956eec8595f255fdd4fb05ab5d97785d6718993f53c86af3e0beff04",
+      "cached_text_sha256": "888d8c78956eec8595f255fdd4fb05ab5d97785d6718993f53c86af3e0beff04"
+    },
+    {
+      "order": 20,
+      "name": "Source_Read_Semantics_Contract.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/156v7CH0hJbgzphx_u8EP4_PWZdkXQNBn/view?usp=drivesdk",
+      "bytes": 4182,
+      "sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a",
+      "cached_text_sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a"
+    },
+    {
+      "order": 21,
+      "name": "V2_Source_Read_Witness_Boundary_v2_Candidate.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1xHg21-rvYyfDwdlh9VaYEtAy_Oq9cCXS/view?usp=drivesdk",
+      "bytes": 4182,
+      "sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a",
+      "cached_text_sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a"
+    },
+    {
+      "order": 22,
+      "name": "Microprototype_Test_Plan.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1fIsoYIt_CQtS38slAxDI4wZ1u_CKuEXu/view?usp=drivesdk",
+      "bytes": 4675,
+      "sha256": "b3d46414e32eca45e64da902b1f61239286302b018c793646c74d9c4bd417fa1",
+      "cached_text_sha256": "b3d46414e32eca45e64da902b1f61239286302b018c793646c74d9c4bd417fa1"
+    },
+    {
+      "order": 23,
+      "name": "Microprototype_Test_Results.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1eOzFr2uBLXBiuCU3RuoelnbzDVlsMbz7/view?usp=drivesdk",
+      "bytes": 25524,
+      "sha256": "59656fa8dcb6e74af4df4356173334dd2897763c1628f889d9234311bc62bf93",
+      "cached_text_sha256": "59656fa8dcb6e74af4df4356173334dd2897763c1628f889d9234311bc62bf93"
+    },
+    {
+      "order": 24,
+      "name": "Adversarial_Read_Results.csv",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/11nD-IbV5_LPVLLeBM87hXIZDsPTclZzW/view?usp=drivesdk",
+      "bytes": 12322,
+      "sha256": "bf5f32f5827f9fc4872d1b31c264afd62d5d006f3b3fa1b754f7829a9b1745ee",
+      "cached_text_sha256": "bf5f32f5827f9fc4872d1b31c264afd62d5d006f3b3fa1b754f7829a9b1745ee"
+    },
+    {
+      "order": 25,
+      "name": "Bytecode_Comparison.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1HXHdhbqwcdV-ksEFV0UOA00ih8C5F5n0/view?usp=drivesdk",
+      "bytes": 308119,
+      "sha256": "f7ec075ad2602f1b817fc9ea09500095a7d5fb31235ad85887b9e77d1e831b87",
+      "cached_text_sha256": "f7ec075ad2602f1b817fc9ea09500095a7d5fb31235ad85887b9e77d1e831b87"
+    },
+    {
+      "order": 26,
+      "name": "Differential_Test_Evidence.zip",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1CJwoIBhvFvHGpGngLkIwDW8JmEzOLak5/view?usp=drivesdk",
+      "bytes": 87075,
+      "sha256": "389c70fc9e876a09544d2333f7908a1d365567594c4dbaa20b57e61165ec64dd",
+      "cached_text_sha256": null
+    },
+    {
+      "order": 27,
+      "name": "Blocker_Record.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1A8_wRsduWQ0BBdmkBzv6dBg4XeekO_u2/view?usp=drivesdk",
+      "bytes": 1108,
+      "sha256": "a989e169c1e11f81013ccd959fa316011d8a8ad8433fab33a3629500c3a0b2e5",
+      "cached_text_sha256": "a989e169c1e11f81013ccd959fa316011d8a8ad8433fab33a3629500c3a0b2e5"
+    },
+    {
+      "order": 28,
+      "name": "Failed_Attempts.md",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1O7p1_E3_wGEVvjzGjtuiUDogmuMKMt9s/view?usp=drivesdk",
+      "bytes": 1919,
+      "sha256": "d3e723e9c6f4c6acdd78da814bce7246666faab13dc22afaab3d8fe98a892f40",
+      "cached_text_sha256": "d3e723e9c6f4c6acdd78da814bce7246666faab13dc22afaab3d8fe98a892f40"
+    },
+    {
+      "order": 29,
+      "name": "OFF_Path_Overhead_Result.json",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1xGkion8tP8E6HZcQMXEMzw4OfTGA5-0g/view?usp=drivesdk",
+      "bytes": 1263,
+      "sha256": "e76741a9f73bc58ccd14ef4efa51007ae60b740f142f3b7389af1fa9c3d92079",
+      "cached_text_sha256": "e76741a9f73bc58ccd14ef4efa51007ae60b740f142f3b7389af1fa9c3d92079"
+    },
+    {
+      "order": 30,
+      "name": "Complexity_and_Stop_Value_Assessment.md",
+      "mode": "VERIFIED_PARENT_RAW_ARCHIVE_REUSE",
+      "drive_url": "https://drive.google.com/file/d/1lr9N1lxnGLvyux_ZInPupAE2YaNu_l9n/view?usp=drivesdk",
+      "bytes": 958,
+      "sha256": "2ad43a37384752a171383aaa455af928c26d796a4c79a81ad7041099345992f2",
+      "cached_text_sha256": "2ad43a37384752a171383aaa455af928c26d796a4c79a81ad7041099345992f2"
+    },
+    {
+      "order": 31,
+      "name": "Parent archive closure",
+      "cached_text_sha256": null
+    }
+  ],
+  "central_master_review": "fresh full fetch; relevant latest tail reviewed, not a line-by-line reading claim",
+  "canonical_daily_scope": "fresh native text contains heading and archive routing only; no canonical replacement created",
+  "parent43_raw_hashes_verified": true,
+  "parent_sources_mode": "verified raw parent archive reuse; not claimed fresh cloud re-download"
+}

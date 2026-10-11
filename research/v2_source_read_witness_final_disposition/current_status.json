@@ -1,0 +1,156 @@
+{
+  "work": "2026-10-11_V2_Source_Read_Witness_Candidate_Final_Disposition_v1",
+  "result_class": "B",
+  "main_result": "V2_SOURCE_READ_WITNESS_CANDIDATE_REJECTED_FINAL",
+  "candidate_locked": false,
+  "candidate_status": "FINAL_REJECTED_CLOSED_CURRENT_ARCHITECTURE",
+  "parent_result": "D / V2_SOURCE_READ_WITNESS_BOUNDARY_BLOCKED_MICROPROTOTYPE_REGRESSION_OR_PERFORMANCE",
+  "parent_first_complete": {
+    "passed": 7,
+    "failed": 25
+  },
+  "parent_corrected_diagnostic": {
+    "passed": 32,
+    "failed": 0,
+    "design_lock": false
+  },
+  "parent_contract_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+  "candidate_contract_sha256": "4bf58e561d094d77085c15b2ed5867ac3ab71d2c7d507ffd1dde6f344182491e",
+  "rejection_record_sha256": "ca444830d13059578316584cf5606f139ae92e7a2319673687c445d1918f10b3",
+  "final_tests": {
+    "unique": 36,
+    "passed": 33,
+    "failed": 3,
+    "runs": 1,
+    "retests": 0
+  },
+  "performance": {
+    "sample_pairs": 2000,
+    "timed_invocations": 6000,
+    "warmups_per_variant": 50,
+    "local_python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "production_latency_pass": false,
+    "variants": {
+      "parent_original": {
+        "p50_ns": 70200,
+        "p99_ns": 228100,
+        "max_ns": 397300
+      },
+      "capture_off": {
+        "p50_ns": 72500,
+        "p99_ns": 233700,
+        "max_ns": 577100,
+        "p50_ratio": 1.0327635327635327
+      },
+      "capture_on_serialized": {
+        "p50_ns": 102500,
+        "p99_ns": 302800,
+        "max_ns": 495200,
+        "p50_ratio": 1.46011396011396
+      }
+    },
+    "deltas": {
+      "capture_off": {
+        "p50_ns": 2100,
+        "p99_ns": 145500,
+        "max_ns": 492000
+      },
+      "capture_on_serialized": {
+        "p50_ns": 32200,
+        "p99_ns": 204100,
+        "max_ns": 396300
+      }
+    },
+    "checks": {
+      "capture_off_p99": true,
+      "capture_off_max": true,
+      "capture_on_serialized_p99": true,
+      "capture_on_serialized_max": true
+    },
+    "status": "PASS",
+    "scope": "LOCAL_FIXTURE_MICROBENCH_ONLY"
+  },
+  "production_ready": false,
+  "production_hook": false,
+  "receipt_activation": 0,
+  "entry_before_exit_completed": false,
+  "source_commit_technical_anchor": "OPEN",
+  "panel": [
+    {
+      "step": 1,
+      "name": "Historical Public Early source/price",
+      "status": "CLOSED",
+      "evidence": "prior1385/1385,666/666"
+    },
+    {
+      "step": 2,
+      "name": "H1 mechanism shadow",
+      "status": "CLOSED"
+    },
+    {
+      "step": 3,
+      "name": "H1 raw access",
+      "status": "CLOSED"
+    },
+    {
+      "step": 4,
+      "name": "H1 predeploy",
+      "status": "CLOSED_SCOPED"
+    },
+    {
+      "step": 5,
+      "name": "H1 bounded export",
+      "status": "CLOSED",
+      "evidence": "prior660rows"
+    },
+    {
+      "step": 6,
+      "name": "H1 economic",
+      "status": "CLOSED_INCONCLUSIVE"
+    },
+    {
+      "step": 7,
+      "name": "Entry validation",
+      "status": "ENTRY_VALIDATION_ACTIVE / EXECUTION_NOT_FINAL",
+      "READY268": "ENTRY_VALIDATION_INSUFFICIENT_DATA"
+    },
+    {
+      "step": 8,
+      "name": "Event order / era / lineage / whole window",
+      "status": "OPEN"
+    },
+    {
+      "step": 9,
+      "name": "A05 / exit",
+      "status": "NOT_EXECUTED / PENDING"
+    },
+    {
+      "step": 10,
+      "name": "Independent OOS → execution → separate LIVE",
+      "status": "PENDING",
+      "OOS": 0
+    }
+  ],
+  "counters": {
+    "production_application_source_change": 0,
+    "premium_step_lock_source_change": 0,
+    "feature_implementation": 0,
+    "production_branch_merge": 0,
+    "railway_deployment": 0,
+    "railway_restart": 0,
+    "railway_variable_change": 0,
+    "production_db_schema": 0,
+    "receipt_activation": 0,
+    "selector_threshold_entry_exit_change": 0,
+    "autotrade_live_change": 0,
+    "demo_binance_request": 0,
+    "PR_created": 0,
+    "new_V2_work_started": 0,
+    "premium_resume_work_started": 0,
+    "FIRST_DECISION": 0,
+    "OOS": 0
+  },
+  "next_single_action": "CONSOLIDATE_PREMIUM_STEP_LOCK_V1_QRO_PRODUCTION_ADAPTER_IN_ISOLATED_FEATURE_BRANCH",
+  "next_started": false,
+  "archive_status": "PENDING_CLOSURE_RECEIPT; only separately raw-verified completion receipt establishes ARCHIVE_COMPLETE"
+}

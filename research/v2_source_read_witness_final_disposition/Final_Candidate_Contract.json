@@ -1,0 +1,79 @@
+{
+  "contract_id": "V2_SOURCE_READ_WITNESS_BOUNDARY_V2_FINAL_CANDIDATE",
+  "status": "FROZEN_PROPOSAL_PENDING_SINGLE_FINAL_RUN",
+  "parent_contract_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+  "parent_proposal_sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a",
+  "research_parent": "7b8ab475f21accd42007b3b4adb10734e3218899",
+  "single_revision": [
+    "verified quality-arm episode anchor 6028",
+    "serialize actual gate cap and float.hex",
+    "caller-owned runtime-local gate-attempt sequence and namespace",
+    "same invocation grant through gate and arm",
+    "single-use local capability, missing/reuse/mismatch/restart UNKNOWN",
+    "capture existing episode reads 6028/6033/6040; unequal observations UNKNOWN; equal observations still UNKNOWN without continuity proof"
+  ],
+  "design_class": "unchanged composite exact-site local capture + ephemeral context + opt-in sideband",
+  "identity": {
+    "namespace": "new uuid4 per runtime owner; fixtures inject deterministic namespaces; no clock",
+    "sequence": "caller-owned itertools.count starting1 allocated only on gate opt-in; rejected/interrupted attempts burn sequence; nested/concurrent invocations share owner",
+    "invocation": "serialized [runtime_namespace,decision_sequence]",
+    "durable_receipt": false,
+    "registry": "none; owner counter plus private one-use iterator per invocation, no global map",
+    "restart": "new runtime namespace AND different owner; old/reused context unknown",
+    "production_runtime_ownership": "UNPROVEN"
+  },
+  "episode_proof": {
+    "gate_episode_read_exists": false,
+    "before_after_equality_is_proof": false,
+    "normal_chain_status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+    "reason": "current allowed observations cannot distinguish no mutation from hidden episode ABA; no fabricated exact link",
+    "exact_gate_required_for_A": true
+  },
+  "semantics": {
+    "threshold_config_reads": 7,
+    "additional_strategy_identity_reads": 0,
+    "posthoc_threshold_rereads": 0,
+    "global_mutable_registry": 0,
+    "db_join": 0,
+    "selector_recovery_reruns": 0,
+    "new_strategy_clocks": 0,
+    "locks_transactions_retries": 0,
+    "bytecode_identical": false,
+    "source_function_copies_only": true
+  },
+  "serialization": {
+    "max_bytes": 16384,
+    "unread": "NOT_READ_SHORT_CIRCUIT",
+    "missing_nested": "UNKNOWN_EXCEPTION_OR_GAP",
+    "numeric": "exact int/finite float; binary64 hex included; unsupported primitives unknown",
+    "payload_fields": [
+      "cap",
+      "fast",
+      "lower",
+      "qual",
+      "sql",
+      "event",
+      "notify",
+      "runtime_namespace",
+      "decision_sequence",
+      "invocation_identity",
+      "gate_to_arm",
+      "episode_observations"
+    ],
+    "local_nonce": "one-use capability only, not emitted or called durable ID"
+  },
+  "model": {
+    "runtime": "local CPython 3.12.14 only; no production3.13 proof",
+    "includes": "all previous32 scripted fixtures plus serialized fields, episode persistent/ABA/pre-first-read and context lifecycle",
+    "excludes": [
+      "arbitrary instruction-level schedules",
+      "custom finalizers",
+      "memory exhaustion",
+      "signals",
+      "production loaded-reference/writer ownership"
+    ],
+    "unknown_outside_model": true
+  },
+  "acceptance": "36/36 PASS + exact gate-arm identity + all semantics and budgets; otherwise B, no patch/retest",
+  "production_implementation": false
+}

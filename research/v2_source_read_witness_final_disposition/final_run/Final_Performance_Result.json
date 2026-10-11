@@ -1,0 +1,46 @@
+{
+  "sample_pairs": 2000,
+  "timed_invocations": 6000,
+  "warmups_per_variant": 50,
+  "local_python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "production_latency_pass": false,
+  "variants": {
+    "parent_original": {
+      "p50_ns": 70200,
+      "p99_ns": 228100,
+      "max_ns": 397300
+    },
+    "capture_off": {
+      "p50_ns": 72500,
+      "p99_ns": 233700,
+      "max_ns": 577100,
+      "p50_ratio": 1.0327635327635327
+    },
+    "capture_on_serialized": {
+      "p50_ns": 102500,
+      "p99_ns": 302800,
+      "max_ns": 495200,
+      "p50_ratio": 1.46011396011396
+    }
+  },
+  "deltas": {
+    "capture_off": {
+      "p50_ns": 2100,
+      "p99_ns": 145500,
+      "max_ns": 492000
+    },
+    "capture_on_serialized": {
+      "p50_ns": 32200,
+      "p99_ns": 204100,
+      "max_ns": 396300
+    }
+  },
+  "checks": {
+    "capture_off_p99": true,
+    "capture_off_max": true,
+    "capture_on_serialized_p99": true,
+    "capture_on_serialized_max": true
+  },
+  "status": "PASS",
+  "scope": "LOCAL_FIXTURE_MICROBENCH_ONLY"
+}

@@ -1,0 +1,25 @@
+{
+  "status": "FROZEN_BEFORE_ANY_FINAL_CANDIDATE_BEHAVIOR_EXECUTION",
+  "frozen_utc": "2026-10-11T16:31:13.992Z",
+  "candidate_count": 1,
+  "pre_freeze_behavior_runs": 0,
+  "final_runs_allowed": 1,
+  "post_result_patch_retest_allowed": false,
+  "unique_scenarios": 36,
+  "frozen_files": {
+    "Final_Candidate.py": "3ac9c0343d7b2f61c7e36c2336ce1bb9511c090a2d3edc709788bc3024233a28",
+    "Final_Harness.py": "4d2f123c991e521a9553614a859b9d070ef14909a7d1ef4009f29bef8db9bb76",
+    "Run_Final_Once.py": "7a8b176447e0cf052617124ff60d64502408dffb30ddec5bd7fd0dcb55f31cfa",
+    "Final_Candidate_Contract.json": "4bf58e561d094d77085c15b2ed5867ac3ab71d2c7d507ffd1dde6f344182491e",
+    "Final_Candidate_Contract_SHA256.txt": "90a075a49a1bcdb83af7d244fd530240794e75ba5d16921dcf81e66a8102865b",
+    "Final_Test_Plan.json": "d729cb77ba904986e68191b40a7768d1c0256353d238bdaafa62e73314e9503a",
+    "Final_Allowed_Diff.json": "1586d017fb6812dac95fe181b61cb4ee2c26b0012e76374456e2e4364e8215ec",
+    "Final_Identity_Manifest.json": "c34b6b7aa7a6283d70e5f0498c23daad9d055c25d747f5d35c062d5f632b0d4f",
+    "Final_Performance_Budget.json": "85ca843bf011878cff2e5e85167de5cf91a7b38b06fde560996052ca69b73b75",
+    "Source_Inventory.json": "0fa1ba88c97b02b8d4129b17e22d174f5757bbbeb84fe036de57cf74d33b3ebc",
+    "Parent_V1_Contract_Unchanged.json": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+    "Pre_Final_Static_Checks.json": "771966cffeeb9bcc1d8565aa44d1628328a0af04f7445e9aa2b1c101cf3dc862"
+  },
+  "run_command": "python -X utf8 Run_Final_Once.py",
+  "failure_result": "V2_SOURCE_READ_WITNESS_CANDIDATE_REJECTED_FINAL"
+}

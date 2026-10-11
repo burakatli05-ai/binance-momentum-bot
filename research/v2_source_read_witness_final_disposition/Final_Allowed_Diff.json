@@ -1,0 +1,12 @@
+{
+  "research_parent": "7b8ab475f21accd42007b3b4adb10734e3218899",
+  "branch": "research/v2-source-read-witness-final-disposition-v1-20261011",
+  "only_allowed_prefix": "research/v2_source_read_witness_final_disposition/",
+  "production_application_diff": 0,
+  "existing_test_diff": 0,
+  "workflow_diff": 0,
+  "premium_diff": 0,
+  "unrelated_diff": 0,
+  "PR": 0,
+  "commit_push_authorized": true
+}

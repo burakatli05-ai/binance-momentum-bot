@@ -1,0 +1,833 @@
+{
+  "unique_scenarios": 36,
+  "all_strategy_comparisons_equal": true,
+  "rows": [
+    {
+      "id": "M01",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M02",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M03",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M04",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M05",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M06",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M07",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M08",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M09",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M10",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M11",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M12",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M13",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M14",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M15",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M16",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M17",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M18",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M19",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M20",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M21",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M22",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M23",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M24",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M25",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M26",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M27",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M28",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M29",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M30",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M31",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M32",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M33",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M34",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M35",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    },
+    {
+      "id": "M36",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true,
+          "read_count": true,
+          "read_order": true,
+          "notification": true,
+          "sql": true,
+          "step_lock": true
+        }
+      ]
+    }
+  ],
+  "local_fixture_only": true,
+  "production_noninterference_proven": false
+}

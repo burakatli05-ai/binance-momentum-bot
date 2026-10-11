@@ -1,0 +1,24 @@
+{
+  "result_class": "B",
+  "main_result": "V2_SOURCE_READ_WITNESS_CANDIDATE_REJECTED_FINAL",
+  "work": "2026-10-11_V2_Source_Read_Witness_Candidate_Final_Disposition_v1",
+  "reason": "Exact gate-to-arm episode continuity is unproven under the permitted current-source observations. Equal observations cannot distinguish hidden ABA; candidate correctly returns UNKNOWN, so mandatory exact-chain tests fail.",
+  "failed_scenarios": [
+    "M14",
+    "M15",
+    "M16"
+  ],
+  "passed": 33,
+  "failed": 3,
+  "unique": 36,
+  "complete_final_runs": 1,
+  "post_freeze_patches": 0,
+  "retests": 0,
+  "freeze_sha256": "fb7c2835cb9103149ca5d92a9052fbccd8c4c2e3976c723bddb9fb67d757f83a",
+  "candidate_contract_sha256": "4bf58e561d094d77085c15b2ed5867ac3ab71d2c7d507ffd1dde6f344182491e",
+  "performance": "LOCAL_BUDGET_PASS",
+  "production_pass": false,
+  "closure": "V2 exact buy-saturation receipt path CLOSED for current architecture; same candidate must not be reopened under a new name",
+  "next_single_action": "CONSOLIDATE_PREMIUM_STEP_LOCK_V1_QRO_PRODUCTION_ADAPTER_IN_ISOLATED_FEATURE_BRANCH",
+  "next_started": false
+}

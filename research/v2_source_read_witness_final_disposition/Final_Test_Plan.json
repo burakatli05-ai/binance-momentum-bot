@@ -1,0 +1,220 @@
+{
+  "status": "FROZEN_BEFORE_FINAL_BEHAVIOR_RUN",
+  "unique_tests": 36,
+  "tests": [
+    {
+      "id": "M01",
+      "scenario": "global_numeric",
+      "requirement": "ordinary cap numeric"
+    },
+    {
+      "id": "M02",
+      "scenario": "global_invalid_type",
+      "requirement": "cap str raises TypeError"
+    },
+    {
+      "id": "M03",
+      "scenario": "global_comparison_exception",
+      "requirement": "reflected comparator raises ValueError"
+    },
+    {
+      "id": "M04",
+      "scenario": "fast_true",
+      "requirement": "FAST true: lower read zero"
+    },
+    {
+      "id": "M05",
+      "scenario": "fast_false",
+      "requirement": "FAST false: lower read once"
+    },
+    {
+      "id": "M06",
+      "scenario": "min_score_normal",
+      "requirement": "distinct normal four min_score reads"
+    },
+    {
+      "id": "M07",
+      "scenario": "property_raises",
+      "requirement": "qualification property raises"
+    },
+    {
+      "id": "M08",
+      "scenario": "qualification_sql_change",
+      "requirement": "qualification=90 SQL=96"
+    },
+    {
+      "id": "M09",
+      "scenario": "sql_event_change",
+      "requirement": "qualification=90 SQL=90 event=97"
+    },
+    {
+      "id": "M10",
+      "scenario": "aba",
+      "requirement": "min_score 90 -> 95 -> 90 -> 95"
+    },
+    {
+      "id": "M11",
+      "scenario": "same_value_republish",
+      "requirement": "new config generation each read, same90"
+    },
+    {
+      "id": "M12",
+      "scenario": "interrupted_before_arm",
+      "requirement": "quality_arm fixture raises before arm"
+    },
+    {
+      "id": "M13",
+      "scenario": "gate_reject",
+      "requirement": "buy exceeds cap: no arm"
+    },
+    {
+      "id": "M14",
+      "scenario": "gate_arm_link",
+      "requirement": "immutable token exact same radar/episode/symbol"
+    },
+    {
+      "id": "M15",
+      "scenario": "reentrant_invocations",
+      "requirement": "nested invocation distinct token; no registry"
+    },
+    {
+      "id": "M16",
+      "scenario": "concurrent_invocations",
+      "requirement": "two threads independent state; exact own token"
+    },
+    {
+      "id": "M17",
+      "scenario": "scorer_exception",
+      "requirement": "FAST comparator raises in arm catch"
+    },
+    {
+      "id": "M18",
+      "scenario": "notify_failure",
+      "requirement": "existing _queue_notify raises"
+    },
+    {
+      "id": "M19",
+      "scenario": "sql_failure",
+      "requirement": "SQL stub execute raises"
+    },
+    {
+      "id": "M20",
+      "scenario": "step_lock_branch",
+      "requirement": "StepLock branch executes before scorer"
+    },
+    {
+      "id": "M21",
+      "scenario": "missing_witness",
+      "requirement": "direct arm without gate context: UNKNOWN"
+    },
+    {
+      "id": "M22",
+      "scenario": "witness_oversize",
+      "requirement": "oversize metadata rejected by witness serializer"
+    },
+    {
+      "id": "M23",
+      "scenario": "observer_off",
+      "requirement": "capture locals present; no sideband/token/serialization"
+    },
+    {
+      "id": "M24",
+      "scenario": "restart_namespace",
+      "requirement": "old namespace context rejected: UNKNOWN"
+    },
+    {
+      "id": "M25",
+      "scenario": "gate_earlier_short_circuit",
+      "requirement": "candidate passes<2 cap unread"
+    },
+    {
+      "id": "M26",
+      "scenario": "qualification_short_circuit",
+      "requirement": "invalid label qualification min_score unread; SQL read preserved"
+    },
+    {
+      "id": "M27",
+      "scenario": "sql_property_exception",
+      "requirement": "second min_score read raises; no reuse"
+    },
+    {
+      "id": "M28",
+      "scenario": "step_lock_exception",
+      "requirement": "StepLock failure existing event then scorer"
+    },
+    {
+      "id": "M29",
+      "scenario": "event_failure",
+      "requirement": "selector event fails; existing rejection event"
+    },
+    {
+      "id": "M30",
+      "scenario": "legacy_api",
+      "requirement": "default calls retain bool/tuple/bool/None return shapes"
+    },
+    {
+      "id": "M31",
+      "scenario": "identity_gap",
+      "requirement": "radar changes before arm: context UNKNOWN; strategy unchanged"
+    },
+    {
+      "id": "M32",
+      "scenario": "on_disabled_notify",
+      "requirement": "notify flag false -> notify min_score unread"
+    },
+    {
+      "id": "M33",
+      "scenario": "serialized_gate_cap",
+      "requirement": "actual consumed gate cap serialized including binary64"
+    },
+    {
+      "id": "M34",
+      "scenario": "serialized_invocation_identity",
+      "subcases": [
+        "payload_identity_first",
+        "payload_identity_second"
+      ],
+      "requirement": "same runtime sequential invocations carry namespace and decision sequence in serialized payload"
+    },
+    {
+      "id": "M35",
+      "scenario": "episode_mutation",
+      "subcases": [
+        "episode_persistent",
+        "episode_aba",
+        "episode_before_quality"
+      ],
+      "requirement": "all episode mutations UNKNOWN with identical strategy transcript; equality never proves continuity"
+    },
+    {
+      "id": "M36",
+      "scenario": "context_lifecycle",
+      "subcases": [
+        "context_restart",
+        "context_reuse",
+        "context_missing",
+        "context_mismatch"
+      ],
+      "requirement": "all UNKNOWN; explicit duplicate arm call in reuse fixture is matched in original, not recovery rerun"
+    }
+  ],
+  "required_comparisons": [
+    "original return",
+    "original exception type/message",
+    "read order",
+    "read count",
+    "comparison results",
+    "branch/side-effect transcript",
+    "witness expected result",
+    "read count explicit",
+    "identity read order/count",
+    "notification",
+    "SQL",
+    "StepLock",
+    "final strategy state",
+    "UNKNOWN classification"
+  ],
+  "fail_policy": "Any fail/exception/incomplete/artifact missing/budget breach => B; no patch/retest",
+  "parent_T001_T092": "NOT_RUN_ALL_92",
+  "exact_gate": "M14/M15/M16 retain exact chain expectation; UNKNOWN continuity fails this mandatory gate even if all semantics agree."
+}

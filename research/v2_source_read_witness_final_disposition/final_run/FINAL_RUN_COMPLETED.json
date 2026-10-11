@@ -1,0 +1,22 @@
+{
+  "completed_utc": "2026-10-11T16:31:55.160284+00:00",
+  "result_class": "B",
+  "unique_scenarios": 36,
+  "passed": 33,
+  "failed": 3,
+  "performance": "PASS",
+  "complete": true,
+  "behavior_runs": 1,
+  "retests": 0,
+  "frozen_files_unchanged": true,
+  "artifact_hashes": {
+    "Final_Test_Results.json": "ffb8ce998b0c6d378d7e0f8f6073d5688b9381a0483d6ff8afce9227491b12b3",
+    "Final_Raw_Transcripts.json": "17ad1378673977f67e52839c755b1f80b08d7e87105195c1f70ddbce9db8cbc7",
+    "Final_Adversarial_Read_Results.csv": "8bab1b2e473379a85e0b4c5eec2bf3c2cf1faf89042187e9543b4cd3409cb049",
+    "Final_Transcript_Comparison.json": "d4124ddf33caf5030568067e02b75748c10f2326c2309ca55b14e5e5439fd119",
+    "Final_Serialization_Completeness.json": "cacdf1231465f6def8b1980e100ab911c83d548e2a8af97fbb424c9a8a5c82bf",
+    "Final_Performance_Result.json": "67c6c0c85996f7846048539328b73845e64603b41617f481e2241a5759fca1ef",
+    "Microbenchmark_Raw.csv": "939d0e673630680e0031ac6605258f8e0dd059ec474a801dfc67151716b5719e",
+    "Bytecode_Comparison.json": "1883eb10b19bef9eae3db9165895bee52e0ea37318b44bee37ac9f43ab19be83"
+  }
+}

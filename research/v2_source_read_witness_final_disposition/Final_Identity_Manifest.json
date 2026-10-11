@@ -1,0 +1,86 @@
+{
+  "fresh_metadata": {
+    "utc": "2026-10-11T16:14:09.207Z",
+    "status": {
+      "project": {
+        "id": "37d9e12d-9c81-421f-a7a3-785a5e3538c5",
+        "name": "fulfilling-determination",
+        "workspaceName": "Burak Atlı's Projects"
+      },
+      "environment": {
+        "id": "24d62078-d9ec-41ef-b32a-6de000fa8187",
+        "name": "production",
+        "unmergedChangesCount": null,
+        "stagedChanges": null
+      },
+      "services": [
+        {
+          "id": "c5e4a28a-8829-4434-bfee-16297373244f",
+          "name": "binance-momentum-bot",
+          "numReplicas": null,
+          "cronSchedule": null,
+          "volumes": [
+            {
+              "id": "8cf48cfe-4dd5-4755-82a6-539df9a28271",
+              "name": "binance-momentum-bot-volume-1wJf",
+              "mountPath": "/data",
+              "sizeMB": 102400,
+              "region": "ams"
+            }
+          ],
+          "latestDeployment": {
+            "id": "f07f2499-045c-4ea4-a3c7-769855f9ad8c",
+            "status": "SUCCESS",
+            "createdAt": "2026-10-06T23:01:08.178Z",
+            "url": null
+          }
+        }
+      ],
+      "buckets": [],
+      "pendingWork": [
+        {
+          "id": "patch:2b77b813-e349-4af2-9ffd-6a39fa23ebb2",
+          "kind": "EnvironmentPatch",
+          "status": "staged",
+          "changes": [],
+          "startedAt": "2026-09-16T21:39:33.674Z",
+          "workflowId": "commitChanges/24d62078-d9ec-41ef-b32a-6de000fa8187/2b77b813-e349-4af2-9ffd-6a39fa23ebb2"
+        }
+      ]
+    },
+    "deployment": {
+      "deployments": [
+        {
+          "id": "f07f2499-045c-4ea4-a3c7-769855f9ad8c",
+          "status": "SUCCESS",
+          "createdAt": "2026-10-06T23:01:08.178Z",
+          "updatedAt": "2026-10-06T23:03:21.750Z",
+          "serviceId": "c5e4a28a-8829-4434-bfee-16297373244f",
+          "environmentId": "24d62078-d9ec-41ef-b32a-6de000fa8187",
+          "url": null,
+          "snapshotId": "27ad97ab-9b95-4dad-a022-9ac805175a0b",
+          "canRollback": true,
+          "canRedeploy": true,
+          "regions": [
+            "ams"
+          ],
+          "meta": {
+            "reason": "deploy",
+            "commitMessage": "Add opt-in bounded read-only H1 checkpoint export with isolated safety gates",
+            "commitHash": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+            "branch": "research/h1-bounded-export-20261006"
+          }
+        }
+      ]
+    }
+  },
+  "expected": {
+    "deployment": "f07f2499-045c-4ea4-a3c7-769855f9ad8c",
+    "source": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+    "repo": "burakatli05-ai/binance-momentum-bot",
+    "branch": "research/h1-bounded-export-20261006",
+    "research_parent": "7b8ab475f21accd42007b3b4adb10734e3218899"
+  },
+  "metadata_matches": true,
+  "loaded_runtime_attestation": false
+}

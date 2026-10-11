@@ -1,0 +1,61 @@
+{
+  "work": "2026-10-11_V2_Source_Read_Witness_Candidate_Final_Disposition_v1",
+  "exact_research_parent": "7b8ab475f21accd42007b3b4adb10734e3218899",
+  "runtime": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "command_executed_once": "python -X utf8 Run_Final_Once.py",
+  "frozen_files": {
+    "Final_Candidate.py": "3ac9c0343d7b2f61c7e36c2336ce1bb9511c090a2d3edc709788bc3024233a28",
+    "Final_Harness.py": "4d2f123c991e521a9553614a859b9d070ef14909a7d1ef4009f29bef8db9bb76",
+    "Run_Final_Once.py": "7a8b176447e0cf052617124ff60d64502408dffb30ddec5bd7fd0dcb55f31cfa",
+    "Final_Candidate_Contract.json": "4bf58e561d094d77085c15b2ed5867ac3ab71d2c7d507ffd1dde6f344182491e",
+    "Final_Candidate_Contract_SHA256.txt": "90a075a49a1bcdb83af7d244fd530240794e75ba5d16921dcf81e66a8102865b",
+    "Final_Test_Plan.json": "d729cb77ba904986e68191b40a7768d1c0256353d238bdaafa62e73314e9503a",
+    "Final_Allowed_Diff.json": "1586d017fb6812dac95fe181b61cb4ee2c26b0012e76374456e2e4364e8215ec",
+    "Final_Identity_Manifest.json": "c34b6b7aa7a6283d70e5f0498c23daad9d055c25d747f5d35c062d5f632b0d4f",
+    "Final_Performance_Budget.json": "85ca843bf011878cff2e5e85167de5cf91a7b38b06fde560996052ca69b73b75",
+    "Source_Inventory.json": "0fa1ba88c97b02b8d4129b17e22d174f5757bbbeb84fe036de57cf74d33b3ebc",
+    "Parent_V1_Contract_Unchanged.json": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+    "Pre_Final_Static_Checks.json": "771966cffeeb9bcc1d8565aa44d1628328a0af04f7445e9aa2b1c101cf3dc862"
+  },
+  "freeze_sha256": "fb7c2835cb9103149ca5d92a9052fbccd8c4c2e3976c723bddb9fb67d757f83a",
+  "complete_run": {
+    "completed_utc": "2026-10-11T16:31:55.160284+00:00",
+    "result_class": "B",
+    "unique_scenarios": 36,
+    "passed": 33,
+    "failed": 3,
+    "performance": "PASS",
+    "complete": true,
+    "behavior_runs": 1,
+    "retests": 0,
+    "frozen_files_unchanged": true,
+    "artifact_hashes": {
+      "Final_Test_Results.json": "ffb8ce998b0c6d378d7e0f8f6073d5688b9381a0483d6ff8afce9227491b12b3",
+      "Final_Raw_Transcripts.json": "17ad1378673977f67e52839c755b1f80b08d7e87105195c1f70ddbce9db8cbc7",
+      "Final_Adversarial_Read_Results.csv": "8bab1b2e473379a85e0b4c5eec2bf3c2cf1faf89042187e9543b4cd3409cb049",
+      "Final_Transcript_Comparison.json": "d4124ddf33caf5030568067e02b75748c10f2326c2309ca55b14e5e5439fd119",
+      "Final_Serialization_Completeness.json": "cacdf1231465f6def8b1980e100ab911c83d548e2a8af97fbb424c9a8a5c82bf",
+      "Final_Performance_Result.json": "67c6c0c85996f7846048539328b73845e64603b41617f481e2241a5759fca1ef",
+      "Microbenchmark_Raw.csv": "939d0e673630680e0031ac6605258f8e0dd059ec474a801dfc67151716b5719e",
+      "Bytecode_Comparison.json": "1883eb10b19bef9eae3db9165895bee52e0ea37318b44bee37ac9f43ab19be83"
+    }
+  },
+  "replay_policy": "record for inspection only; no authorized retest; candidate closed",
+  "production_imports": 0,
+  "fixtures": "original source AST copies plus same scripted collaborators; all SQL/network/StepLock effects are in-memory fixtures",
+  "raw_evidence": "Failed_Final_Run_Evidence.zip",
+  "parent_failure_evidence": "Parent_Differential_Test_Evidence.zip",
+  "source_inventory": "Source_Inventory.json",
+  "scope_limits": {
+    "runtime": "local CPython 3.12.14 only; no production3.13 proof",
+    "includes": "all previous32 scripted fixtures plus serialized fields, episode persistent/ABA/pre-first-read and context lifecycle",
+    "excludes": [
+      "arbitrary instruction-level schedules",
+      "custom finalizers",
+      "memory exhaustion",
+      "signals",
+      "production loaded-reference/writer ownership"
+    ],
+    "unknown_outside_model": true
+  }
+}

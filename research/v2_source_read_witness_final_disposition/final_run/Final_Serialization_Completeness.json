@@ -1,0 +1,791 @@
+{
+  "serialized_gate_cap": "PASS",
+  "serialized_runtime_identity": "PASS",
+  "gate_episode_observed": false,
+  "durable_receipt_identity": false,
+  "complete_exact_receipt": false,
+  "witnesses": [
+    {
+      "id": "M14",
+      "subcase": "gate_arm_link",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 1,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            1
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M33",
+      "subcase": "serialized_gate_cap",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 1,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            1
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M34",
+      "subcase": "payload_identity_first",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 1,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            1
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M34",
+      "subcase": "payload_identity_second",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 2,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            2
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M35",
+      "subcase": "episode_persistent",
+      "witness": {
+        "status": "UNKNOWN_EPISODE_CHANGE",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 1,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            1
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            24,
+            24
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 761
+      }
+    },
+    {
+      "id": "M35",
+      "subcase": "episode_aba",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 2,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            2
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M35",
+      "subcase": "episode_before_quality",
+      "witness": {
+        "status": "UNKNOWN_UNPROVEN_EPISODE_CONTINUITY",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 3,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            3
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 24,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            24,
+            24,
+            24
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 774
+      }
+    },
+    {
+      "id": "M36",
+      "subcase": "context_restart",
+      "witness": {
+        "status": "UNKNOWN_RESTART_NAMESPACE",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 1,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            1
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 764
+      }
+    },
+    {
+      "id": "M36",
+      "subcase": "context_reuse",
+      "witness": {
+        "status": "UNKNOWN_REUSED_CONTEXT",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 2,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            2
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "TEST"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 761
+      }
+    },
+    {
+      "id": "M36",
+      "subcase": "context_missing",
+      "witness": {
+        "status": "UNKNOWN_MISSING_WITNESS",
+        "operands": [
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": null,
+        "gate_to_arm": null,
+        "bytes": 324
+      }
+    },
+    {
+      "id": "M36",
+      "subcase": "context_mismatch",
+      "witness": {
+        "status": "UNKNOWN_IDENTITY_GAP",
+        "operands": [
+          [
+            "cap",
+            0.8
+          ],
+          [
+            "fast",
+            85
+          ],
+          [
+            "lower",
+            "NOT_READ_SHORT_CIRCUIT"
+          ],
+          [
+            "qual",
+            90.0
+          ],
+          [
+            "sql",
+            90.0
+          ],
+          [
+            "event",
+            90.0
+          ],
+          [
+            "notify",
+            90.0
+          ]
+        ],
+        "binary64": {
+          "cap": "0x1.999999999999ap-1",
+          "qual": "0x1.6800000000000p+6",
+          "sql": "0x1.6800000000000p+6",
+          "event": "0x1.6800000000000p+6",
+          "notify": "0x1.6800000000000p+6"
+        },
+        "identity": {
+          "runtime_namespace": "fixture-runtime-A",
+          "decision_sequence": 4,
+          "invocation_identity": [
+            "fixture-runtime-A",
+            4
+          ],
+          "scope": "RUNTIME_LOCAL_GATE_ATTEMPT_NOT_DURABLE_RECEIPT",
+          "radar": 17,
+          "episode": 23,
+          "symbol": "WRONG"
+        },
+        "gate_to_arm": {
+          "gate_radar": 17,
+          "arm_radar": 17,
+          "episode_read_sites": [
+            6028,
+            6033,
+            6040
+          ],
+          "episode_observations": [
+            23,
+            23,
+            23
+          ],
+          "gate_episode": "NOT_OBSERVED_IN_SOURCE",
+          "continuity_proven": false,
+          "context_admitted_once": true
+        },
+        "bytes": 760
+      }
+    }
+  ]
+}

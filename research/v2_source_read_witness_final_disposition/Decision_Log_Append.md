@@ -1,0 +1,6 @@
+# Decision Log append — 2026-10-11_V2_Source_Read_Witness_Candidate_Final_Disposition_v1
+B — **V2_SOURCE_READ_WITNESS_CANDIDATE_REJECTED_FINAL**. Final36:33PASS/3FAIL(M14/M15/M16 exact episode continuity). Tek freeze ve complete finalrun; patch/retest0. Local performancebudgetPASS; productionPASSdeğil.
+Parent ilk7/25failure ve corrected32/32diagnostic korunur; V1contract değişmedi. Candidatecontract SHA4bf58e561d094d77085c15b2ed5867ac3ab71d2c7d507ffd1dde6f344182491e; rejectionSHAca444830d13059578316584cf5606f139ae92e7a2319673687c445d1918f10b3.
+V2 current architecture exact buy-saturation receipt yolu CLOSED; aynıcandidate yeniadla açılmaz.
+Premium checkpoint9d115152408bf971e587aab2a04d10545f748d00,prior70/70PASS,LIVEreadyfalse,QROadapterunbound. Tümproduction sayaçları0. Stage7ENTRY_VALIDATION_ACTIVE/EXECUTION_NOT_FINAL,READY268INSUFFICIENT_DATA,H1INCONCLUSIVE,FIRST0,OOS0,A05NOT_EXECUTED.
+Nextsingle: CONSOLIDATE_PREMIUM_STEP_LOCK_V1_QRO_PRODUCTION_ADAPTER_IN_ISOLATED_FEATURE_BRANCH; startedfalse. Arşiv doğrulaması ayrı completionreceipt ve rawreadbackmanifest ile belirlenir. Bu append merkezi tarihsel kayıtları değiştirmez.
