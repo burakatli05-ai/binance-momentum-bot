@@ -1,0 +1,22 @@
+{
+  "paths": [
+    "research/v2_minimal_attestation_review/README.md",
+    "research/v2_minimal_attestation_review/source_boundary_audit.py",
+    "research/v2_minimal_attestation_review/test_source_boundary_audit.py",
+    "research/v2_minimal_attestation_review/Static_Source_Boundary_Result.json",
+    "research/v2_minimal_attestation_review/Decision_Source_Read_Witness_Map.md",
+    "research/v2_minimal_attestation_review/Config_Writer_and_Revision_Map.md",
+    "research/v2_minimal_attestation_review/Frozen_Contract_Copy.json",
+    "research/v2_minimal_attestation_review/Frozen_Contract_SHA256.txt",
+    "research/v2_minimal_attestation_review/Source_Base_Identity.json",
+    "research/v2_minimal_attestation_review/Frozen_Implementation_Test_Plan.json",
+    "research/v2_minimal_attestation_review/Local_Performance_Test_Contract.json",
+    "research/v2_minimal_attestation_review/Planned_Changed_Files.json",
+    "research/v2_minimal_attestation_review/Implementation_Freeze_Manifest.json"
+  ],
+  "application_files_to_modify": [],
+  "test_files_to_modify": [],
+  "new_review_harness_only": true,
+  "unrelated_diff_allowed": 0,
+  "implementation_blocker_policy": "No source hook when actual reads require prohibited replacement; no redesign in this Work"
+}

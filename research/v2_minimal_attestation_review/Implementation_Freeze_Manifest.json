@@ -1,0 +1,43 @@
+{
+  "run": "2026-10-11_V2_Minimal_In_Process_Runtime_Attestation_Isolated_Implementation_v1",
+  "frozen_utc": "2026-10-11T14:25:39.682672+00:00",
+  "before_branch_file_edits": true,
+  "before_measurements": true,
+  "branch_status_before": "CLEAN",
+  "contract_id": "MINIMUM_IN_PROCESS_RUNTIME_ATTESTATION_REQUIREMENTS_V1",
+  "contract_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+  "status": "PRE_IMPLEMENTATION_REQUIREMENTS_FROZEN; feasibility unresolved at freeze, implementation must stop on blocker",
+  "files": [
+    {
+      "name": "Frozen_Contract_Copy.json",
+      "size": 6368,
+      "sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f"
+    },
+    {
+      "name": "Frozen_Contract_SHA256.txt",
+      "size": 66,
+      "sha256": "60801e6750f3469fc009935941f3f872336d8c12530dbfc16681e399611017d2"
+    },
+    {
+      "name": "Source_Base_Identity.json",
+      "size": 8203,
+      "sha256": "6cf2dc96014585131430ecafd5f4d29ec0a375f2d02553287829ae9ac17acc13"
+    },
+    {
+      "name": "Frozen_Implementation_Test_Plan.json",
+      "size": 23091,
+      "sha256": "e398e4adb7be0b64ae0186943cbd0238cdc0d77c4fc7c7a73048d8e362c7d08e"
+    },
+    {
+      "name": "Local_Performance_Test_Contract.json",
+      "size": 1209,
+      "sha256": "657b26b9f259db72c73e821880f18d42baa81d7858f97a8d5baf84cc78ace324"
+    },
+    {
+      "name": "Planned_Changed_Files.json",
+      "size": 1265,
+      "sha256": "353d9f3382c8e6a24afadc6cc8265fc402b412ffc59083acb257bf9e7d9a3467"
+    }
+  ],
+  "self_hash": "Recorded externally in Reproducibility_Manifest.json; no recursive self-hash"
+}

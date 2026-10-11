@@ -1,0 +1,317 @@
+{
+  "main_result": "V2_ATTESTATION_IMPLEMENTATION_BLOCKED_NO_NONINTERFERING_SOURCE_READ_WITNESS",
+  "result_class": "B",
+  "scope": "Static exact-source feasibility; no live code or production acceptance",
+  "reads": [
+    {
+      "setting": "EARLY_NOTIFY_MAX_BUY30",
+      "file": "bot.py",
+      "function": "early_notify_pass",
+      "lines": [
+        5558
+      ],
+      "existing_direct_local_captures": []
+    },
+    {
+      "setting": "FAST_EARLY_V2_SCORE",
+      "file": "bot.py",
+      "function": "ignition_shadow_score",
+      "lines": [
+        4272
+      ],
+      "existing_direct_local_captures": []
+    },
+    {
+      "setting": "IGNITION_V2_MIN_SCORE",
+      "file": "bot.py",
+      "function": "ignition_shadow_score",
+      "lines": [
+        4272
+      ],
+      "existing_direct_local_captures": []
+    },
+    {
+      "setting": "V2_min_score",
+      "file": "early_autotrader_v2.py",
+      "function": "Pilot.record_selector",
+      "lines": [
+        133,
+        149
+      ],
+      "existing_direct_local_captures": []
+    }
+  ],
+  "publications": [
+    {
+      "file": "bot.py",
+      "line": 135,
+      "target": "EARLY_NOTIFY_MAX_BUY30",
+      "statement": "EARLY_NOTIFY_MAX_BUY30 = float(os.getenv(\"EARLY_NOTIFY_MAX_BUY30\", \"0.80\"))"
+    },
+    {
+      "file": "bot.py",
+      "line": 222,
+      "target": "IGNITION_V2_MIN_SCORE",
+      "statement": "IGNITION_V2_MIN_SCORE = int(os.getenv(\"IGNITION_V2_MIN_SCORE\", \"80\"))"
+    },
+    {
+      "file": "bot.py",
+      "line": 223,
+      "target": "FAST_EARLY_V2_SCORE",
+      "statement": "FAST_EARLY_V2_SCORE = int(os.getenv(\"FAST_EARLY_V2_SCORE\", \"85\"))"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 73,
+      "target": "self.generation",
+      "statement": "self.generation = 0"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 98,
+      "target": "self.cfg",
+      "statement": "self.cfg = Config(**{k: json.loads(v) for k,v in saved.items() if k in valid}).validate()"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 126,
+      "target": "self.cfg",
+      "statement": "self.cfg = config"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 127,
+      "target": "self.generation",
+      "statement": "self.generation += 1"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 272,
+      "target": "self.generation",
+      "statement": "self.generation += 1"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 296,
+      "target": "self.generation",
+      "statement": "self.generation += 1"
+    },
+    {
+      "file": "early_autotrader_v2.py",
+      "line": 330,
+      "target": "self.generation",
+      "statement": "self.generation += 1"
+    }
+  ],
+  "arm_calls": [
+    {
+      "line": 347,
+      "callee": "self.pilot.clock"
+    },
+    {
+      "line": 350,
+      "callee": "self.b.get('states', {}).get"
+    },
+    {
+      "line": 350,
+      "callee": "self.b.get"
+    },
+    {
+      "line": 351,
+      "callee": "getattr"
+    },
+    {
+      "line": 352,
+      "callee": "self.step_lock.arm"
+    },
+    {
+      "line": 352,
+      "callee": "float"
+    },
+    {
+      "line": 354,
+      "callee": "self.pilot.event"
+    },
+    {
+      "line": 354,
+      "callee": "str"
+    },
+    {
+      "line": 355,
+      "callee": "type"
+    },
+    {
+      "line": 357,
+      "callee": "self.b['ignition_shadow_score']"
+    },
+    {
+      "line": 359,
+      "callee": "m.get"
+    },
+    {
+      "line": 365,
+      "callee": "self.pilot.record_selector"
+    },
+    {
+      "line": 366,
+      "callee": "float"
+    },
+    {
+      "line": 369,
+      "callee": "self.pilot.event"
+    },
+    {
+      "line": 370,
+      "callee": "str"
+    },
+    {
+      "line": 371,
+      "callee": "bool"
+    },
+    {
+      "line": 373,
+      "callee": "flag"
+    },
+    {
+      "line": 375,
+      "callee": "selector_features.get"
+    },
+    {
+      "line": 376,
+      "callee": "float"
+    },
+    {
+      "line": 378,
+      "callee": "', '.join"
+    },
+    {
+      "line": 378,
+      "callee": "str"
+    },
+    {
+      "line": 379,
+      "callee": "selector_features.get"
+    },
+    {
+      "line": 380,
+      "callee": "float"
+    },
+    {
+      "line": 381,
+      "callee": "self._queue_notify"
+    },
+    {
+      "line": 385,
+      "callee": "float"
+    },
+    {
+      "line": 386,
+      "callee": "float"
+    },
+    {
+      "line": 387,
+      "callee": "feature"
+    },
+    {
+      "line": 387,
+      "callee": "feature"
+    },
+    {
+      "line": 388,
+      "callee": "feature"
+    },
+    {
+      "line": 389,
+      "callee": "feature"
+    },
+    {
+      "line": 396,
+      "callee": "self.b['estimate_trade_plan']"
+    },
+    {
+      "line": 397,
+      "callee": "self.queue.put_nowait"
+    },
+    {
+      "line": 397,
+      "callee": "dict"
+    },
+    {
+      "line": 398,
+      "callee": "float"
+    },
+    {
+      "line": 403,
+      "callee": "self.pilot.event"
+    },
+    {
+      "line": 404,
+      "callee": "str"
+    },
+    {
+      "line": 407,
+      "callee": "self.pilot.event"
+    },
+    {
+      "line": 408,
+      "callee": "str"
+    },
+    {
+      "line": 409,
+      "callee": "str"
+    },
+    {
+      "line": 409,
+      "callee": "type"
+    }
+  ],
+  "configure_statements": [
+    {
+      "line": 118,
+      "statement": "if self.mode == 'LIVE':\n            raise Blocked('SET_OFF_BEFORE_CONFIG_CHANGE')"
+    },
+    {
+      "line": 120,
+      "statement": "values = asdict(self.cfg)"
+    },
+    {
+      "line": 121,
+      "statement": "if key not in values:\n            raise Blocked('UNKNOWN_SETTING')"
+    },
+    {
+      "line": 123,
+      "statement": "values[key] = value"
+    },
+    {
+      "line": 124,
+      "statement": "config = Config(**values).validate()"
+    },
+    {
+      "line": 125,
+      "statement": "self.setting(key, value)"
+    },
+    {
+      "line": 126,
+      "statement": "self.cfg = config"
+    },
+    {
+      "line": 127,
+      "statement": "self.generation += 1"
+    },
+    {
+      "line": 128,
+      "statement": "self.pending.clear()"
+    }
+  ],
+  "assumptions": {
+    "base_hashes_exact": true,
+    "current_disk_is_live_code": false,
+    "writer_completeness": false,
+    "immutable_global_ownership_proved": false,
+    "runtime_UUID_created": false,
+    "source_read_replaced": false,
+    "application_imported": false,
+    "selector_executed": false
+  },
+  "reason": "Actual operands are consumed inline and not retained in existing locals/results. Additional reads cannot establish operand identity. Local capture/wrapper/read replacement is expressly prohibited by this Work. No certified immutable-owner alternative exists."
+}

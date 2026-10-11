@@ -1,0 +1,665 @@
+{
+  "frozen_utc": "2026-10-11T14:25:39.679671+00:00",
+  "required_test_count": 92,
+  "acceptance_criteria": "All user requirements unchanged; no waiver; B stops dependent implementation and tests, all IDs retained as not-run",
+  "tests": [
+    {
+      "id": "T001",
+      "user_number": 1,
+      "requirement": "OFF import side effect yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T002",
+      "user_number": 2,
+      "requirement": "OFF worker yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T003",
+      "user_number": 3,
+      "requirement": "OFF thread yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T004",
+      "user_number": 4,
+      "requirement": "OFF queue yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T005",
+      "user_number": 5,
+      "requirement": "OFF dosya yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T006",
+      "user_number": 6,
+      "requirement": "OFF yeni clock call yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T007",
+      "user_number": 7,
+      "requirement": "OFF selector transcript exact aynı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T008",
+      "user_number": 8,
+      "requirement": "OFF SQL transcript exact aynı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T009",
+      "user_number": 9,
+      "requirement": "OFF notification exact aynı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T010",
+      "user_number": 10,
+      "requirement": "OFF existing Step Lock branch exact aynı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T011",
+      "user_number": 11,
+      "requirement": "OFF exception türü/sırası exact aynı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T012",
+      "user_number": 12,
+      "requirement": "Observer failure strategy return’ünü değiştirmez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T013",
+      "user_number": 13,
+      "requirement": "Observer failure source SQL rollback üretmez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T014",
+      "user_number": 14,
+      "requirement": "Queue full strategy’yi etkilemez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T015",
+      "user_number": 15,
+      "requirement": "Disk full strategy’yi etkilemez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T016",
+      "user_number": 16,
+      "requirement": "Serialization error strategy’yi etkilemez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T017",
+      "user_number": 17,
+      "requirement": "Aynı process runtime UUID sabit",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T018",
+      "user_number": 18,
+      "requirement": "Yeni process runtime UUID farklı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T019",
+      "user_number": 19,
+      "requirement": "PID reuse UUID olarak kullanılmaz",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T020",
+      "user_number": 20,
+      "requirement": "Derived fingerprint secondary kalır",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T021",
+      "user_number": 21,
+      "requirement": "Actual live `__code__` fingerprint",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T022",
+      "user_number": 22,
+      "requirement": "Disk compile live code yerine kullanılamaz",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T023",
+      "user_number": 23,
+      "requirement": "Monkeypatch/code alias farkı tespit edilir",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T024",
+      "user_number": 24,
+      "requirement": "Module origin farkı tespit edilir",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T025",
+      "user_number": 25,
+      "requirement": "Loader farkı tespit edilir",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T026",
+      "user_number": 26,
+      "requirement": "Missing code object UNKNOWN",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T027",
+      "user_number": 27,
+      "requirement": "Observer version/hash uyuşmazlığı fail-closed",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T028",
+      "user_number": 28,
+      "requirement": "Startup actual four-setting receipt",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T029",
+      "user_number": 29,
+      "requirement": "Source default origin",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T030",
+      "user_number": 30,
+      "requirement": "Env origin allowlist",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T031",
+      "user_number": 31,
+      "requirement": "DB min_score origin",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T032",
+      "user_number": 32,
+      "requirement": "Startup configure origin",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T033",
+      "user_number": 33,
+      "requirement": "Admin configure origin",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T034",
+      "user_number": 34,
+      "requirement": "Pilot.generation actual read",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T035",
+      "user_number": 35,
+      "requirement": "Mutation revision monotonik",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T036",
+      "user_number": 36,
+      "requirement": "Aynı değerle yeni mutation revision artışı görünür",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T037",
+      "user_number": 37,
+      "requirement": "A→B→A ABA görünür",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T038",
+      "user_number": 38,
+      "requirement": "Mutation sırasında decision UNKNOWN",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T039",
+      "user_number": 39,
+      "requirement": "Missing writer completeness false",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T040",
+      "user_number": 40,
+      "requirement": "Missing value UNKNOWN",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T041",
+      "user_number": 41,
+      "requirement": "Invalid/nonfinite preserved",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T042",
+      "user_number": 42,
+      "requirement": "Revision ve Pilot.generation ayrımı",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T043",
+      "user_number": 43,
+      "requirement": "Restore generation UNKNOWN ise exact acceptance engeli",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T044",
+      "user_number": 44,
+      "requirement": "Existing decision_ms exact reuse",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T045",
+      "user_number": 45,
+      "requirement": "Yeni clock call yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T046",
+      "user_number": 46,
+      "requirement": "16 feature exact bounded snapshot",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T047",
+      "user_number": 47,
+      "requirement": "Invalid/missing feature korunur",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T048",
+      "user_number": 48,
+      "requirement": "Future field yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T049",
+      "user_number": 49,
+      "requirement": "Actual score/label/qualified/reasons bağlanır",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T050",
+      "user_number": 50,
+      "requirement": "Actual record_selector sonucu bağlanır",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T051",
+      "user_number": 51,
+      "requirement": "Existing exception exact korunur",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T052",
+      "user_number": 52,
+      "requirement": "Duplicate same bytes idempotent",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T053",
+      "user_number": 53,
+      "requirement": "Duplicate conflicting bytes quarantine",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T054",
+      "user_number": 54,
+      "requirement": "Decision sequence runtime-local monotonik",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T055",
+      "user_number": 55,
+      "requirement": "Signal ID tek başına identity sayılmaz",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T056",
+      "user_number": 56,
+      "requirement": "first_write_sequence historical first-decision sayılmaz",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T057",
+      "user_number": 57,
+      "requirement": "Queue capacity 1024",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T058",
+      "user_number": 58,
+      "requirement": "Overflow explicit loss",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T059",
+      "user_number": 59,
+      "requirement": "Receipt oversize explicit loss",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T060",
+      "user_number": 60,
+      "requirement": "Feature oversize explicit loss",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T061",
+      "user_number": 61,
+      "requirement": "Reason UTF-8 bound",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T062",
+      "user_number": 62,
+      "requirement": "Partial frame reddi",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T063",
+      "user_number": 63,
+      "requirement": "Crash before ACK",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T064",
+      "user_number": 64,
+      "requirement": "Crash after durable write before ACK",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T065",
+      "user_number": 65,
+      "requirement": "ACK only after durable write",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T066",
+      "user_number": 66,
+      "requirement": "Restart incomplete tail UNKNOWN",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T067",
+      "user_number": 67,
+      "requirement": "Segment create-only",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T068",
+      "user_number": 68,
+      "requirement": "Eski segment overwrite yok",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T069",
+      "user_number": 69,
+      "requirement": "Rotation deterministic",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T070",
+      "user_number": 70,
+      "requirement": "Quota aşımında strategy etkilenmez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T071",
+      "user_number": 71,
+      "requirement": "Independent anchor yoksa exact completeness verilmez",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T072",
+      "user_number": 72,
+      "requirement": "V2 selected path",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T073",
+      "user_number": 73,
+      "requirement": "V2 unselected path",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T074",
+      "user_number": 74,
+      "requirement": "OFF/DRY path",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T075",
+      "user_number": 75,
+      "requirement": "Notification success",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T076",
+      "user_number": 76,
+      "requirement": "Notification failure",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T077",
+      "user_number": 77,
+      "requirement": "SELECTOR_DECISION event success",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T078",
+      "user_number": 78,
+      "requirement": "Event failure",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T079",
+      "user_number": 79,
+      "requirement": "SQL execute failure",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T080",
+      "user_number": 80,
+      "requirement": "SQL commit failure",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T081",
+      "user_number": 81,
+      "requirement": "Duplicate signal",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T082",
+      "user_number": 82,
+      "requirement": "Existing Step Lock branch",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T083",
+      "user_number": 83,
+      "requirement": "Restart/startup path",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T084",
+      "user_number": 84,
+      "requirement": "Unknown attestation config OFF",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T085",
+      "user_number": 85,
+      "requirement": "No production network request",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T086",
+      "user_number": 86,
+      "requirement": "No real Binance request",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T087",
+      "user_number": 87,
+      "requirement": "No Railway write",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T088",
+      "user_number": 88,
+      "requirement": "Production DB write=0",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T089",
+      "user_number": 89,
+      "requirement": "Existing focused V2 selector tests PASS",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T090",
+      "user_number": 90,
+      "requirement": "Candidate ve exact base full-suite aynı harness ile karşılaştırılır",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T091",
+      "user_number": 91,
+      "requirement": "Yeni failing test ID=0",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    },
+    {
+      "id": "T092",
+      "user_number": 92,
+      "requirement": "Çalıştırılmayan testler ayrıca raporlanır",
+      "run_if": "Feasibility gate permits attestation implementation",
+      "blocked_status": "NOT_RUN_ARCHITECTURE_BLOCKER"
+    }
+  ],
+  "supplemental_checks": [
+    "S01 exact source SHA",
+    "S02 gate consumes cap inline without existing witness local",
+    "S03 labels consume both globals inline without witness local",
+    "S04 min_score qualification and SQL are separate attribute reads",
+    "S05 config publication precedes generation",
+    "S06 gate invocation precedes arm",
+    "S07 existing clock and branch order",
+    "S08 threshold source defaults and publications",
+    "S09 unchanged source universe",
+    "S10 same result does not uniquely identify threshold (pure negative control)"
+  ],
+  "supplemental_scope": "Static source and pure logical checks, not the 92 attestation tests; no target-module import/selector execution",
+  "regression": "Exact base/candidate same Python/dependencies/env/clock/test IDs required if implementation proceeds; otherwise NOT_RUN, never all-green"
+}

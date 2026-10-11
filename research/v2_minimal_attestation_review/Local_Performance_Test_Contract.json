@@ -1,0 +1,34 @@
+{
+  "frozen_utc": "2026-10-11T14:25:39.680672+00:00",
+  "scope": "Local isolated acceptance only, conditional on feasibility; no production latency claim",
+  "warmup": 200,
+  "samples": 2000,
+  "harness": "same Python/dependencies/fixtures/environment/clock on base and clean candidate; perf_counter_ns only outside strategy; raw samples retained",
+  "budgets": {
+    "OFF_overhead_p99_us": 25,
+    "OFF_overhead_max_us": 250,
+    "ON_begin_p99_ms": 5,
+    "ON_begin_max_ms": 25,
+    "ON_finish_p99_ms": 5,
+    "ON_finish_max_ms": 25,
+    "code_fingerprint_startup_max_ms": 500,
+    "config_publication_p99_ms": 1,
+    "config_publication_max_ms": 10,
+    "enqueue_p99_ms": 0.5,
+    "enqueue_max_ms": 5,
+    "worker_write_fsync_p99_ms": 50,
+    "worker_write_fsync_max_ms": 500,
+    "queue_occupancy_max": 1024,
+    "capture_peak_allocation_bytes": 131072,
+    "CPU_single_core_percent_at_10_decisions_per_second_max": 25,
+    "RSS_increment_MiB_max": 64,
+    "worker_drain_timeout_seconds": 5
+  },
+  "measurements_before_freeze": 0,
+  "budget_change_after_measurement": false,
+  "prior_core_context_only": {
+    "p99_ms": 1.2382,
+    "max_ms": 10.0658
+  },
+  "production_root_retention_quota_anchor": null
+}
