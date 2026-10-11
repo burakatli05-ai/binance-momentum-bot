@@ -7573,6 +7573,9 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="API_KEY_MISSING")
         return
+    if not await _at_qro_reentry_safe(session, symbol):
+        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="SAME_SYMBOL_REENTRY_BLOCKED_RESIDUAL_STATE")
+        return
     cfg, usdt, positions = await _at_account_snapshot(session)
     _at_cache_account_balance(usdt)
     if not cfg.get("canTrade", False):
@@ -7694,7 +7697,41 @@ def _at_step_tick(tr, price, tick_ts):
         _at_update_trade(tid, **changes)
 
 
+def _at_qro_exchange(session):
+    import premium_step_lock_qro as qro
+    async def request_once(method, route, params):
+        return await binance_signed_request(session, method, route, params, timeout_s=2, priority=True)
+    return qro.BinancePremiumStepLockQROExchange(request_once, enabled=qro.MANAGEMENT_ENABLED)
+
+
+def _at_qro_store():
+    import premium_step_lock_qro as qro
+    return qro.SQLiteStore(db_connect)
+
+
+async def _at_qro_reentry_safe(session, symbol):
+    import premium_step_lock_qro as qro
+    conn = db_connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(autotrade_trades)")}
+        if "qro_contract_version" not in columns:
+            return True  # Old schema contains no QRO positions.
+        rows = [dict(r) for r in conn.execute("SELECT * FROM autotrade_trades WHERE symbol=? AND qro_contract_version IS NOT NULL", (symbol,))]
+    finally:
+        conn.close()
+    if not rows:
+        return True
+    return await _at_qro_exchange(session).check_reentry(symbol, rows, _at_qro_store())
+
+
 async def _at_step_recovery_check(session, tr, positions):
+    import premium_step_lock_qro as qro
+    if tr.get("exit_profile") == premium_lock.PROFILE and tr.get("qro_contract_version") == qro.CONTRACT:
+        result = await _at_qro_exchange(session).reconcile_trade(int(tr["id"]), _at_qro_store())
+        if result not in ("STABLE", "REPLACED", "FLAT_CLEAN"):
+            _at_profile_block(tr, result)
+        return
     # Read-only quarantine for unexpected/imported LIVE rows. No fallback to TP2,
     # no stop deletion, and no unproven production replacement adapter.
     reason = premium_lock.LIVE_BLOCK_REASON

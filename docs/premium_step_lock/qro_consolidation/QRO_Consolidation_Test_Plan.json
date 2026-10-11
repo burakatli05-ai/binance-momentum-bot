@@ -1,0 +1,376 @@
+{
+  "frozen": true,
+  "objectives": [
+    {
+      "id": "Q10",
+      "objective": "Premium 70/70 test seti"
+    },
+    {
+      "id": "Q20",
+      "objective": "CURRENT_TP2 focused regression"
+    },
+    {
+      "id": "Q30",
+      "objective": "PARTIAL_RUNNER focused regression"
+    },
+    {
+      "id": "Q40",
+      "objective": "Existing-open-position migration=0"
+    },
+    {
+      "id": "Q50",
+      "objective": "Default global profile CURRENT_TP2"
+    },
+    {
+      "id": "Q60",
+      "objective": "Unknown profile fail-closed"
+    },
+    {
+      "id": "Q70",
+      "objective": "Startup AutoTrade OFF"
+    },
+    {
+      "id": "Q80",
+      "objective": "Frozen fill/VWAP reference"
+    },
+    {
+      "id": "Q90",
+      "objective": "+%0,50 → +%0,25"
+    },
+    {
+      "id": "Q10",
+      "objective": "+%10 → +%9,50"
+    },
+    {
+      "id": "Q11",
+      "objective": "Stop monotonicity"
+    },
+    {
+      "id": "Q12",
+      "objective": "No TP1/TP2/runner in Step Lock profile"
+    },
+    {
+      "id": "Q13",
+      "objective": "One-way/BOTH mode accepted"
+    },
+    {
+      "id": "Q14",
+      "objective": "Hedge mode blocked"
+    },
+    {
+      "id": "Q15",
+      "objective": "Quantity exchange position’dan alınır"
+    },
+    {
+      "id": "Q16",
+      "objective": "DB/exchange quantity mismatch blocker"
+    },
+    {
+      "id": "Q17",
+      "objective": "Quantity step-size rounding"
+    },
+    {
+      "id": "Q18",
+      "objective": "Invalid/zero quantity blocker"
+    },
+    {
+      "id": "Q19",
+      "objective": "reduceOnly=true"
+    },
+    {
+      "id": "Q20",
+      "objective": "closePosition=false"
+    },
+    {
+      "id": "Q21",
+      "objective": "Intent POST öncesinde durable"
+    },
+    {
+      "id": "Q22",
+      "objective": "Deterministic client ID"
+    },
+    {
+      "id": "Q23",
+      "objective": "POST success + exact query"
+    },
+    {
+      "id": "Q24",
+      "objective": "POST response loss + exact query recovery"
+    },
+    {
+      "id": "Q25",
+      "objective": "Query HTTP error + bounded retry"
+    },
+    {
+      "id": "Q26",
+      "objective": "Identity mismatch blocker"
+    },
+    {
+      "id": "Q27",
+      "objective": "New ACK before old cancel"
+    },
+    {
+      "id": "Q28",
+      "objective": "Cancel response loss + dual query"
+    },
+    {
+      "id": "Q29",
+      "objective": "No blind POST retry"
+    },
+    {
+      "id": "Q30",
+      "objective": "No blind cancel retry"
+    },
+    {
+      "id": "Q31",
+      "objective": "No third stop under uncertainty"
+    },
+    {
+      "id": "Q32",
+      "objective": "At-most-two invariant"
+    },
+    {
+      "id": "Q33",
+      "objective": "New stop partial fill"
+    },
+    {
+      "id": "Q34",
+      "objective": "Old stop partial fill"
+    },
+    {
+      "id": "Q35",
+      "objective": "Position partial reduction"
+    },
+    {
+      "id": "Q36",
+      "objective": "Position flat during replacement"
+    },
+    {
+      "id": "Q37",
+      "objective": "Residual old stop cleanup"
+    },
+    {
+      "id": "Q38",
+      "objective": "Residual new stop cleanup"
+    },
+    {
+      "id": "Q39",
+      "objective": "Flat final zero verification"
+    },
+    {
+      "id": "Q40",
+      "objective": "Unresolved residual state quarantine"
+    },
+    {
+      "id": "Q41",
+      "objective": "Same-symbol re-entry blocked"
+    },
+    {
+      "id": "Q42",
+      "objective": "Same-symbol re-entry allowed after exact clean"
+    },
+    {
+      "id": "Q43",
+      "objective": "Manual position quantity change"
+    },
+    {
+      "id": "Q44",
+      "objective": "Manual position side change"
+    },
+    {
+      "id": "Q45",
+      "objective": "Extra unowned algo order blocker"
+    },
+    {
+      "id": "Q46",
+      "objective": "Terminal state unknown blocker"
+    },
+    {
+      "id": "Q47",
+      "objective": "Actual-trigger-not-certified flag preserved"
+    },
+    {
+      "id": "Q48",
+      "objective": "Restart before POST"
+    },
+    {
+      "id": "Q49",
+      "objective": "Restart after POST response loss"
+    },
+    {
+      "id": "Q50",
+      "objective": "Restart after new ACK"
+    },
+    {
+      "id": "Q51",
+      "objective": "Restart after old cancel response loss"
+    },
+    {
+      "id": "Q52",
+      "objective": "Restart with two working stops"
+    },
+    {
+      "id": "Q53",
+      "objective": "Restart after partial fill"
+    },
+    {
+      "id": "Q54",
+      "objective": "Restart after flat before cleanup"
+    },
+    {
+      "id": "Q55",
+      "objective": "Restart with unresolved client ID"
+    },
+    {
+      "id": "Q56",
+      "objective": "No repost with new client ID"
+    },
+    {
+      "id": "Q57",
+      "objective": "Frozen profile preserved"
+    },
+    {
+      "id": "Q58",
+      "objective": "Duplicate tick no revision"
+    },
+    {
+      "id": "Q59",
+      "objective": "Out-of-order tick no revision"
+    },
+    {
+      "id": "Q60",
+      "objective": "Multi-step jump one replacement"
+    },
+    {
+      "id": "Q61",
+      "objective": "Desired step while replacement pending"
+    },
+    {
+      "id": "Q62",
+      "objective": "+%10 cap no new revision"
+    },
+    {
+      "id": "Q63",
+      "objective": "Rounding same stop no order"
+    },
+    {
+      "id": "Q64",
+      "objective": "Market retrace keeps old stop"
+    },
+    {
+      "id": "Q65",
+      "objective": "Invalid market reference keeps old stop"
+    },
+    {
+      "id": "Q66",
+      "objective": "Tick hot path network calls=0"
+    },
+    {
+      "id": "Q67",
+      "objective": "Query budget exhaustion"
+    },
+    {
+      "id": "Q68",
+      "objective": "Cancel budget exhaustion"
+    },
+    {
+      "id": "Q69",
+      "objective": "No infinite retry"
+    },
+    {
+      "id": "Q70",
+      "objective": "Production host call blocked in tests"
+    },
+    {
+      "id": "Q71",
+      "objective": "Real Binance production calls=0"
+    },
+    {
+      "id": "Q72",
+      "objective": "Demo/Testnet writes=0"
+    },
+    {
+      "id": "Q73",
+      "objective": "Secrets not logged"
+    },
+    {
+      "id": "Q74",
+      "objective": "Signed query not archived"
+    },
+    {
+      "id": "Q75",
+      "objective": "Client ID ownership strict"
+    },
+    {
+      "id": "Q76",
+      "objective": "Arbitrary/unowned order fail-closed"
+    },
+    {
+      "id": "Q77",
+      "objective": "Migration first run"
+    },
+    {
+      "id": "Q78",
+      "objective": "Migration second run idempotent"
+    },
+    {
+      "id": "Q79",
+      "objective": "Old schema safe read"
+    },
+    {
+      "id": "Q80",
+      "objective": "Existing trade not converted"
+    },
+    {
+      "id": "Q81",
+      "objective": "Rollback readiness open trade FAIL"
+    },
+    {
+      "id": "Q82",
+      "objective": "Rollback readiness residual order FAIL"
+    },
+    {
+      "id": "Q83",
+      "objective": "Rollback readiness pending intent FAIL"
+    },
+    {
+      "id": "Q84",
+      "objective": "Rollback readiness drained PASS"
+    },
+    {
+      "id": "Q85",
+      "objective": "Exact Premium base ve candidate aynı harness"
+    },
+    {
+      "id": "Q86",
+      "objective": "Focused suite tamamı PASS"
+    },
+    {
+      "id": "Q87",
+      "objective": "New failing test IDs=0"
+    },
+    {
+      "id": "Q88",
+      "objective": "Removed test IDs=0"
+    },
+    {
+      "id": "Q89",
+      "objective": "Not-run test IDs raporlandı"
+    },
+    {
+      "id": "Q90",
+      "objective": "Full suite ALL_GREEN değilse ALL_GREEN yazılmadı"
+    }
+  ],
+  "base_and_candidate_harness": "tests/premium_step_lock_gate_runner.py exact same bytes",
+  "network": "external sockets blocked, credentials blank, dotenv disabled; only fake HTTP adapter",
+  "required": {
+    "premium_70": "PASS",
+    "focused_144": "PASS",
+    "new_failure_ids": 0,
+    "removed_ids": 0,
+    "clean_checkout_final": true
+  },
+  "attempt_policy": "preserve every result and log; at most three repair attempts for same blocker; no weakened contract",
+  "full_suite_policy": "report baseline failures honestly"
+}

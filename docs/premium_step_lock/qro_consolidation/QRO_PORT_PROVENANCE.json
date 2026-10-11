@@ -1,0 +1,129 @@
+{
+  "local_only_commits": [
+    "f43165b6302bc349249770bc65cc725877cff748",
+    "abcf37a9c324375b294a7c3ef75ff7199c154545"
+  ],
+  "github_refs": false,
+  "port_method": "semantic port, no cherry-pick; original sources retained byte-exact outside branch",
+  "port_map": [
+    {
+      "source": "research/qro_offline.py",
+      "parts": [
+        "request",
+        "verify",
+        "Model._intent",
+        "Model._account",
+        "Journal.save"
+      ],
+      "destination": "binance_momentum_bot/premium_step_lock_qro.py",
+      "adaptation": "dynamic symbol/trade/version/revision; SQLite compare-and-swap; no Demo entry/close or economic geometry"
+    },
+    {
+      "source": "research/qro_demo_10x.py",
+      "parts": [
+        "Probe.send",
+        "Probe.algo",
+        "Probe.observation",
+        "Probe.reconcile_cancel",
+        "Probe.cleanup",
+        "normal_fill"
+      ],
+      "destination": "binance_momentum_bot/premium_step_lock_qro.py",
+      "adaptation": "bounded exact reads, one durable effect, child fill/position reconciliation; contract stop from Premium"
+    },
+    {
+      "source": "research/qro_recovery_probe.py",
+      "parts": [
+        "RecoveryProbe.send",
+        "RecoveryProbe.normal",
+        "RecoveryProbe.run"
+      ],
+      "destination": "tests/test_premium_step_lock_qro.py",
+      "adaptation": "response-loss and flat-overlap fake HTTP fault scenarios; no natural trigger certification"
+    }
+  ],
+  "source_members": [
+    {
+      "member": "candidate/docs/premium_step_lock/QRO_DEMO_ADAPTER_V1.md",
+      "sha256": "b523105660cb9918c8f0c494ab77d623bc6fe58ee8ebf3f9783108e3a210fcf8",
+      "bytes": 2630
+    },
+    {
+      "member": "candidate/docs/premium_step_lock/QRO_OFFLINE_D1.md",
+      "sha256": "3ebeb6b9a4b456509d3828ac1395561a78981fdae3ee7b8b43b3119abfaf5b49",
+      "bytes": 2824
+    },
+    {
+      "member": "candidate/docs/premium_step_lock/QRO_P1_CONTRACT.json",
+      "sha256": "0e7542744f57479258fe9858ec98e5ad5c745a20d8ccfd10abdfedf73cccb330",
+      "bytes": 5566
+    },
+    {
+      "member": "candidate/docs/premium_step_lock/QRO_P2_10X_CONTRACT.json",
+      "sha256": "ba0fabe76115b77ddc34d5d4171f74e9e0dfcbb56651fae98414149ee02f7e17",
+      "bytes": 6325
+    },
+    {
+      "member": "candidate/docs/premium_step_lock/QRO_RECOVERY_PROTOCOL.json",
+      "sha256": "e647e105a42750d727c5f518adb5dd68b4d878a12a8d3db400a3d04ae1fbf475",
+      "bytes": 1515
+    },
+    {
+      "member": "candidate/research/qro_demo_10x.py",
+      "sha256": "56b3b216c55babd110dcddb8f6d9bd2d4c07d7cac6c1a9b2fe4f8a68266dd7a3",
+      "bytes": 31508
+    },
+    {
+      "member": "candidate/research/qro_demo_10x_setup.py",
+      "sha256": "5c7063a1677b0de2b2de01ff3b43a49f204014bee8c8cc05223350cd8e9fad45",
+      "bytes": 3045
+    },
+    {
+      "member": "candidate/research/qro_demo_probe.py",
+      "sha256": "4f694accebde9e94e74be171fc87803e49906cd0b22adc64065f88d5b2121576",
+      "bytes": 30177
+    },
+    {
+      "member": "candidate/research/qro_offline.py",
+      "sha256": "07d99b1c064495f88a047422878229349089b0de7ef1a796fa2d683726c6b668",
+      "bytes": 19970
+    },
+    {
+      "member": "candidate/research/qro_recovery_probe.py",
+      "sha256": "00ef236f03b6afceba804ad2847fa5d1545c503ab7ce9d9809ff23b972ce9d4b",
+      "bytes": 10157
+    },
+    {
+      "member": "candidate/tests/test_qro_10x.py",
+      "sha256": "7148b334648aeb807dd1af006d410426ff8d978c375f322b94358b915a2466e0",
+      "bytes": 6415
+    },
+    {
+      "member": "candidate/tests/test_qro_10x_visibility.py",
+      "sha256": "5c5f3fd7fec335d4dd5b694efc167b0685f46970c2b27c9765210158f30dd5a6",
+      "bytes": 2658
+    },
+    {
+      "member": "candidate/tests/test_qro_cancel_reconciliation.py",
+      "sha256": "2f59b3fe03855d1eb1dc8cb6d2198b268754e22555bf438e390b359ab5213e16",
+      "bytes": 6599
+    },
+    {
+      "member": "candidate/tests/test_qro_demo_probe.py",
+      "sha256": "05b86ecff843d2705cd3b75ea446c93267fa7b7f9e59be4f12cf1a183484d6a0",
+      "bytes": 19641
+    },
+    {
+      "member": "candidate/tests/test_qro_offline.py",
+      "sha256": "e1ab518dad668ff35e6bd9b14508885dd3e5d67f13c982bdb1cbd32842194a6b",
+      "bytes": 24157
+    },
+    {
+      "member": "candidate/tests/test_qro_recovery.py",
+      "sha256": "f365848ee7726f1ea7fcb4a7e9be09d45b0eb53ecd564c09c27dea734afe27d6",
+      "bytes": 7511
+    }
+  ],
+  "profile_sha256": "29e695ec40d2c12b6037db8ad6cbede27da5cac0f58a01054e491b2967746cd3",
+  "preparation_package_sha256": "378ce7e88e60339224bf102a23db617a4c5750a24a18e708b5683473d63593ff"
+}

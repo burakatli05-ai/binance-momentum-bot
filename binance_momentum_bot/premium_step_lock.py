@@ -37,7 +37,7 @@ SCHEMA = {
     "replacement_status": "TEXT",
 }
 FROZEN_FIELDS = {"exit_profile", "exit_profile_version", "profile_contract_hash",
-                 "sl_entry_vwap", "sl_initial_stop", "sl_fill_ts_ms"}
+                 "sl_entry_vwap", "sl_initial_stop", "sl_fill_ts_ms", "qro_contract_version"}
 WORKING = {"NEW", "WORKING"}
 TERMINAL = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 
@@ -70,6 +70,8 @@ def migrate(conn):
         if name not in columns:
             conn.execute(f"ALTER TABLE autotrade_trades ADD COLUMN {name} {kind}")
     # No UPDATE/backfill: old trades retain their exact values and profile.
+    import premium_step_lock_qro as qro
+    qro.migrate(conn)
 
 
 def levels(entry, price, tick_size):
@@ -122,9 +124,14 @@ def validate_state(tr):
     if desired > ceiling:
         raise ValueError("STOP_ABOVE_CONTRACT_LOCK")
     if tr.get("pending_stop_client_id"):
-        if tr["pending_stop_client_id"] != client_id(tr["id"], tr["stop_revision"]):
+        qro_bound = tr.get("qro_contract_version") == "PREMIUM_QRO_1.0"
+        expected_id = (f"QRO1-{int(tr['id'])}-{int(tr['stop_revision'])}" if qro_bound
+                       else client_id(tr["id"], tr["stop_revision"]))
+        if tr["pending_stop_client_id"] != expected_id:
             raise ValueError("PENDING_IDENTITY_MISMATCH")
-        if not active < decimal(tr.get("pending_stop_price")) <= desired:
+        pending = decimal(tr.get("pending_stop_price"))
+        initial_qro = qro_bound and not tr.get("stop_client_id") and int(tr["stop_revision"]) == 0
+        if not (active <= pending <= desired if initial_qro else active < pending <= desired):
             raise ValueError("PENDING_PRICE_MISMATCH")
 
 
@@ -261,6 +268,8 @@ def rollback_readiness(trades, *, mode, global_profile, exchange_orders=None):
     if step_orders is None: blockers.append("EXCHANGE_RECONCILIATION_REQUIRED")
     elif step_orders: blockers.append("BOT_OWNED_STEP_LOCK_STOP_REMAINS")
     if any(p not in PROFILES for p in counts): blockers.append(UNKNOWN)
+    import premium_step_lock_qro as qro
+    blockers.extend(qro.drain_blockers(rows, exchange_orders))
     return dict(open_by_profile=dict(counts), pending_replacements=pending,
                 bot_owned_step_lock_stops=step_orders, exchange_reconciliation_required=step_orders is None,
                 rollback_safe=not blockers, blockers=blockers)
