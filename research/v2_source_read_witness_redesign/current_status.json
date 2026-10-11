@@ -1,0 +1,103 @@
+{
+  "run": "2026-10-11_V2_Decision_Source_Read_Witness_Boundary_Redesign_v1",
+  "main_result": "V2_SOURCE_READ_WITNESS_BOUNDARY_BLOCKED_MICROPROTOTYPE_REGRESSION_OR_PERFORMANCE",
+  "result_class": "D",
+  "candidate_locked": false,
+  "production_ready": false,
+  "production_hook_installed": false,
+  "parent_review_commit": "6be46a2d7a8c63430d35ed748b7dd0067e5a7d71",
+  "parent_review_is_implementation": false,
+  "parent_contract_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+  "parent": {
+    "implementation_started": false,
+    "implementation_complete": false,
+    "required_tests_run": 0,
+    "required_tests_not_run": 92,
+    "performance_samples": 0
+  },
+  "current_microprototype": {
+    "unique_scenarios": 32,
+    "initial_complete_run_pass": 7,
+    "initial_complete_run_fail": 25,
+    "diagnostic_run_pass": 32,
+    "diagnostic_run_fail": 0,
+    "performance_pairs": 2000,
+    "performance_timed_invocations": 6000
+  },
+  "counters": {
+    "production_application_source_change": 0,
+    "feature_implementation": 0,
+    "production_branch_merge": 0,
+    "railway_deployment": 0,
+    "railway_restart": 0,
+    "railway_variable_change": 0,
+    "production_db_schema_write": 0,
+    "receipt_activation": 0,
+    "selector_threshold_entry_exit_change": 0,
+    "autotrade_live_change": 0,
+    "demo_binance_request": 0,
+    "production_receipts_written": 0,
+    "FIRST_DECISION_N": 0,
+    "OOS_N": 0
+  },
+  "technical_source_commit_anchor": "OPEN / NOT_OBSERVED_IN_REVIEWED_SURFACE",
+  "integration_design_locked": false,
+  "entry_before_exit_completed": false,
+  "full_parent": "NOT_CERTIFIED",
+  "steps": [
+    {
+      "step": "1",
+      "name": "Historical Public Early",
+      "status": "CLOSED; prior1385/1385 and666/666 evidence preserved"
+    },
+    {
+      "step": "2",
+      "name": "H1 mechanism shadow",
+      "status": "CLOSED"
+    },
+    {
+      "step": "3",
+      "name": "H1 raw access",
+      "status": "CLOSED"
+    },
+    {
+      "step": "4",
+      "name": "H1 predeploy",
+      "status": "CLOSED_SCOPED"
+    },
+    {
+      "step": "5",
+      "name": "H1 bounded export",
+      "status": "CLOSED; prior660 rows"
+    },
+    {
+      "step": "6",
+      "name": "H1 economic",
+      "status": "CLOSED_INCONCLUSIVE"
+    },
+    {
+      "step": "7",
+      "name": "Entry validation",
+      "status": "ENTRY_VALIDATION_ACTIVE / EXECUTION_NOT_FINAL; READY268 INSUFFICIENT_DATA"
+    },
+    {
+      "step": "8",
+      "name": "Event order / lineage",
+      "status": "OPEN; first decision/era/lineage/whole window missing"
+    },
+    {
+      "step": "9",
+      "name": "A05 / exit",
+      "status": "PENDING / NOT_EXECUTED"
+    },
+    {
+      "step": "10",
+      "name": "Independent OOS → execution → LIVE",
+      "status": "PENDING; OOS0"
+    }
+  ],
+  "next_single_action": "REJECT_OR_REVISE_V2_SOURCE_READ_WITNESS_CANDIDATE",
+  "next_started": false,
+  "archive_state": "SEE_SEPARATE_ARCHIVE_COMPLETION_RECEIPT",
+  "canonical_daily_report_created": false
+}

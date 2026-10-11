@@ -1,0 +1,24 @@
+{
+  "status": "FROZEN_BEFORE_MEASUREMENT",
+  "variants": [
+    "parent_original",
+    "capture_off",
+    "capture_on_serialized"
+  ],
+  "warmup_each": 50,
+  "paired_samples": 2000,
+  "measure": "full extracted public-gate/arm path using no-I/O fixture, setup outside timing; perf_counter_ns harness only",
+  "budgets_ns": {
+    "capture_off_p99_positive_delta": 500000,
+    "capture_off_max_positive_delta": 20000000,
+    "capture_on_serialized_p99_positive_delta": 2000000,
+    "capture_on_serialized_max_positive_delta": 50000000
+  },
+  "report_ratios": true,
+  "production_latency_pass_allowed": false,
+  "off": {
+    "local_capture_store": true,
+    "context_token": false,
+    "observer_queue_worker_snapshot_io_clock": 0
+  }
+}

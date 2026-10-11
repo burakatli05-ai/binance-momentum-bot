@@ -1,0 +1,209 @@
+{
+  "run": "2026-10-11_V2_Decision_Source_Read_Witness_Boundary_Redesign_v1",
+  "base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+  "parent": "6be46a2d7a8c63430d35ed748b7dd0067e5a7d71",
+  "python": "CPython3.12.14 Windows",
+  "production_python": "3.13 reported by parent; not used for these probes",
+  "commands": [
+    "python -X utf8 research/v2_source_read_witness_redesign/run_microprototype.py tests --output <new-scratch-dir>",
+    "python -X utf8 research/v2_source_read_witness_redesign/run_microprototype.py benchmark --output <new-scratch-dir>"
+  ],
+  "benchmark_rerun_will_have_different_timings": true,
+  "no_application_import": true,
+  "no_real_db_or_network": true,
+  "failure_evidence_zip_sha256": "389c70fc9e876a09544d2333f7908a1d365567594c4dbaa20b57e61165ec64dd",
+  "frozen_files_raw_hashes_verified": true,
+  "parent_contract_hash_verified": true,
+  "files": [
+    {
+      "file": "Adversarial_Read_Results.csv",
+      "bytes": 12322,
+      "sha256": "bf5f32f5827f9fc4872d1b31c264afd62d5d006f3b3fa1b754f7829a9b1745ee"
+    },
+    {
+      "file": "Artifact_Validation.json",
+      "bytes": 2438,
+      "sha256": "dfd6cf8dade917ffd7a5131dc42d4fde0f69356da7e7c74de4ab1d9bfb695f82"
+    },
+    {
+      "file": "Blocker_Record.json",
+      "bytes": 1108,
+      "sha256": "a989e169c1e11f81013ccd959fa316011d8a8ad8433fab33a3629500c3a0b2e5"
+    },
+    {
+      "file": "Bytecode_Comparison.json",
+      "bytes": 308119,
+      "sha256": "f7ec075ad2602f1b817fc9ea09500095a7d5fb31235ad85887b9e77d1e831b87"
+    },
+    {
+      "file": "Call_Site_Coverage_Matrix.csv",
+      "bytes": 16415,
+      "sha256": "b4aa743d3b18f05d06ac1628179995ade992d6b2391a7630c73d1db84796a4a6"
+    },
+    {
+      "file": "Call_Site_Review_Resolution.csv",
+      "bytes": 29050,
+      "sha256": "3267ffb79abfb9d3742dc0680748ae491d3ba1a8bcb2e42e268da41c08d06fed"
+    },
+    {
+      "file": "Candidate_Contract_SHA256.txt",
+      "bytes": 116,
+      "sha256": "16b36a387c3616019d5466abb9388cc93ee03ce849f77e6dc94243a0e19d9e05"
+    },
+    {
+      "file": "Candidate_Design_Comparison.md",
+      "bytes": 1415,
+      "sha256": "359e4dae8927581d997814f54e7af76987606f3a3ec060837201507075794a6a"
+    },
+    {
+      "file": "Complexity_and_Stop_Value_Assessment.md",
+      "bytes": 958,
+      "sha256": "2ad43a37384752a171383aaa455af928c26d796a4c79a81ad7041099345992f2"
+    },
+    {
+      "file": "Coverage_Closure.json",
+      "bytes": 1593,
+      "sha256": "1678d0f569c3aeefb8b194f25c56b87c8378185e32e9b616558268f9f2ed3217"
+    },
+    {
+      "file": "current_status.json",
+      "bytes": 3009,
+      "sha256": "19b59f99e6a8fad6066928ea573845557ddf22c7f900860d4ca80eff47c4608e"
+    },
+    {
+      "file": "Decision_Log_Append.md",
+      "bytes": 989,
+      "sha256": "f82adf68311f2bd408d2ce5359a7f829e6c4d6401f7929203cd8c545f1384881"
+    },
+    {
+      "file": "Differential_Test_Evidence.zip",
+      "bytes": 87075,
+      "sha256": "389c70fc9e876a09544d2333f7908a1d365567594c4dbaa20b57e61165ec64dd"
+    },
+    {
+      "file": "Exact_Read_Site_Map.csv",
+      "bytes": 3667,
+      "sha256": "b1f69141b147236dd9a40a5e018888525658061581b029221ac734c7c67a1d49"
+    },
+    {
+      "file": "Failed_Attempts.md",
+      "bytes": 1919,
+      "sha256": "d3e723e9c6f4c6acdd78da814bce7246666faab13dc22afaab3d8fe98a892f40"
+    },
+    {
+      "file": "Freeze_Builder_Record.py",
+      "bytes": 15047,
+      "sha256": "92d3d318ad3435f53538ffb6acfe281e4d7de1f2b347998888751ea8490e0e57"
+    },
+    {
+      "file": "Fresh_Source_Identity.json",
+      "bytes": 2275,
+      "sha256": "fe73c05790182ef1c26f4f12f9feed1e2036afb580884a4308173a014099dbc3"
+    },
+    {
+      "file": "Frozen_Redesign_Question.json",
+      "bytes": 1082,
+      "sha256": "3de731a321d7e13035c1af10d89448f4c7f2c7b14c6a8062707cb78670ac2809"
+    },
+    {
+      "file": "Gate_to_Arm_Identity_Propagation.md",
+      "bytes": 2212,
+      "sha256": "888d8c78956eec8595f255fdd4fb05ab5d97785d6718993f53c86af3e0beff04"
+    },
+    {
+      "file": "Hypothesis_Falsification_Matrix.md",
+      "bytes": 1186,
+      "sha256": "353904af2cfa70d792b042674efa39251b2303365d8afb27893e41c5dbaff75d"
+    },
+    {
+      "file": "Isolated_Microprototype.py",
+      "bytes": 8485,
+      "sha256": "5cf9e872315270b81b1732bf4da09e041c9b5f389b0d223b9e25c1f8f5df2920"
+    },
+    {
+      "file": "Master_Index_Append.md",
+      "bytes": 989,
+      "sha256": "ef7fc4cc342ab567bc1a4ad1f933c874d256349d6cd910595160e3f79e07b20c"
+    },
+    {
+      "file": "Microbenchmark_Raw.csv",
+      "bytes": 47129,
+      "sha256": "26774a47ade1aa2ab88b30c5c9f83de659415bd16b9fdfa88cf69e98482e5498"
+    },
+    {
+      "file": "Microprototype_Test_Plan.json",
+      "bytes": 4675,
+      "sha256": "b3d46414e32eca45e64da902b1f61239286302b018c793646c74d9c4bd417fa1"
+    },
+    {
+      "file": "Microprototype_Test_Results.json",
+      "bytes": 25524,
+      "sha256": "59656fa8dcb6e74af4df4356173334dd2897763c1628f889d9234311bc62bf93"
+    },
+    {
+      "file": "Noninterference_Classification.md",
+      "bytes": 1608,
+      "sha256": "29d6cd37df53557662fa71611e06bff1111dac35d519ad99c0c2da5778086dfa"
+    },
+    {
+      "file": "OFF_Path_Overhead_Contract.json",
+      "bytes": 733,
+      "sha256": "85ca843bf011878cff2e5e85167de5cf91a7b38b06fde560996052ca69b73b75"
+    },
+    {
+      "file": "OFF_Path_Overhead_Result.json",
+      "bytes": 1263,
+      "sha256": "e76741a9f73bc58ccd14ef4efa51007ae60b740f142f3b7389af1fa9c3d92079"
+    },
+    {
+      "file": "Parent_V1_Contract_Unchanged.json",
+      "bytes": 6368,
+      "sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f"
+    },
+    {
+      "file": "Pretest_Freeze_Manifest.json",
+      "bytes": 1632,
+      "sha256": "275b87b5c100becde8abbccb2e2619a8ccd8b67a3612ba46b910ee6c25d72eb6"
+    },
+    {
+      "file": "Run_Daily_Record.md",
+      "bytes": 999,
+      "sha256": "ae06547d76f0e966591d94aaa4bcef97625556fd6fe80da2ac01a1bcdce61ab9"
+    },
+    {
+      "file": "run_microprototype.py",
+      "bytes": 19037,
+      "sha256": "8ec6f502c3c9b35e7a32e52729b227bfaf34de28d8236722c96afbea0f01cab9"
+    },
+    {
+      "file": "Short_Circuit_and_Exception_Report.md",
+      "bytes": 1764,
+      "sha256": "82ec7a387d3289a5a5c6972221126a7b235ed5e2d318bd856dbd2e9c9cfd0797"
+    },
+    {
+      "file": "Source_Inventory.json",
+      "bytes": 12794,
+      "sha256": "0fa1ba88c97b02b8d4129b17e22d174f5757bbbeb84fe036de57cf74d33b3ebc"
+    },
+    {
+      "file": "Source_Read_Log.json",
+      "bytes": 22030,
+      "sha256": "5000d34ac24d017ac2a5741b489c782d2719ed2489b0a5ce3b14ad6fff3bf7ca"
+    },
+    {
+      "file": "Source_Read_Semantics_Contract.json",
+      "bytes": 4182,
+      "sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a"
+    },
+    {
+      "file": "V2_Source_Read_Witness_Boundary_Redesign_Report.md",
+      "bytes": 4738,
+      "sha256": "60efed988074125b0c36dcbb3fa0bad2bba01816ff8d55643651e6db00385692"
+    },
+    {
+      "file": "V2_Source_Read_Witness_Boundary_v2_Candidate.json",
+      "bytes": 4182,
+      "sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "sample_pairs": 2000,
+  "timed_invocations": 6000,
+  "warmups_per_variant": 50,
+  "local_python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "production_latency_pass": false,
+  "variants": {
+    "parent_original": {
+      "p50_ns": 63700,
+      "p99_ns": 132200,
+      "max_ns": 450400
+    },
+    "capture_off": {
+      "p50_ns": 65400,
+      "p99_ns": 156000,
+      "max_ns": 328700,
+      "p50_ratio": 1.0266875981161696
+    },
+    "capture_on_serialized": {
+      "p50_ns": 80100,
+      "p99_ns": 186600,
+      "max_ns": 308500,
+      "p50_ratio": 1.2574568288854002
+    }
+  },
+  "deltas": {
+    "capture_off": {
+      "p50_ns": 1600,
+      "p99_ns": 71200,
+      "max_ns": 250800
+    },
+    "capture_on_serialized": {
+      "p50_ns": 16500,
+      "p99_ns": 110700,
+      "max_ns": 206700
+    }
+  },
+  "checks": {
+    "capture_off_p99": true,
+    "capture_off_max": true,
+    "capture_on_serialized_p99": true,
+    "capture_on_serialized_max": true
+  },
+  "status": "PASS",
+  "scope": "LOCAL_FIXTURE_MICROBENCH_ONLY",
+  "serialization_scope": "LOCAL_PARTIAL_SIDEBAND_PAYLOAD: scorer/selector/event/notify operands and identity; gate cap/nonce retained in memory, not emitted",
+  "complete_receipt_serialization_proven": false
+}

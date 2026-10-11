@@ -1,0 +1,27 @@
+{
+  "result_class": "D",
+  "main_result": "V2_SOURCE_READ_WITNESS_BOUNDARY_BLOCKED_MICROPROTOTYPE_REGRESSION_OR_PERFORMANCE",
+  "candidate_locked": false,
+  "reason": "MICRO01 introduced NameError before original arm. Frozen no-new-regression criterion fails; diagnostic correction does not erase failure.",
+  "initial_complete_run": {
+    "unique": 32,
+    "passed": 7,
+    "failed": 25
+  },
+  "corrected_diagnostic_run": {
+    "unique": 32,
+    "passed": 32,
+    "failed": 0
+  },
+  "unique_scenarios": 32,
+  "completed_differential_runs": 2,
+  "early_aborted_attempt_separate": true,
+  "candidate_proposal_sha256": "783406e29c3a79e3e5ffba535e4f958c96ea71e7fd89743e3077e345a6f8406a",
+  "successful_candidate_contract": false,
+  "candidate_contract_status": "PRETEST_PROPOSAL_NOT_LOCKED",
+  "performance_status": "LOCAL_BUDGET_PASS_DIAGNOSTIC_ONLY",
+  "additional_identity_limit": "episode binding at quality_arm is not arbitrary-concurrency runtime identity proof",
+  "next_single_action": "REJECT_OR_REVISE_V2_SOURCE_READ_WITNESS_CANDIDATE",
+  "next_started": false,
+  "production_application_change": 0
+}

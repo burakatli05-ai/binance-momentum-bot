@@ -1,0 +1,378 @@
+{
+  "base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+  "parent": "6be46a2d7a8c63430d35ed748b7dd0067e5a7d71",
+  "python_files_parsed": 74,
+  "parse_failures": 0,
+  "files": [
+    {
+      "path": "binance_momentum_bot/alt_shadow.py",
+      "bytes": 23835,
+      "sha256": "bb9c4c9576bce99a0a79eddc9ed708f5ce49b3fd9e3e26b5a193d3c5a03475f9"
+    },
+    {
+      "path": "binance_momentum_bot/analysis_export.py",
+      "bytes": 19073,
+      "sha256": "cfc192fc5def0e0a3b63e844b3fe371176daf7da19967c5d6a991d386377bad2"
+    },
+    {
+      "path": "binance_momentum_bot/assistant_bridge.py",
+      "bytes": 4281,
+      "sha256": "f05a4fea81eee0a5c386e13add9d03d90a6c513ee2e0fce2ec40f82d66d65035"
+    },
+    {
+      "path": "binance_momentum_bot/bot (0509).py",
+      "bytes": 310696,
+      "sha256": "d724919c9e99ae28495c779bf975b826e70cbe3fdf125a2129bc4547d85be5c4"
+    },
+    {
+      "path": "binance_momentum_bot/bot.py",
+      "bytes": 517269,
+      "sha256": "93797adab9189df2b7780a006a2e59604114ffcdfb0c898d6768516af79d6e1a"
+    },
+    {
+      "path": "binance_momentum_bot/daytrades.py",
+      "bytes": 10653,
+      "sha256": "36723643c71e60b5a3a62a200c6061bab6ca286a6dbd744dfb1fa9c8e4909b27"
+    },
+    {
+      "path": "binance_momentum_bot/early_autotrader_v2.py",
+      "bytes": 33458,
+      "sha256": "9713db2d04f5d1f91622bc7097ed4afa7ea6a703e26042305e7c9da590356dce"
+    },
+    {
+      "path": "binance_momentum_bot/early_checkpoint_shadow.py",
+      "bytes": 11292,
+      "sha256": "91924e259da701e5e30778a252e64be77e4f872991fed495e5b46f467b026d1b"
+    },
+    {
+      "path": "binance_momentum_bot/early_exit_export.py",
+      "bytes": 13879,
+      "sha256": "8fc68c7796ca36e2218cf2e84646332f1b4972f88158f2f018ff28a58ac23dde"
+    },
+    {
+      "path": "binance_momentum_bot/early_v2_adapter.py",
+      "bytes": 50714,
+      "sha256": "fb69fa58858f9458876554db5d9d373602006ae3172283b6e7ec1f72fe2a948f"
+    },
+    {
+      "path": "binance_momentum_bot/execution_v2.py",
+      "bytes": 5201,
+      "sha256": "fe730ce938cf2742af335cadafcf83c227e8b718aa070cd42d77dd3392d90362"
+    },
+    {
+      "path": "binance_momentum_bot/export_safety.py",
+      "bytes": 10653,
+      "sha256": "88a27f9c6da9ab8015fed679d61b4a48a4bde731dddd42ddf7295ce71196e175"
+    },
+    {
+      "path": "binance_momentum_bot/position_cycles.py",
+      "bytes": 10569,
+      "sha256": "80e3fb7619cf8301f259845489dc3a948b94f3860fff06895f05998e39eaeee7"
+    },
+    {
+      "path": "binance_momentum_bot/position_management_v2.py",
+      "bytes": 19196,
+      "sha256": "63df6dbb79dc886758784dc137d1643af12023ef3de805a7a19b603ae1279de3"
+    },
+    {
+      "path": "binance_momentum_bot/position_observer.py",
+      "bytes": 17650,
+      "sha256": "11313abd2c61798a3120be70bfca2641abcddb7394c284281e2300108948a318"
+    },
+    {
+      "path": "binance_momentum_bot/quality_shadow.py",
+      "bytes": 12745,
+      "sha256": "33e14f549d1b45a324ef65265dcaa92bc787e4f34deac28be5ff85551fac1df1"
+    },
+    {
+      "path": "binance_momentum_bot/research_export.py",
+      "bytes": 14979,
+      "sha256": "0d846f664e707002ec11abf3c22982617fe2a62b4dddc278e1b9b6a19bdb4fce"
+    },
+    {
+      "path": "binance_momentum_bot/research_reports.py",
+      "bytes": 6361,
+      "sha256": "cc37629de85b8f014bcfaa2513058b2b38ec960f51996a55e5e6231c0f9d4f83"
+    },
+    {
+      "path": "binance_momentum_bot/research_v5135.py",
+      "bytes": 22352,
+      "sha256": "d103369ef7036bd6b33d40004291ef7e297600cb2f2ae7fc313201175b934693"
+    },
+    {
+      "path": "binance_momentum_bot/runner_download_once.py",
+      "bytes": 5958,
+      "sha256": "84ad5f50d31d138852b5be79e7d37639f9912c4aa885a5249882a969125263d9"
+    },
+    {
+      "path": "binance_momentum_bot/runner_export_once.py",
+      "bytes": 9109,
+      "sha256": "70a48614ccef42c389a3512a83ff6f2f9afc879105bf34c362109dabd8b5f0bd"
+    },
+    {
+      "path": "binance_momentum_bot/runner_shadow_v1.py",
+      "bytes": 33436,
+      "sha256": "2bb53acb1f38937bf14a92a80cbde28f04cc0f430fb7e0e8709158dc7bd548ae"
+    },
+    {
+      "path": "binance_momentum_bot/runner_snapshot_export.py",
+      "bytes": 9986,
+      "sha256": "c4760ad950cae98d7af774fc5cd454a654892174f8a8bc50ef0cf25152cf17d5"
+    },
+    {
+      "path": "binance_momentum_bot/startup.py",
+      "bytes": 6471,
+      "sha256": "2da57131c324ad5edb012b5152abeda2f1f0ac02df1f219af1ed6657ae3457ba"
+    },
+    {
+      "path": "binance_momentum_bot/step_lock_shadow.py",
+      "bytes": 105417,
+      "sha256": "0619859e6add6e4458530fd669b2ebdc5a6e23aa8fb656ef6f3aae0ab8bedff4"
+    },
+    {
+      "path": "binance_momentum_bot/telegram_cards.py",
+      "bytes": 1584,
+      "sha256": "f8d3cb31ef52d6b2d2e1a734f73bb300ca088ae1d02dd20e899eaa026d4d7108"
+    },
+    {
+      "path": "binance_momentum_bot/telegram_ux.py",
+      "bytes": 10391,
+      "sha256": "33288ae641d2d89151c66aefb666a88108084e8d787a2d2392158a5330ec161a"
+    },
+    {
+      "path": "binance_momentum_bot/telemetry_p0.py",
+      "bytes": 18424,
+      "sha256": "78225755f6437e90ee1946c02c0197f669fb1959d0bcf732a9a2eaaae7b9a3ad"
+    },
+    {
+      "path": "binance_momentum_bot/telemetry_report.py",
+      "bytes": 5489,
+      "sha256": "f8616da098697a66eb8f674ee4f110f06c33e03cca95efff55275c35a1c60488"
+    },
+    {
+      "path": "binance_momentum_bot/today_positions.py",
+      "bytes": 8914,
+      "sha256": "b7bbb75a7b71fab38df90c65f3a53ecf5ab5eacde779ba80aabf521e13b11163"
+    },
+    {
+      "path": "binance_momentum_bot/trade_views.py",
+      "bytes": 10015,
+      "sha256": "be35b8acb95553d2570175ab7bc7b39229d13768a7339e422a05dd1cd70aeac4"
+    },
+    {
+      "path": "binance_momentum_bot/visual_cards.py",
+      "bytes": 5695,
+      "sha256": "3f5d77db731c1cd715c7057d0c2946f82bfaf962b3cffce446e8ebdf2f40ee88"
+    },
+    {
+      "path": "binance_momentum_bot/x_watcher.py",
+      "bytes": 16972,
+      "sha256": "034d5d7ab2fe54f3c462d114e11cf69b4e3b5a77d301404cc79e9efa8e5bb4e9"
+    },
+    {
+      "path": "research/execution_counterfactual.py",
+      "bytes": 2769,
+      "sha256": "6f80625f3dab3a29b233964a898c984e79d800ab0132833f6104eeb803a80f03"
+    },
+    {
+      "path": "research/profit_lock_shadow.py",
+      "bytes": 6940,
+      "sha256": "e268ff8079994fffc9c56522837fe2831b11ecb7dbf2ad7b0aac31cc5a194f7f"
+    },
+    {
+      "path": "research/reweight_backtest.py",
+      "bytes": 19330,
+      "sha256": "858a3c932d653eef39054db4f4efa91d9495f1bf6b46287266ec6600397a0019"
+    },
+    {
+      "path": "research/v2_minimal_attestation_review/source_boundary_audit.py",
+      "bytes": 5231,
+      "sha256": "213c7f1f1815d77219a0ce575c8b29989c228a9bb00071cd467f6c24740f14d4"
+    },
+    {
+      "path": "research/v2_minimal_attestation_review/test_source_boundary_audit.py",
+      "bytes": 5310,
+      "sha256": "68bf5e39935be12b911efe3479e10fb15699e65d14a3104bfcbc629619e24cf9"
+    },
+    {
+      "path": "tests/early_v2_compat.py",
+      "bytes": 5123,
+      "sha256": "1a9eb8048a3309208f19d711f93ea5f0b68d6c9925fabb1d69b0804de84211b6"
+    },
+    {
+      "path": "tests/h1_export_compare_regression.py",
+      "bytes": 1127,
+      "sha256": "4334164e4ddb32119db9f5270387d316586f0a41a8fc10b547c7f5e79054171c"
+    },
+    {
+      "path": "tests/h1_export_gate_runner.py",
+      "bytes": 1456,
+      "sha256": "cf28fa5dfa8526eb1372ec9c8597585657be3e0142af7fc1fb1b7f783d6a219b"
+    },
+    {
+      "path": "tests/test_alt_research.py",
+      "bytes": 15680,
+      "sha256": "ce4b3ef4491d55543b42dbf5d3f49dd232e050933e83180acaabaa193e65deb9"
+    },
+    {
+      "path": "tests/test_analysis_export.py",
+      "bytes": 18534,
+      "sha256": "87561b1a6cd2bbdb446206d22beeaa342f102fddc4e59f2ca852032ab9711d3e"
+    },
+    {
+      "path": "tests/test_assistant_bridge.py",
+      "bytes": 2060,
+      "sha256": "c1038ae164b828fa18ed2072289f388b9578e112e4318cf614b715c8a4e787a0"
+    },
+    {
+      "path": "tests/test_binance_rate_limit_hotfix.py",
+      "bytes": 2364,
+      "sha256": "9793b0174d4a9f96434de222c36ef26e36c4751e366c08cece9f2bfa6604f69f"
+    },
+    {
+      "path": "tests/test_early_autotrader_v2.py",
+      "bytes": 31598,
+      "sha256": "7eba80c4af169596494bff9c7cbb4946ad37ce80acd7313d3c33773d5b3b17bd"
+    },
+    {
+      "path": "tests/test_early_checkpoint_shadow.py",
+      "bytes": 3912,
+      "sha256": "d105c2970b441fd1e12bb906fb7d5c9d334d315637b87af9bc42fad4c3bffd9f"
+    },
+    {
+      "path": "tests/test_early_exit_export.py",
+      "bytes": 3396,
+      "sha256": "51509a1aa8a0dfa0134471b97ae91ad0e490dd34663ca3830aa6bfee7c630952"
+    },
+    {
+      "path": "tests/test_early_fallback_tp.py",
+      "bytes": 15856,
+      "sha256": "20c43534db40df227545c8a69c58567620c1c499f33a6bfd7b300f10a7120d65"
+    },
+    {
+      "path": "tests/test_execution_counterfactual.py",
+      "bytes": 1227,
+      "sha256": "42d8474a807f83ab98d18f386871e2b9a607a9bef6fc5a7cc5103bdd232f186e"
+    },
+    {
+      "path": "tests/test_export_safety.py",
+      "bytes": 11626,
+      "sha256": "221ad7075a5b84347ebe892ad76a2bf710f46cf48316fdf85f347690dcade83f"
+    },
+    {
+      "path": "tests/test_h1_bounded_export.py",
+      "bytes": 18667,
+      "sha256": "2bf3b685bc8ae03d54518c929bac540b0a74ba6fb5373fee1b1110aee5738f04"
+    },
+    {
+      "path": "tests/test_information_only.py",
+      "bytes": 9274,
+      "sha256": "c702c58ac831566ad9a9c7734a3aaf252e0066d406c9066f27e798ef08bd3d80"
+    },
+    {
+      "path": "tests/test_integration.py",
+      "bytes": 8767,
+      "sha256": "218478a41a543c4897b52804f82d14ae362dc3a417958175dea97083bb953f47"
+    },
+    {
+      "path": "tests/test_latestexport_hotfix.py",
+      "bytes": 7063,
+      "sha256": "88cdacb8517046c641ba08e9571511e24396dd4858f87af3b11eb19fa0f34874"
+    },
+    {
+      "path": "tests/test_live_capability.py",
+      "bytes": 11867,
+      "sha256": "7c86541558b023173ea4bb01811027849426b7c1b44114abbf810a3e9ca600c2"
+    },
+    {
+      "path": "tests/test_observer_open.py",
+      "bytes": 4997,
+      "sha256": "18779058457b1869be712efe84ecc4970d5400224240ad019e2b5cdd06104116"
+    },
+    {
+      "path": "tests/test_position_management_v2.py",
+      "bytes": 13819,
+      "sha256": "a5057f5e7468e92d10b08012ccf5b03581a1aa769f5abf505517a008b2ad0554"
+    },
+    {
+      "path": "tests/test_quality_bot.py",
+      "bytes": 1492,
+      "sha256": "028703135186ce253d33a9decfc574a3a60835efa37a91ff4267a1a10a912548"
+    },
+    {
+      "path": "tests/test_quality_shadow.py",
+      "bytes": 4555,
+      "sha256": "487f2ca6218cabdce557fda3dbac7fae2f07b28d140cbdf8e3799078ef9ae46d"
+    },
+    {
+      "path": "tests/test_railpack_startup.py",
+      "bytes": 6024,
+      "sha256": "5c19d1c21320cf8c37ff8d674b9bcb3780fff099cf8eef7d9403ff132a7d3f80"
+    },
+    {
+      "path": "tests/test_reweight_backtest.py",
+      "bytes": 2267,
+      "sha256": "275f51cc4b09f3f6728afcdd7e2aa2495b9a9b0b2a616392d0daa22f8a1cf695"
+    },
+    {
+      "path": "tests/test_runner_export_once.py",
+      "bytes": 11969,
+      "sha256": "9fc9a95f125abd456cb6846e3787151befbadb165584c74661b74d24aa12daff"
+    },
+    {
+      "path": "tests/test_runner_notify_safety.py",
+      "bytes": 6107,
+      "sha256": "4ed552e574a6f227b58563bb025d0e1dd1afa24c003ac5a5197585c77b15662b"
+    },
+    {
+      "path": "tests/test_runner_shadow_v1.py",
+      "bytes": 9712,
+      "sha256": "3677e7ef7119d4b4f1db351d9b8f628aca40d8bff2780fd69349d25432a91658"
+    },
+    {
+      "path": "tests/test_runner_snapshot_export.py",
+      "bytes": 10060,
+      "sha256": "5e8baded4c01cea773bd070d96cf189fe0fefcc9da1eb31531428b14157a14c7"
+    },
+    {
+      "path": "tests/test_startup.py",
+      "bytes": 3520,
+      "sha256": "61bf6d9a18faba578a0d96a443035f948934813f9ddca8a0c18ef7c277f12b78"
+    },
+    {
+      "path": "tests/test_step_lock_shadow.py",
+      "bytes": 16026,
+      "sha256": "6e4a5d31355c8621570a4505c192b29251e99d6925c6ae958e8f4d41d2a5f0f0"
+    },
+    {
+      "path": "tests/test_telegram_priority_hotfix.py",
+      "bytes": 1416,
+      "sha256": "102ce258a7fd7fffc941595872c220864642fad1662030298c0152b12a792b81"
+    },
+    {
+      "path": "tests/test_telegram_ux.py",
+      "bytes": 15586,
+      "sha256": "e207f6fc02cbde08f48bbec7de5caea9910bd3719d0cc2b126319c20107a6ce3"
+    },
+    {
+      "path": "tests/test_telemetry_p0.py",
+      "bytes": 12337,
+      "sha256": "6d8c881dc9326d791c755093c0bb0c5c6803a7c5d631f2c62963f1b7cb5021d6"
+    },
+    {
+      "path": "tests/test_tp_limit_execution.py",
+      "bytes": 13377,
+      "sha256": "13972217fd99f9f2d0df5562c9e109542e0fbac53c9b539862f6451ba3d47f54"
+    },
+    {
+      "path": "tests/test_v5135.py",
+      "bytes": 13996,
+      "sha256": "68a981a36f5f768c17c25fe5f647fb6b2e068c95dde12fb0a14e48c1093d4d4d"
+    },
+    {
+      "path": "tests/test_visual_cycles.py",
+      "bytes": 11033,
+      "sha256": "eb62fca37b364da8446ae6e25f0361b50af988007d49af455499b867ae739ab9"
+    }
+  ]
+}

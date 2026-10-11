@@ -1,0 +1,88 @@
+{
+  "contract_id": "V2_SOURCE_READ_WITNESS_BOUNDARY_V2_CANDIDATE",
+  "status": "PRETEST_PROPOSAL_NOT_LOCKED",
+  "parent_contract_id": "MINIMUM_IN_PROCESS_RUNTIME_ATTESTATION_REQUIREMENTS_V1",
+  "parent_sha256": "36cdcc504808d37ecb2d602262f30b4f4f63df18839761fb98c1518cdea38b8f",
+  "parent_blocker": "No replacement of strategy reads prevented v1 implementation. v1 remains unchanged.",
+  "explicit_version_change": "v2 evaluates exact operand local binding and opt-in result sideband, including OFF local store overhead; separate explicit production-code approval required.",
+  "candidate": "ONE_COMPOSITE_EXACT_SITE_LOCAL_CAPTURE_PLUS_EPHEMERAL_CONTEXT_PLUS_OPT_IN_RESULT_SIDEBAND",
+  "classes": {
+    "A": "candidate capture primitive",
+    "B": "candidate local identity propagation",
+    "C": "candidate optional keyword/return sideband; all legacy callers unchanged by default",
+    "D": "negative control rejected: trace/profile/native/descriptor/monkeypatch/import hook not trusted"
+  },
+  "capture": "AST NamedExpr around existing seven operand loads; no load substitution/re-read; separate local per read",
+  "propagation": "only immutable tuple sidebands and context on local call chain; original strategy result object unwrapped immediately; no strategy value read from context",
+  "invariants": [
+    "strategy output equality",
+    "exception type/message equality",
+    "threshold/config read count equality",
+    "threshold/config read order equality",
+    "short-circuit equality",
+    "no new threshold read",
+    "no removed threshold read",
+    "no reuse across separate threshold sites",
+    "no new clock",
+    "no lock/transaction/retry",
+    "no selector rerun",
+    "no DB behavior change",
+    "no notification/entry/exit change"
+  ],
+  "model": {
+    "id": "CLOSED_SOURCE_SCRIPTED_OBSERVABLE_MODEL_V1",
+    "includes": [
+      "exact parsed source functions and entire public gate If subtree",
+      "built-in primitive config values on known env/JSON paths",
+      "scripted read/compare/SQL/event/notify exceptions",
+      "scripted mutations at existing side-effect boundaries",
+      "separate invocations with independent inputs",
+      "original application exception handlers"
+    ],
+    "excludes": [
+      "arbitrary scheduler-dependent shared config mutation between added instructions",
+      "signals/asynchronous exceptions",
+      "memory exhaustion/allocation failure",
+      "tracing/profiling/custom frame inspection",
+      "custom refcount finalizers or mutable threshold object lifetime semantics",
+      "production loaded-function ownership attestation",
+      "external injected runtime writers"
+    ],
+    "arbitrary_concurrent_mutation": "UNKNOWN",
+    "bytecode_identical": false,
+    "identity": "same lexical caller; token object namespace/radar/episode/symbol; unknown on missing/gap/restart/mismatch; no post-hoc recovery",
+    "unsupported_operand": "type must be exact int/float for serializable exact value; otherwise UNKNOWN; original comparison still runs"
+  },
+  "engineering_budget": {
+    "candidate_count": 1,
+    "proposed_application_files": [
+      "binance_momentum_bot/bot.py",
+      "binance_momentum_bot/early_v2_adapter.py",
+      "binance_momentum_bot/early_autotrader_v2.py",
+      "binance_momentum_bot/v2_witness_boundary.py (proposed only)"
+    ],
+    "max_proposed_files": 4,
+    "new_strategy_locks": 0,
+    "new_strategy_transactions": 0,
+    "new_strategy_retries": 0,
+    "new_strategy_clocks": 0,
+    "global_mutable_registry": 0,
+    "source_db_schema_or_writes": 0,
+    "threshold_change": 0,
+    "economic_model_change": 0,
+    "production_implementation": 0,
+    "exceed_action": "REJECT_NO_EXPANSION"
+  },
+  "decision_precedence": [
+    "E identity/access failure",
+    "C unresolved required source caller/writer coverage",
+    "D any microprobe transcript mismatch or predeclared budget failure",
+    "B unacceptable design mechanism/budget",
+    "A only all gates satisfied"
+  ],
+  "proof_limits": [
+    "No target-runtime bytecode identity claim; local CPython 3.12 versus production reported3.13",
+    "No first-decision or receipt generation",
+    "No production latency approval"
+  ]
+}

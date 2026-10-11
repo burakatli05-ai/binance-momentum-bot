@@ -1,0 +1,111 @@
+{
+  "source_files_verified": 74,
+  "frozen_files_verified": 9,
+  "json_syntax_valid": true,
+  "python_syntax_valid": true,
+  "evidence_zip_crc_valid": true,
+  "static_target_load_comparison": {
+    "early_notify_pass": {
+      "original": [
+        [
+          "LOAD_GLOBAL",
+          "EARLY_NOTIFY_MAX_BUY30"
+        ]
+      ],
+      "candidate": [
+        [
+          "LOAD_GLOBAL",
+          "EARLY_NOTIFY_MAX_BUY30"
+        ],
+        [
+          "LOAD_GLOBAL",
+          "EARLY_NOTIFY_MAX_BUY30"
+        ]
+      ],
+      "static_equal": false,
+      "note": "gate return has disjoint ON/OFF AST copies; dynamic branch reads checked by M01-M32"
+    },
+    "ignition_shadow_score": {
+      "original": [
+        [
+          "LOAD_GLOBAL",
+          "FAST_EARLY_V2_SCORE"
+        ],
+        [
+          "LOAD_GLOBAL",
+          "IGNITION_V2_MIN_SCORE"
+        ]
+      ],
+      "candidate": [
+        [
+          "LOAD_GLOBAL",
+          "FAST_EARLY_V2_SCORE"
+        ],
+        [
+          "LOAD_GLOBAL",
+          "IGNITION_V2_MIN_SCORE"
+        ]
+      ],
+      "static_equal": true,
+      "note": "same static load sequence"
+    },
+    "record_selector": {
+      "original": [
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ],
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ]
+      ],
+      "candidate": [
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ],
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ]
+      ],
+      "static_equal": true,
+      "note": "same static load sequence"
+    },
+    "arm": {
+      "original": [
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ],
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ]
+      ],
+      "candidate": [
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ],
+        [
+          "LOAD_ATTR",
+          "min_score"
+        ]
+      ],
+      "static_equal": true,
+      "note": "same static load sequence"
+    },
+    "public_driver": {
+      "original": [],
+      "candidate": [],
+      "static_equal": true,
+      "note": "same static load sequence"
+    }
+  },
+  "parent_T001_T092_executed": 0,
+  "application_existing_tests_workflow_diff": 0,
+  "decision": "D_NOT_LOCKED",
+  "note": "Artifact integrity checks only, not additional adversarial strategy test cases"
+}

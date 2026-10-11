@@ -1,0 +1,86 @@
+{
+  "contract_id": "MINIMUM_IN_PROCESS_RUNTIME_ATTESTATION_REQUIREMENTS_V1",
+  "run": "2026-10-11_V2_Receipt_Fresh_Source_Runtime_Config_Identity_Resolution_v1",
+  "status": "DESIGN_ONLY_NOT_IMPLEMENTED_NOT_APPROVED_FOR_PRODUCTION",
+  "purpose": "Attest actual executing definitions and source-read setting origin without changing original strategy decisions; missing witness stays UNKNOWN",
+  "default": "OFF",
+  "authority": "Separate explicit production code approval, then separate deployment/restart/activation authorization; this document grants none",
+  "fields": {
+    "runtime_UUID": "Fresh random immutable identifier for each interpreter/application incarnation; not an alias for derived OS fingerprint; no old PID reuse",
+    "derived_runtime_fingerprint": "External OS tuple as secondary link, with its stated limits",
+    "deployment_id": "Exact verified deployment",
+    "source_manifest_hash": "Versioned disk/build manifest; distinct from loaded-code manifest",
+    "loaded_module_file_code_fingerprint": "Allowlisted actual module/class/function references used by gate, scorer, adapter and Pilot; module origin/spec/loader plus bounded recursive code fingerprint; never substitute compile(current disk) for live __code__",
+    "process_start": "Observed OS ticks/boot ID and existing bot-start marker separately; missing exact import time null",
+    "config_origin_revision": "Per allowed field source-default/env/DB/startup/admin provenance; immutable load and mutation records; completeness flags",
+    "four_effective_setting_values": [
+      "EARLY_NOTIFY_MAX_BUY30",
+      "FAST_EARLY_V2_SCORE",
+      "IGNITION_V2_MIN_SCORE",
+      "V2_min_score"
+    ],
+    "Pilot_generation": "Actual read, not inferred; distinct from complete four-field observer revision",
+    "decision_ms": "Reuse existing adapter347 value exactly; no clock call added",
+    "receipt_observer_version": "Pinned observer implementation/source hash; currently NOT_IMPLEMENTED",
+    "restore_DB_generation": "Independently bound DB lineage/restore identifier; null/UNKNOWN until exact evidence, never inode/path/staging UUID",
+    "startup_load_receipt": "Loaded source plus four actual values/origins/revision and runtime namespace; retrospective start cannot be fabricated",
+    "decision_sequence": "Per runtime observer allocation; never legacy signal_id alone",
+    "source_read_witnesses": "Bind cap gate, threshold reads, cfg qualification/storage/event readings to actual invocation; post-hoc equality insufficient",
+    "feature_payload": "16 bounded primitive feature fields; invalid/missing preserved; no future enrichment",
+    "loss_and_integrity": "Prior hash/sequence/ACK reference; pending/gaps/oversize/overflow/crash tail explicitly UNKNOWN"
+  },
+  "required_observation_boundaries": [
+    "Startup after actual load: capture references and values without re-running selector or constructing another Pilot",
+    "Every allowed startup/admin publication path: observe actual values/origin/revision without joining source DB transaction; failure/loss invalidates completeness",
+    "Actual pre-arm gate cap read and score threshold reads: immutable runtime proof or per-read witness required",
+    "Existing decision_ms and actual selector result: bounded observe; all branch failures remain source-identical",
+    "Restore and interpreter restart: new namespace and provenance; absent restore capability means UNKNOWN"
+  ],
+  "atomicity_contract": {
+    "no_new_lock_transaction_retry_clock": true,
+    "no_wrapper_monkeypatch_or_reload": true,
+    "no_rerun_of_selector": true,
+    "no_replacement_of_strategy_reads": true,
+    "owner_and_writer_completeness_required": true,
+    "generation_alone_sufficient": false,
+    "before_after_equality_sufficient": false,
+    "missing_witness": "UNKNOWN_SOURCE_RUNTIME_CONFIG_SNAPSHOT",
+    "if_exact_needs_behavior_change": "Reject exact acceptance and separately redesign; do not silently add coordination",
+    "feasibility_status": "NOT_CERTIFIED; requirements complete but implementation/owner proof pending"
+  },
+  "noninterference": {
+    "strategy_failure_policy": "FAIL_OPEN; original return, exceptions, SQL commits, notifications, queue, entry/exit remain identical",
+    "evidence_failure_policy": "FAIL_CLOSED; no exact classification when bounds/origin/loaded definitions/revision/ACK are incomplete",
+    "source_DB_transaction_participation": false,
+    "strategy_clock_new_calls": 0,
+    "signal_or_trade_behavior_changes": 0,
+    "OFF_behavior": "No observer queue/worker/snapshot/IO/clock activity",
+    "failures": "Observer errors must never leak into strategy handlers, rollback source writes, retry selector, suppress notify or duplicate entry"
+  },
+  "bounded_append_only": {
+    "queue_capacity": 1024,
+    "max_receipt_bytes": 16384,
+    "max_feature_bytes": 8192,
+    "max_reason_utf8_bytes": 1024,
+    "sink": "Separately approved off-path create-only append ledger; no production DB table",
+    "oversize_overflow": "Explicit loss control when possible; otherwise missing/unACK tail UNKNOWN; no silent truncation",
+    "independent_anchor": "Required for full stream/restore completeness; provider not chosen or provisioned",
+    "rotation_quota_retention": "Must be frozen in separate disabled design; no operational readiness claim",
+    "watermark": "Parent10s worker requirement; no new strategy clock; worker cadence not implemented here"
+  },
+  "secrets": "Exact identity and allowed numeric strategy fields only; no environment dump, credentials, chat IDs, unbounded repr or exception strings",
+  "rollback": "Disable admission without modifying strategy; off-path drain bounded by separately frozen budget; preserve old segments; unresolved tail UNKNOWN; no automatic restart",
+  "acceptance_gates_not_executed": [
+    "OFF/ON deterministic source transcript across every existing branch",
+    "Startup/reconfigure/crash/restore/reload identity and mutation completeness",
+    "ABA/source-read witness and missing-field UNKNOWN",
+    "Exact code fingerprint alias and loader validation",
+    "Bounded sink/queue/full/partial/loss behavior",
+    "Separately approved full-path latency budget and target run"
+  ],
+  "production_implementation_started": false,
+  "production_receipts_written": 0,
+  "past_1610_rows_backfill": false,
+  "exact_first_decision_n": 0,
+  "OOS_N": 0
+}

@@ -1,0 +1,34 @@
+{
+  "question": "Can actual operands be captured at the same logical read sites under declared model without changing observable strategy transcript?",
+  "base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+  "parent": "6be46a2d7a8c63430d35ed748b7dd0067e5a7d71",
+  "classes": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "single_candidate": true,
+  "freeze_before_prototype_tests": true,
+  "no_outcomes": true,
+  "engineering_budget": {
+    "candidate_count": 1,
+    "proposed_application_files": [
+      "binance_momentum_bot/bot.py",
+      "binance_momentum_bot/early_v2_adapter.py",
+      "binance_momentum_bot/early_autotrader_v2.py",
+      "binance_momentum_bot/v2_witness_boundary.py (proposed only)"
+    ],
+    "max_proposed_files": 4,
+    "new_strategy_locks": 0,
+    "new_strategy_transactions": 0,
+    "new_strategy_retries": 0,
+    "new_strategy_clocks": 0,
+    "global_mutable_registry": 0,
+    "source_db_schema_or_writes": 0,
+    "threshold_change": 0,
+    "economic_model_change": 0,
+    "production_implementation": 0,
+    "exceed_action": "REJECT_NO_EXPANSION"
+  }
+}

@@ -1,0 +1,847 @@
+{
+  "unique_tests": 32,
+  "passed": 32,
+  "failed": 0,
+  "local_python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "production_pass": false,
+  "parent_required_tests_run": 0,
+  "results": [
+    {
+      "id": "M01",
+      "scenario": "global_numeric",
+      "requirement": "ordinary cap numeric",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M02",
+      "scenario": "global_invalid_type",
+      "requirement": "cap str raises TypeError",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "raised": true
+        }
+      ],
+      "original_transcript_sha256": "c45bb2057fa0c067713d7486c49f4f798c255dc600a13604dd1b73dcb383cf20",
+      "candidate_transcript_sha256": "c45bb2057fa0c067713d7486c49f4f798c255dc600a13604dd1b73dcb383cf20"
+    },
+    {
+      "id": "M03",
+      "scenario": "global_comparison_exception",
+      "requirement": "reflected comparator raises ValueError",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "raised": true
+        }
+      ],
+      "original_transcript_sha256": "e7b747f9ce9fae85ae95a9a5100ac55ab187d40f39388b1006913f71ce45ced1",
+      "candidate_transcript_sha256": "e7b747f9ce9fae85ae95a9a5100ac55ab187d40f39388b1006913f71ce45ced1"
+    },
+    {
+      "id": "M04",
+      "scenario": "fast_true",
+      "requirement": "FAST true: lower read zero",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M05",
+      "scenario": "fast_false",
+      "requirement": "FAST false: lower read once",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_once": true,
+          "lower_witness": true
+        }
+      ],
+      "original_transcript_sha256": "dca011da08bbf77c69985b2ba825c43c3bf1cb3c374e5b9709199b61f04d6ea9",
+      "candidate_transcript_sha256": "dca011da08bbf77c69985b2ba825c43c3bf1cb3c374e5b9709199b61f04d6ea9"
+    },
+    {
+      "id": "M06",
+      "scenario": "min_score_normal",
+      "requirement": "distinct normal four min_score reads",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "four_separate_reads": true,
+          "four_exact_witnesses": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M07",
+      "scenario": "property_raises",
+      "requirement": "qualification property raises",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "property_raised": true,
+          "existing_arm_catch": true
+        }
+      ],
+      "original_transcript_sha256": "30cfc21fd4506100c6c0937590fc9477865b4c85328aaeef9cc97d5101abbd48",
+      "candidate_transcript_sha256": "30cfc21fd4506100c6c0937590fc9477865b4c85328aaeef9cc97d5101abbd48"
+    },
+    {
+      "id": "M08",
+      "scenario": "qualification_sql_change",
+      "requirement": "qualification=90 SQL=96",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "four_separate_reads": true,
+          "four_exact_witnesses": true
+        }
+      ],
+      "original_transcript_sha256": "d406744db8df1f2c8b05cd473f879b6fcc3bb86243e0b3d84f3915503f6303c8",
+      "candidate_transcript_sha256": "d406744db8df1f2c8b05cd473f879b6fcc3bb86243e0b3d84f3915503f6303c8"
+    },
+    {
+      "id": "M09",
+      "scenario": "sql_event_change",
+      "requirement": "qualification=90 SQL=90 event=97",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "four_separate_reads": true,
+          "four_exact_witnesses": true
+        }
+      ],
+      "original_transcript_sha256": "8b0cb7d21cf6c46877c1df5936fa65ea79d1ceb9da59d2558448d86fb3d9beb1",
+      "candidate_transcript_sha256": "8b0cb7d21cf6c46877c1df5936fa65ea79d1ceb9da59d2558448d86fb3d9beb1"
+    },
+    {
+      "id": "M10",
+      "scenario": "aba",
+      "requirement": "min_score 90 -> 95 -> 90 -> 95",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "four_separate_reads": true,
+          "four_exact_witnesses": true
+        }
+      ],
+      "original_transcript_sha256": "7a88cfc66dee70c7ade87caa0f38ec4f49b7fb1205fdb279e05e480371a9cdac",
+      "candidate_transcript_sha256": "7a88cfc66dee70c7ade87caa0f38ec4f49b7fb1205fdb279e05e480371a9cdac"
+    },
+    {
+      "id": "M11",
+      "scenario": "same_value_republish",
+      "requirement": "new config generation each read, same90",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "four_separate_reads": true,
+          "four_exact_witnesses": true
+        }
+      ],
+      "original_transcript_sha256": "92067501290ce3cc3c832e2e9728c2499690087dd11b79e2c4c110311d4f44b5",
+      "candidate_transcript_sha256": "92067501290ce3cc3c832e2e9728c2499690087dd11b79e2c4c110311d4f44b5"
+    },
+    {
+      "id": "M12",
+      "scenario": "interrupted_before_arm",
+      "requirement": "quality_arm fixture raises before arm",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "no_arm": true
+        }
+      ],
+      "original_transcript_sha256": "b3035ecf9d272942e5762815f1804942fb82627a3368ac8b2b0a32a9b406f812",
+      "candidate_transcript_sha256": "b3035ecf9d272942e5762815f1804942fb82627a3368ac8b2b0a32a9b406f812"
+    },
+    {
+      "id": "M13",
+      "scenario": "gate_reject",
+      "requirement": "buy exceeds cap: no arm",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "no_arm": true
+        }
+      ],
+      "original_transcript_sha256": "4acff065da65dbbcd409cc93c63835c98e121bd061c4465b76459faf9c01f4ea",
+      "candidate_transcript_sha256": "4acff065da65dbbcd409cc93c63835c98e121bd061c4465b76459faf9c01f4ea"
+    },
+    {
+      "id": "M14",
+      "scenario": "gate_arm_link",
+      "requirement": "immutable token exact same radar/episode/symbol",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "context_exact": true,
+          "cap_exact": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M15",
+      "scenario": "reentrant_invocations",
+      "requirement": "nested invocation distinct token; no registry",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "context_exact": true,
+          "cap_exact": true,
+          "nonce_isolated": true
+        }
+      ],
+      "original_transcript_sha256": "4eca14e34e7bf28033c826318bdfc3d1435605534aa89f4fd37463967d26319e",
+      "candidate_transcript_sha256": "4eca14e34e7bf28033c826318bdfc3d1435605534aa89f4fd37463967d26319e"
+    },
+    {
+      "id": "M16",
+      "scenario": "concurrent_invocations",
+      "requirement": "two threads independent state; exact own token",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        },
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "context_exact": true,
+          "cap_exact": true
+        },
+        {
+          "lower_unread": true,
+          "context_exact": true,
+          "cap_exact": true
+        },
+        {
+          "nonce_isolation": true
+        }
+      ],
+      "original_transcript_sha256": "e2a304429295967e9190ba4c89dfbbd469ba4c0f4fc3b792f666b4bbea74a6a2",
+      "candidate_transcript_sha256": "e2a304429295967e9190ba4c89dfbbd469ba4c0f4fc3b792f666b4bbea74a6a2"
+    },
+    {
+      "id": "M17",
+      "scenario": "scorer_exception",
+      "requirement": "FAST comparator raises in arm catch",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "existing_rejection": true
+        }
+      ],
+      "original_transcript_sha256": "b3fd964c4b7cea1f283f2d39b863d27a367dd56251fb6a395d9c5ac8605d0cc0",
+      "candidate_transcript_sha256": "b3fd964c4b7cea1f283f2d39b863d27a367dd56251fb6a395d9c5ac8605d0cc0"
+    },
+    {
+      "id": "M18",
+      "scenario": "notify_failure",
+      "requirement": "existing _queue_notify raises",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "existing_rejection": true
+        }
+      ],
+      "original_transcript_sha256": "92b071d84dd4b92e4b7eab4e14b207b2042ca0b739af1672796f052ac10b9643",
+      "candidate_transcript_sha256": "92b071d84dd4b92e4b7eab4e14b207b2042ca0b739af1672796f052ac10b9643"
+    },
+    {
+      "id": "M19",
+      "scenario": "sql_failure",
+      "requirement": "SQL stub execute raises",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "existing_rejection": true
+        }
+      ],
+      "original_transcript_sha256": "a8b33e749dd4e0fcca1c7f498df3595032c357136a488fdfab11765d120a8b2c",
+      "candidate_transcript_sha256": "a8b33e749dd4e0fcca1c7f498df3595032c357136a488fdfab11765d120a8b2c"
+    },
+    {
+      "id": "M20",
+      "scenario": "step_lock_branch",
+      "requirement": "StepLock branch executes before scorer",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "step_first": true
+        }
+      ],
+      "original_transcript_sha256": "d8197ed9a2ccc9465194fe8ee91ff55266ef1bfb2b89948c7d34268b16b42f57",
+      "candidate_transcript_sha256": "d8197ed9a2ccc9465194fe8ee91ff55266ef1bfb2b89948c7d34268b16b42f57"
+    },
+    {
+      "id": "M21",
+      "scenario": "missing_witness",
+      "requirement": "direct arm without gate context: UNKNOWN",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "unknown": true
+        }
+      ],
+      "original_transcript_sha256": "b2b082c7527f0994405bbdcd09e459dd6a0fa40c3f35c39f79e567da9003b213",
+      "candidate_transcript_sha256": "b2b082c7527f0994405bbdcd09e459dd6a0fa40c3f35c39f79e567da9003b213"
+    },
+    {
+      "id": "M22",
+      "scenario": "witness_oversize",
+      "requirement": "oversize metadata rejected by witness serializer",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "unknown": true
+        }
+      ],
+      "original_transcript_sha256": "dac240e30a52b8f794e001b420418f166a5d384589e73d0cb0eb2dd1274b5f89",
+      "candidate_transcript_sha256": "dac240e30a52b8f794e001b420418f166a5d384589e73d0cb0eb2dd1274b5f89"
+    },
+    {
+      "id": "M23",
+      "scenario": "observer_off",
+      "requirement": "capture locals present; no sideband/token/serialization",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "no_sideband": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M24",
+      "scenario": "restart_namespace",
+      "requirement": "old namespace context rejected: UNKNOWN",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "unknown": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M25",
+      "scenario": "gate_earlier_short_circuit",
+      "requirement": "candidate passes<2 cap unread",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "no_arm": true,
+          "no_cap": true
+        }
+      ],
+      "original_transcript_sha256": "1acc1ae3c9c019cb80766e7c5fbb4e06d53d23ec4f3f335721e367c8edeba1e2",
+      "candidate_transcript_sha256": "1acc1ae3c9c019cb80766e7c5fbb4e06d53d23ec4f3f335721e367c8edeba1e2"
+    },
+    {
+      "id": "M26",
+      "scenario": "qualification_short_circuit",
+      "requirement": "invalid label qualification min_score unread; SQL read preserved",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "qualification_unread": true
+        }
+      ],
+      "original_transcript_sha256": "8e92268de315413694b787d69e1a2bfdd121d0398149b12a3421b0ff5e3dc2e0",
+      "candidate_transcript_sha256": "8e92268de315413694b787d69e1a2bfdd121d0398149b12a3421b0ff5e3dc2e0"
+    },
+    {
+      "id": "M27",
+      "scenario": "sql_property_exception",
+      "requirement": "second min_score read raises; no reuse",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "property_raised": true,
+          "existing_arm_catch": true
+        }
+      ],
+      "original_transcript_sha256": "468f2313fa364fa642d6b01cf68f81957517425e7633321185d3347ba7ae7b7a",
+      "candidate_transcript_sha256": "468f2313fa364fa642d6b01cf68f81957517425e7633321185d3347ba7ae7b7a"
+    },
+    {
+      "id": "M28",
+      "scenario": "step_lock_exception",
+      "requirement": "StepLock failure existing event then scorer",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "step_first": true
+        }
+      ],
+      "original_transcript_sha256": "c2a7c44d5b0bef186fcae91666cba864bf145e6d71eab8052ad906d737fdc396",
+      "candidate_transcript_sha256": "c2a7c44d5b0bef186fcae91666cba864bf145e6d71eab8052ad906d737fdc396"
+    },
+    {
+      "id": "M29",
+      "scenario": "event_failure",
+      "requirement": "selector event fails; existing rejection event",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "existing_rejection": true
+        }
+      ],
+      "original_transcript_sha256": "f4f304c39399ec2b4be7fbdebe9ee0f4b2cfd220c0a64e09a3601498a98bf072",
+      "candidate_transcript_sha256": "f4f304c39399ec2b4be7fbdebe9ee0f4b2cfd220c0a64e09a3601498a98bf072"
+    },
+    {
+      "id": "M30",
+      "scenario": "legacy_api",
+      "requirement": "default calls retain bool/tuple/bool/None return shapes",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "lower_unread": true,
+          "no_sideband": true
+        }
+      ],
+      "original_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431",
+      "candidate_transcript_sha256": "2ec05308ce7adcec75c1e700a463a4d55f803808901d71bbfeb2e7f14b112431"
+    },
+    {
+      "id": "M31",
+      "scenario": "identity_gap",
+      "requirement": "radar changes before arm: context UNKNOWN; strategy unchanged",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "unknown": true
+        }
+      ],
+      "original_transcript_sha256": "6ce607dacf48ef28ff53bd906ef0cc12ae3a5bde5cc8773995a604e99967d01f",
+      "candidate_transcript_sha256": "6ce607dacf48ef28ff53bd906ef0cc12ae3a5bde5cc8773995a604e99967d01f"
+    },
+    {
+      "id": "M32",
+      "scenario": "on_disabled_notify",
+      "requirement": "notify flag false -> notify min_score unread",
+      "status": "PASS",
+      "comparisons": [
+        {
+          "result": true,
+          "exception": true,
+          "reads": true,
+          "comparisons": true,
+          "branch_path": true,
+          "transcript": true,
+          "final_state": true,
+          "final_m": true
+        }
+      ],
+      "expectations": [
+        {
+          "notify_unread": true
+        }
+      ],
+      "original_transcript_sha256": "90aaa1b1f8a95bcc15ddaea1c0402834fc0794ec256f364c7fbc3156717f4dd2",
+      "candidate_transcript_sha256": "90aaa1b1f8a95bcc15ddaea1c0402834fc0794ec256f364c7fbc3156717f4dd2"
+    }
+  ]
+}

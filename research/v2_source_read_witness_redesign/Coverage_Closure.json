@@ -1,0 +1,51 @@
+{
+  "base_python_files_parsed": 74,
+  "parse_failures": 0,
+  "inventory_rows": 107,
+  "resolved_rows": 107,
+  "static_source_coverage": "CLOSED_FOR_TRACKED_SOURCE_SURFACES",
+  "source_level_only": true,
+  "live_function_ownership": "UNKNOWN_NOT_ATTESTED",
+  "external_runtime_writers": "UNKNOWN",
+  "current_target_calls": {
+    "gate": [
+      "bot.py6022"
+    ],
+    "scorer": [
+      "bot.py4279",
+      "bot.py4417",
+      "early_v2_adapter.py357"
+    ],
+    "arm": [
+      "bot.py6042"
+    ],
+    "selector": [
+      "early_v2_adapter.py365"
+    ],
+    "configure": [
+      "early_v2_adapter.py305 startup",
+      "early_v2_adapter.py868 admin"
+    ]
+  },
+  "known_writers": [
+    "bot.py135 float(env) cap",
+    "bot.py222 int(env) ignition",
+    "bot.py223 int(env) FAST",
+    "early_autotrader_v2.py24 Config default",
+    "early_autotrader_v2.py98 Config from saved JSON after startup prepare_db restore",
+    "early_autotrader_v2.py117-128 configure validates, setting DBwrite125, cfg publish126, generation127"
+  ],
+  "independent_nonreceipt_reads": [
+    "bot.py5575 diagnostics cap",
+    "bot.py8259 status score thresholds",
+    "bot.py6937 config snapshot",
+    "early_autotrader_v2.py444 entry recheck min_score",
+    "early_v2_adapter.py790 status min_score"
+  ],
+  "nonproof": [
+    "generation changes do not enumerate all consumed operands",
+    "known static writers do not attest currently loaded callable ownership",
+    "Config.validate admits numeric subclasses; model excludes their finalizers",
+    "DB restore generation and source commit anchor remain OPEN"
+  ]
+}
