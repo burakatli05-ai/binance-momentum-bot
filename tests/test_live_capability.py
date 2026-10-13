@@ -46,7 +46,10 @@ class CapabilityTests(unittest.TestCase):
         # QRO consolidation adds a disabled profile-specific worker binding and a
         # same-symbol residual veto. Exact prior hash is preserved in the QRO
         # noninterference manifest; 227 other Premium functions remain identical.
-        self.assertEqual('1050238ce525326391b217e72948a2b8f4ff029e9aedba832078bbb5b28cd94d', digest)
+        # Final acceptance adds only the QRO terminal bridge to the existing worker.
+        # Previous digest: 1050238ce525326391b217e72948a2b8f4ff029e9aedba832078bbb5b28cd94d.
+        # final_acceptance_noninterference.json retains every base function hash.
+        self.assertEqual('849380def1b99086058ea430aac343ff1a476323a15bf4046703b055be6ba772', digest)
 
     def test_bot_environment_is_fail_closed_and_always_boots_off(self):
         tree = ast.parse((ROOT / 'binance_momentum_bot/bot.py').read_text(encoding='utf-8'))

@@ -1,6 +1,8 @@
 {
   "base_commit": "5c0ebdfc6c0bdaff25394ad801602b5a893cd2d6",
-  "bot_ast_sha256": "548293aab63bb02d3622f74ae2645231504bc31b9444f4c4f2f17fb53431d9ab",
+  "bot_ast_sha256": "5d754a40e4280f89b5ca5ccbf7606e15e4847d2a77cf5aa24293569492220614",
+  "pre_final_acceptance_bot_ast_sha256": "548293aab63bb02d3622f74ae2645231504bc31b9444f4c4f2f17fb53431d9ab",
+  "final_acceptance_review": "Only _at_step_recovery_check adds the QRO terminal bridge; 231 other bot functions and all module nonfunction AST unchanged. No V2 behavior change. See final_acceptance_noninterference.json.",
   "pre_qro_bot_ast_sha256": "5759742071cb105cb74dc3dbf39c8f4d386f571795c77d8bb90200a2eeb05b28",
   "qro_review": "Authorized disabled Premium binding and residual veto; 227 other Premium functions exact in premium_step_lock_noninterference.json. No V2 receipt/witness source or archive changes.",
   "prior_bot_ast_sha256": "78a612c726e62b3257eec85186530d4a68b3593e47e7c246351bd02b0b19aecf",

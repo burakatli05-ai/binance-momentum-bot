@@ -120,10 +120,25 @@ class SQLiteStore:
         return state, fields['qro_state']
 
 
+def exit_leg(tr):
+    """Pure routing semantics. The real adapter's one-way-only gate is unchanged."""
+    leg, side = tr.get('position_side'), tr.get('side')
+    if (leg == 'BOTH' and side == 'LONG') or (leg in {'LONG', 'SHORT'} and side == leg):
+        return ('BUY' if side == 'SHORT' else 'SELL'), leg
+    raise Block('QRO_EXIT_LEG_MISMATCH')
+
+
 def request(tr, cid, qty, target):
-    return dict(algoType='CONDITIONAL', symbol=tr['symbol'], side='SELL', positionSide='BOTH',
-                type='STOP_MARKET', quantity=str(qty), reduceOnly='true', closePosition='false',
-                triggerPrice=str(target), workingType='CONTRACT_PRICE', priceProtect='false', clientAlgoId=cid)
+    action, leg = exit_leg(tr)
+    qty, target = number(qty, positive=True), number(target, positive=True)
+    if qty > number(tr['expected_qty'], positive=True):
+        raise Block('QRO_EXIT_QUANTITY_EXCEEDS_OWNED')
+    params = dict(algoType='CONDITIONAL', symbol=tr['symbol'], side=action, positionSide=leg,
+                  type='STOP_MARKET', quantity=str(qty), closePosition='false',
+                  triggerPrice=str(target), workingType='CONTRACT_PRICE', priceProtect='false', clientAlgoId=cid)
+    if leg == 'BOTH':
+        params['reduceOnly'] = 'true'
+    return params
 
 
 def verify_order(order, intent, tr):
@@ -134,11 +149,13 @@ def verify_order(order, intent, tr):
         owned = False
     if not owned:
         raise Block('QRO_CLIENT_ID_NOT_OWNED')
-    exact = dict(symbol=tr['symbol'], side='SELL', positionSide='BOTH', orderType='STOP_MARKET',
+    action, leg = exit_leg(tr)
+    exact = dict(symbol=tr['symbol'], side=action, positionSide=leg, orderType='STOP_MARKET',
                  algoType='CONDITIONAL', workingType='CONTRACT_PRICE', clientAlgoId=p['clientAlgoId'])
     if not isinstance(order, dict) or any(order.get(k) != v for k, v in exact.items()):
         raise Block('QRO_ORDER_IDENTITY_MISMATCH')
-    if (not order.get('algoId') or order.get('reduceOnly') is not True
+    if (not order.get('algoId') or (order.get('reduceOnly') is not True if leg == 'BOTH'
+                                  else order.get('reduceOnly') not in (None, False))
             or order.get('closePosition') is not False or order.get('priceProtect') is not False
             or number(order.get('quantity'), positive=True) != number(p['quantity'], positive=True)
             or number(order.get('triggerPrice'), positive=True) != number(p['triggerPrice'], positive=True)
@@ -147,6 +164,87 @@ def verify_order(order, intent, tr):
     if order.get('algoStatus') not in {'NEW', *TERMINAL}:
         raise Block('TERMINAL_STATE_UNKNOWN')
     return str(order['algoId'])
+
+
+def close_terminal(store, tid, *, local_date, timestamp_ms, policy):
+    """One SQLite commit for confirmed fills, CLOSED state, daily ledger and event.
+
+    FLAT_CLEAN without complete owned fill economics never fabricates settlement.
+    No transport or exchange mutations. Repeated/crashed callers use the same row CAS.
+    """
+    with closing(store.connect()) as db:
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            cur = db.execute('SELECT * FROM autotrade_trades WHERE id=?', (tid,))
+            row = cur.fetchone()
+            if row is None:
+                raise Block('TRADE_NOT_FOUND')
+            tr = dict(zip([c[0] for c in cur.description], row))
+            raw = tr['qro_state']; state = json.loads(raw)
+            if tr['status'] == 'CLOSED' and state['phase'] == 'CLOSED':
+                return False
+            if (tr.get('exit_profile') != sl.PROFILE or tr.get('qro_contract_version') != CONTRACT
+                    or state.get('version') != CONTRACT or state.get('phase') != 'FLAT_CLEAN'
+                    or not state.get('terminal_verified') or state.get('pending')
+                    or state.get('unresolved') or state.get('residual') or state.get('quarantine')
+                    or number(state.get('observed_owned_qty')) != 0):
+                raise Block('QRO_TERMINAL_EVIDENCE_INCOMPLETE')
+            expected = number(tr['expected_qty'], positive=True)
+            ledger = state.get('fill_ledger', {})
+            entry = ledger.get(str(tr['entry_order_id']), [])
+            exits = [f for oid in state['children'] for f in ledger.get(oid, [])]
+            if (not entry or not exits or set(ledger) != {str(tr['entry_order_id']), *state['children']}
+                    or not all(v in CHILD_TERMINAL for v in state.get('child_status', {}).values())
+                    or sum((number(f['qty'], positive=True) for f in entry), Decimal(0)) != expected
+                    or sum((number(f['qty'], positive=True) for f in exits), Decimal(0)) != expected):
+                raise Block('QRO_TERMINAL_FILL_LEDGER_INCOMPLETE')
+            fills = entry + exits
+            if len({f['id'] for f in fills}) != len(fills):
+                raise Block('QRO_TERMINAL_FILL_LEDGER_INCOMPLETE')
+            for fill in fills:
+                if (fill.get('commissionAsset') != 'USDT' or type(fill.get('time')) is not int
+                        or fill['time'] <= 0 or fill.get('realizedPnl') is None
+                        or fill.get('commission') is None or number(fill['commission']) < 0):
+                    raise Block('QRO_TERMINAL_ECONOMICS_UNVERIFIED')
+            gross = sum((number(f['realizedPnl']) for f in exits), Decimal(0))
+            fee = sum((number(f['commission']) for f in fills), Decimal(0))
+            net = gross - fee
+            price = sum((number(f['qty'])*number(f['price'], positive=True) for f in exits), Decimal(0))/expected
+            scope = tr['mode']
+            if scope != 'LIVE':
+                raise Block('QRO_TERMINAL_SCOPE_MISMATCH')
+            now = timestamp_ms//1000
+            db.execute('INSERT OR IGNORE INTO autotrade_daily '
+                       '(local_date,scope,start_balance,realized_net_pnl,consecutive_stops,locked,lock_reason,cooldown_until_ts,updated_ts) '
+                       'VALUES (?,?,?,0,0,0,NULL,0,?)', (local_date,scope,policy['start_balance'],now))
+            daily = db.execute('SELECT start_balance,realized_net_pnl,consecutive_stops,locked,lock_reason,cooldown_until_ts '
+                               'FROM autotrade_daily WHERE local_date=? AND scope=?', (local_date,scope)).fetchone()
+            pnl = float(daily[1] or 0) + float(net)
+            streak = int(daily[2] or 0) + 1  # STOP: preserve existing stop-policy semantics.
+            locked, reason, cooldown = bool(daily[3]), daily[4], int(daily[5] or 0)
+            if pnl <= -float(daily[0])*policy['daily_max_loss_pct']/100:
+                locked, reason = True, f"DAILY_LOSS_{policy['daily_max_loss_pct']:.2f}PCT"
+            if not locked and streak >= policy['max_consecutive_stops']:
+                cooldown = max(cooldown, now + policy['stop_cooldown_minutes']*60)
+                streak, reason = 0, None
+            settlement = dict(exit_qty=str(expected),exit_price=str(price),gross_pnl=str(gross),
+                              commission=str(fee),net_pnl=str(net),fill_ids=[f['id'] for f in fills],
+                              local_date=local_date,scope=scope,closed_ts_ms=timestamp_ms)
+            state.update(phase='CLOSED',active=None,pending=None,serial=state['serial']+1,settlement=settlement)
+            changed = db.execute('UPDATE autotrade_trades SET status=\'CLOSED\',closed_ts_ms=?,close_reason=\'STOP\','
+                'exit_price=?,realized_pnl=?,commission=?,net_pnl=?,gross_pnl=?,slippage_cost=0,'
+                'qro_state=?,replacement_status=\'CLOSED\',stop_algo_id=NULL,stop_client_id=NULL,'
+                'pending_stop_algo_id=NULL,pending_stop_client_id=NULL,pending_stop_price=NULL,updated_ts=? '
+                'WHERE id=? AND qro_state=? AND status<>\'CLOSED\'',
+                (timestamp_ms,float(price),float(gross),float(fee),float(net),float(gross),encode(state),now,tid,raw))
+            if changed.rowcount != 1:
+                raise Block('QRO_CONCURRENT_OR_STALE_STATE')
+            db.execute('UPDATE autotrade_daily SET realized_net_pnl=?,consecutive_stops=?,locked=?,lock_reason=?,'
+                'cooldown_until_ts=?,updated_ts=? WHERE local_date=? AND scope=?',
+                (pnl,streak,int(locked),reason,cooldown,now,local_date,scope))
+            db.execute('INSERT INTO autotrade_events(ts_ms,trade_id,signal_id,symbol,event,detail) VALUES(?,?,?,?,?,?)',
+                (timestamp_ms,tid,tr.get('signal_id'),tr['symbol'],'CLOSE','QRO_TERMINAL '+encode(settlement)))
+    return True
 
 
 class BinancePremiumStepLockQROExchange:
@@ -292,6 +390,10 @@ class BinancePremiumStepLockQROExchange:
         qty = sum((number(r.get('qty'), positive=True) for r in fills), Decimal(0))
         if qty != number(row.get('executedQty')):
             raise Block('TERMINAL_STATE_UNKNOWN')
+        ledger = dict(self.s.get('fill_ledger', {}))
+        ledger[oid] = [{k: f.get(k) for k in ('id','orderId','qty','price','realizedPnl',
+                                           'commission','commissionAsset','time')} for f in fills]
+        self.save_state(fill_ledger=ledger)
         return qty, (sum((number(r['qty'])*number(r['price'], positive=True) for r in fills), Decimal(0))/qty if qty else None)
 
     async def _entry(self):
@@ -356,6 +458,7 @@ class BinancePremiumStepLockQROExchange:
             raise Block(MUTATION)
         if used > expected:
             raise Block('TERMINAL_STATE_UNKNOWN')
+        self.save_state(observed_owned_qty=str(after), filled_exit_qty=str(used))
         if after == 0:
             self._event('POSITION_FLAT_DURING_REPLACEMENT')
         elif partial or used:
@@ -410,7 +513,7 @@ class BinancePremiumStepLockQROExchange:
                     and all(v in CHILD_TERMINAL for v in self.s.get('child_status', {}).values())):
                 if await self.verify_flat_and_clean():
                     self.save_state(phase='FLAT_CLEAN', pending=None, unresolved=[], residual=False,
-                                    quarantine=False, fields=dict(pending_stop_client_id=None,
+                                    quarantine=False, terminal_verified=True, fields=dict(pending_stop_client_id=None,
                                     pending_stop_algo_id=None, pending_stop_price=None,
                                     replacement_status='FLAT_CLEAN'))
                     return 'FLAT_CLEAN'
@@ -467,6 +570,8 @@ class BinancePremiumStepLockQROExchange:
             self.s = json.loads(raw)
             if self.s['version'] != CONTRACT:
                 raise Block('QRO_STATE_CONTRACT_MISMATCH')
+            if self.s['phase'] == 'CLOSED' and self.tr['status'] == 'CLOSED':
+                return 'CLOSED'
             def save_state(fields=None, **values):
                 nonlocal raw
                 next_state = dict(self.s, **values)
@@ -598,7 +703,7 @@ def local_residual(tr):
         return tr.get('exit_profile') == sl.PROFILE and tr.get('status') != 'CLOSED'
     try:
         s = json.loads(tr['qro_state'])
-        return (s['version'] != CONTRACT or s['phase'] != 'FLAT_CLEAN' or s['pending']
+        return (s['version'] != CONTRACT or s['phase'] not in {'FLAT_CLEAN','CLOSED'} or s['pending']
                 or s['unresolved'] or s['quarantine'] or s['residual'] or tr.get('manual_intervention'))
     except (ValueError, KeyError, TypeError):
         return True

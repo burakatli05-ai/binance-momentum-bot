@@ -7729,7 +7729,18 @@ async def _at_step_recovery_check(session, tr, positions):
     import premium_step_lock_qro as qro
     if tr.get("exit_profile") == premium_lock.PROFILE and tr.get("qro_contract_version") == qro.CONTRACT:
         result = await _at_qro_exchange(session).reconcile_trade(int(tr["id"]), _at_qro_store())
-        if result not in ("STABLE", "REPLACED", "FLAT_CLEAN"):
+        if result == "FLAT_CLEAN":
+            try:
+                qro.close_terminal(_at_qro_store(), int(tr["id"]), local_date=_at_local_date(), timestamp_ms=now_ms(),
+                    policy=dict(start_balance=AUTO_TRADE_SIM_BALANCE_USDT,
+                                daily_max_loss_pct=float(autotrade_cfg["daily_max_loss_pct"]),
+                                max_consecutive_stops=int(autotrade_cfg["max_consecutive_stops"]),
+                                stop_cooldown_minutes=int(autotrade_cfg["stop_cooldown_minutes"])))
+                recover_autotrade_active()
+            except qro.Block as exc:
+                _at_profile_block(tr, str(exc))
+            return
+        if result not in ("STABLE", "REPLACED", "CLOSED"):
             _at_profile_block(tr, result)
         return
     # Read-only quarantine for unexpected/imported LIVE rows. No fallback to TP2,

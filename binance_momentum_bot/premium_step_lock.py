@@ -137,6 +137,8 @@ def validate_state(tr):
 
 def tick_fields(tr, price, event_ms, tick_size, *, last_seen_ms=0):
     """No network or writes. Returns only a new highest-step durable update."""
+    if tr.get('status') == 'CLOSED':
+        return {}
     validate_state(tr)
     price = decimal(price)
     if isinstance(event_ms, bool) or not isinstance(event_ms, int) or event_ms <= 0:
