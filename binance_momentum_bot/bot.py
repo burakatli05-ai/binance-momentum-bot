@@ -7284,7 +7284,10 @@ def _at_update_daily(net_pnl: float, close_reason: str, scope: Optional[str] = N
     if (not locked or manual_resume) and streak >= int(autotrade_cfg["max_consecutive_stops"]):
         cooldown_until = max(cooldown_until, int(time.time()) + int(autotrade_cfg["stop_cooldown_minutes"])*60)
         streak = 0
-        lock_reason = ""
+        # Keep the sticky DAILY_LOSS reason under an authorized exception.
+        # Otherwise the conditional override fails closed before cooldown is considered.
+        if not locked:
+            lock_reason = ""
     conn = db_connect()
     try:
         conn.execute("UPDATE autotrade_daily SET realized_net_pnl=?,consecutive_stops=?,locked=?,lock_reason=?,cooldown_until_ts=?,updated_ts=? WHERE local_date=? AND scope=?",
