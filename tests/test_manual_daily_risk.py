@@ -137,6 +137,21 @@ class ManualRiskBotIntegrationTests(unittest.TestCase):
                          (int(time.time()) + 200,))
         self.assertTrue(bot._at_risk_allowed("LIVE", 1.0)[1].startswith("STOP_COOLDOWN_"))
 
+
+    def test_stop_series_cooldown_still_triggers_when_loss_lock_overridden(self):
+        self.assertTrue(self.grant()[0])
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                "UPDATE autotrade_daily SET locked=1,lock_reason='DAILY_LOSS_5.00PCT',"
+                "realized_net_pnl=-52,consecutive_stops=3,cooldown_until_ts=0 "
+                "WHERE local_date='2026-10-14' AND scope='LIVE'"
+            )
+        row = bot._at_update_daily(-1.0, "STOP", scope="LIVE")
+        self.assertEqual(row["consecutive_stops"], 0)
+        self.assertTrue(row["locked"])
+        self.assertGreater(row["cooldown_until_ts"], int(time.time()))
+        self.assertTrue(bot._at_risk_allowed("LIVE", 1.0)[1].startswith("STOP_COOLDOWN_"))
+
     def test_midnight_and_pct_change_revoke_effectively(self):
         self.assertTrue(self.grant()[0])
         with patch.object(bot, "_at_local_date", return_value="2026-10-15"):
