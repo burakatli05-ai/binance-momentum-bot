@@ -7276,7 +7276,12 @@ def _at_update_daily(net_pnl: float, close_reason: str, scope: Optional[str] = N
         locked = True; lock_reason = f"DAILY_LOSS_{autotrade_cfg['daily_max_loss_pct']:.2f}PCT"
     # Clean-backup forward test showed a 4-stop streak can happen during an otherwise profitable day.
     # Therefore the streak is a temporary circuit-breaker; only the daily loss limit is a hard day lock.
-    if (not locked) and streak >= int(autotrade_cfg["max_consecutive_stops"]):
+    # A separately authorized same-day grant may re-admit entries despite the base loss lock.
+    # Continue counting STOPs and enforcing cooldown in that state.
+    manual_resume = manual_daily_risk.permits_daily_lock(
+        {"locked": locked, "lock_reason": lock_reason}, _at_manual_risk_extra(sc, r)
+    )
+    if (not locked or manual_resume) and streak >= int(autotrade_cfg["max_consecutive_stops"]):
         cooldown_until = max(cooldown_until, int(time.time()) + int(autotrade_cfg["stop_cooldown_minutes"])*60)
         streak = 0
         lock_reason = ""
