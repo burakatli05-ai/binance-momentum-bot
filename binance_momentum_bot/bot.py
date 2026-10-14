@@ -37,6 +37,7 @@ import early_v2_adapter
 import early_checkpoint_shadow
 import early_exit_export
 import premium_step_lock as premium_lock
+import manual_daily_risk
 
 _premium_step_tick_watermarks = {}
 from position_observer import PositionObserver, roe_values
@@ -664,6 +665,8 @@ autotrade_active: Dict[int, dict] = {}
 autotrade_active_by_symbol: Dict[str, Set[int]] = defaultdict(set)
 autotrade_live_confirm: Dict[str, Tuple[str, float]] = {}
 autotrade_pending_setting: Dict[str, Tuple[str, str, float]] = {}
+# actor, amount, local date, start balance, daily cap pct, confirmation deadline
+_autotrade_pending_risk_resume: Dict[str, Tuple[str, float, str, float, float, float]] = {}
 # Cached Binance Futures balance for the Telegram control panel. This is informational only;
 # risk-lock calculations continue to use the frozen daily start balance in autotrade_daily.
 autotrade_account_cache = {
@@ -7114,6 +7117,150 @@ def _at_daily_row(start_balance: Optional[float] = None, scope: Optional[str] = 
     finally:
         conn.close()
 
+def _at_manual_risk_record() -> Optional[str]:
+    conn = db_connect()
+    try:
+        row = conn.execute("SELECT value FROM autotrade_settings WHERE key=?", (manual_daily_risk.KEY,)).fetchone()
+        return str(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def _at_manual_risk_extra(scope: str, daily_row: dict) -> float:
+    if str(scope).upper() != "LIVE":
+        return 0.0
+    return manual_daily_risk.active_extra(
+        _at_manual_risk_record(), daily_row, float(autotrade_cfg["daily_max_loss_pct"]), scope
+    )
+
+
+def _at_manual_risk_grant(extra_usdt: float, actor: str, *, expected_date: str,
+                          expected_balance: float, expected_daily_pct: float) -> Tuple[bool, str]:
+    """Atomic one-per-day risk budget approval; original loss ledger is never modified."""
+    if str(autotrade_cfg.get("mode")) != "LIVE":
+        return False, "Manuel risk izni yalnız LIVE modundayken tanımlanabilir."
+    today = _at_local_date()
+    pct = float(autotrade_cfg["daily_max_loss_pct"])
+    if today != expected_date or abs(pct - expected_daily_pct) > 1e-9:
+        return False, "Gün/risk ayarı değişti. Yeni işlem için baştan onay gerekiyor."
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT start_balance FROM autotrade_daily WHERE local_date=? AND scope='LIVE'", (today,)
+        ).fetchone()
+        if row is None:
+            return False, "LIVE gün başlangıç bakiyesi doğrulanamadı."
+        start_balance = float(row[0])
+        if abs(start_balance - expected_balance) > 1e-8:
+            return False, "Gün başlangıç bakiyesi değişti. Yeniden onay gerekiyor."
+        prior = conn.execute(
+            "SELECT value FROM autotrade_settings WHERE key=?", (manual_daily_risk.KEY,)
+        ).fetchone()
+        if prior is not None:
+            try:
+                prior_value = json.loads(prior[0])
+                prior_day = str(prior_value["local_date"])
+                if prior_value["scope"] != "LIVE" or prior_day >= today:
+                    return False, "Bugün ek risk hakkı kullanılmış veya kayıt doğrulanamadı."
+            except (ValueError, TypeError, KeyError):
+                return False, "Önceki manuel risk kaydı bozuk; güvenli tarafta duruldu."
+        try:
+            data = manual_daily_risk.encode_resume(
+                local_date=today, start_balance=start_balance, daily_pct=pct,
+                extra_usdt=extra_usdt, actor=actor, created_ts=int(time.time())
+            )
+        except (ValueError, OverflowError, TypeError):
+            return False, "Ek risk miktarı günlük üst sınırın dışında."
+        conn.execute(
+            "INSERT INTO autotrade_settings(key,value,updated_ts) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_ts=excluded.updated_ts",
+            (manual_daily_risk.KEY, data, int(time.time()))
+        )
+        conn.execute(
+            "INSERT INTO autotrade_events(ts_ms,trade_id,signal_id,symbol,event,detail) "
+            "VALUES (?,NULL,NULL,NULL,?,?)",
+            (now_ms(), "MANUAL_DAILY_RISK_RESUME",
+             f"date={today}; scope=LIVE; extra_usdt={extra_usdt:.2f}; daily_pct={pct:.2f}; admin={actor}")
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return True, f"Ek risk bütçesi +{extra_usdt:.2f} USDT aktif. Zarar geçmişi korunuyor; yeni giriş yine bütün diğer kontrollerden geçmeli."
+
+
+def _at_manual_risk_revoke(actor: str) -> Tuple[bool, str]:
+    today = _at_local_date()
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT value FROM autotrade_settings WHERE key=?", (manual_daily_risk.KEY,)
+        ).fetchone()
+        changed = manual_daily_risk.revoke(row[0] if row else None, today)
+        if changed is None:
+            return False, "Bugün için kapatılabilecek aktif manuel risk izni yok."
+        conn.execute(
+            "UPDATE autotrade_settings SET value=?,updated_ts=? WHERE key=?",
+            (changed, int(time.time()), manual_daily_risk.KEY)
+        )
+        conn.execute(
+            "INSERT INTO autotrade_events(ts_ms,trade_id,signal_id,symbol,event,detail) "
+            "VALUES (?,NULL,NULL,NULL,?,?)",
+            (now_ms(), "MANUAL_DAILY_RISK_REVOKED", f"date={today}; scope=LIVE; admin={actor}")
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return True, "Manuel ek risk iptal edildi. Aynı gün tekrar verilemez."
+
+
+def _at_manual_risk_offer(extra_usdt: float, actor: str) -> Tuple[bool, str, Optional[str]]:
+    if str(autotrade_cfg.get("mode")) != "LIVE":
+        return False, "Önce LIVE modunun gerçekten açık olması gerekir.", None
+    row = _at_daily_row(scope="LIVE")
+    pct = float(autotrade_cfg["daily_max_loss_pct"])
+    cap = manual_daily_risk.max_extra_usdt(row["start_balance"], pct)
+    try:
+        requested = float(extra_usdt)
+        manual_daily_risk.encode_resume(
+            local_date=row["local_date"], start_balance=row["start_balance"], daily_pct=pct,
+            extra_usdt=requested, actor=actor, created_ts=int(time.time())
+        )
+    except (ValueError, TypeError, OverflowError):
+        return False, f"Geçersiz ek risk miktarı. Günlük üst sınır: {cap:.2f} USDT.", None
+    previous = _at_manual_risk_record()
+    if previous is not None:
+        try:
+            item = json.loads(previous)
+            if item["scope"] != "LIVE" or str(item["local_date"]) >= row["local_date"]:
+                return False, "Günlük manuel ek risk hakkı kullanılmış veya kayıt şüpheli.", None
+        except (ValueError, TypeError, KeyError):
+            return False, "Manuel risk kaydı doğrulanamadı; işlem engellendi.", None
+    # Expired confirmation tokens are not durable authorization.
+    for old_token, pending in list(_autotrade_pending_risk_resume.items()):
+        if pending[-1] <= time.time():
+            _autotrade_pending_risk_resume.pop(old_token, None)
+    token = secrets.token_hex(8)
+    _autotrade_pending_risk_resume[token] = (
+        str(actor), requested, row["local_date"], row["start_balance"], pct, time.time() + 120
+    )
+    return True, (
+        f"⚠️ MANUEL GÜNLÜK RİSK İZNİ\n"
+        f"Mevcut günlük limit: {row['start_balance'] * pct / 100:.2f} USDT\n"
+        f"Ek bütçe: +{requested:.2f} USDT\n"
+        f"Yeni toplam günlük risk sınırı: {row['start_balance'] * pct / 100 + requested:.2f} USDT\n"
+        "Geçmiş zarar silinmez. Gün sonu sıfırlanır, gün içinde bir defa kullanılabilir. "
+        "Diğer stop/cooldown/maksimum pozisyon kontrolleri korunur.\n"
+        "120 saniye içinde onayla veya vazgeç."
+    ), token
+
 
 def _at_update_daily(net_pnl: float, close_reason: str, scope: Optional[str] = None):
     sc=_at_scope(scope); r = _at_daily_row(scope=sc)
@@ -7202,12 +7349,14 @@ def _at_risk_allowed(scope: Optional[str] = None, proposed_risk_usdt: float = 0.
     sc=_at_scope(scope)
     _at_repair_daily_from_trade_history(sc)
     r = _at_daily_row(scope=sc)
-    if r["locked"]: return False, r["lock_reason"] or "RISK_LOCK"
+    extra = _at_manual_risk_extra(sc, r)
+    if r["locked"] and not manual_daily_risk.permits_daily_lock(r, extra):
+        return False, r["lock_reason"] or "RISK_LOCK"
     cooldown_until=int(r.get("cooldown_until_ts") or 0)
     if cooldown_until > int(time.time()):
         mins=max(1, math.ceil((cooldown_until-time.time())/60.0)); return False, f"STOP_COOLDOWN_{mins}MIN"
     if _at_open_count(sc) >= int(autotrade_cfg["max_open_positions"]): return False, "MAX_OPEN_POSITIONS"
-    limit=float(r["start_balance"])*float(autotrade_cfg["daily_max_loss_pct"])/100.0
+    limit=float(r["start_balance"])*float(autotrade_cfg["daily_max_loss_pct"])/100.0 + extra
     realized_loss=max(0.0,-float(r.get("realized_net_pnl") or 0))
     open_risk=_at_open_worst_case_risk(sc)
     projected=realized_loss+open_risk+max(0.0,float(proposed_risk_usdt or 0))
@@ -8094,7 +8243,10 @@ def _at_panel_text() -> str:
     lim=r["start_balance"]*float(autotrade_cfg["daily_max_loss_pct"])/100
     # Distance from current realized P/L to the daily lock threshold (-limit).
     # Example: limit 60 and P/L -14.20 => 45.80 USDT remaining.
-    remaining=max(0.0, lim + float(r["realized_net_pnl"])) if not r["locked"] else 0.0
+    manual_extra=_at_manual_risk_extra(scope,r)
+    manual_unlock=manual_daily_risk.permits_daily_lock(r,manual_extra)
+    remaining=max(0.0, lim + manual_extra + float(r["realized_net_pnl"])) if not r["locked"] or manual_unlock else 0.0
+    lock_label=("AÇIK (manuel ek risk kontrollü)" if manual_unlock else "AÇIK — "+r["lock_reason"]) if r["locked"] else "kapalı"
     live_ready=bool(AUTO_TRADE_LIVE_ALLOWED and BINANCE_API_KEY and BINANCE_API_SECRET and TELEGRAM_ADMIN_USER_ID)
     wallet=autotrade_account_cache.get("wallet_balance")
     available=autotrade_account_cache.get("available_balance")
@@ -8115,8 +8267,9 @@ def _at_panel_text() -> str:
         f"Günlük zarar: %{float(autotrade_cfg['daily_max_loss_pct']):.2f} (~{lim:.2f} USDT)\n"
         f"📉 Günlük P/L ({r['scope']}): {r['realized_net_pnl']:+.2f} USDT\n"
         f"🛡 Günlük limite kalan: {remaining:.2f} USDT\n"
+        f"🧩 Manuel ek risk (LIVE): {manual_extra:.2f} USDT | efektif limit {lim+manual_extra:.2f} USDT\n"
         f"Ardışık stop: {r['consecutive_stops']}/{int(autotrade_cfg['max_consecutive_stops'])} → {int(autotrade_cfg['stop_cooldown_minutes'])} dk cooldown\n"
-        f"Risk kilidi: {'AÇIK — '+r['lock_reason'] if r['locked'] else 'kapalı'}\n"
+        f"Risk kilidi: {lock_label}\n"
         f"Cooldown: {max(0, math.ceil((int(r.get('cooldown_until_ts') or 0)-time.time())/60))} dk\n"
         f"Çıkış profili: {autotrade_cfg['exit_profile']}\n"
         f"LIVE altyapı kilidi: {'hazır' if live_ready else 'kilitli'}\n\n"
@@ -8130,6 +8283,7 @@ def _at_panel_markup():
         [{"text":f"📊 Max {int(autotrade_cfg['max_open_positions'])}","callback_data":"at:maxpos"},{"text":f"🛡 Günlük %{float(autotrade_cfg['daily_max_loss_pct']):g}","callback_data":"at:dloss"}],
         [{"text":f"🧱 Stop serisi {int(autotrade_cfg['max_consecutive_stops'])}","callback_data":"at:streak"},{"text":"📈 Pozisyonlar","callback_data":"at:positions"}],
         [{"text":"⚪ OFF","callback_data":"at:mode:OFF"},{"text":"🟡 DRY RUN","callback_data":"at:mode:DRY"},{"text":"🔴 LIVE","callback_data":"at:mode:LIVE"}],
+        [{"text":"🧩 Manuel Günlük Risk","callback_data":"at:riskmenu"}],
         [{"text":"🔄 Yenile","callback_data":"at:panel"}],
     ]}
 
@@ -8160,6 +8314,39 @@ async def handle_autotrade_callback(session: aiohttp.ClientSession, cb: dict):
     action=parts[1] if len(parts)>1 else ""
     if action=="panel":
         await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":_at_panel_text(),"reply_markup":_at_panel_markup()})
+    elif action=="riskmenu":
+        if not _at_admin_allowed(chat_id,uid,require_user_id=True):
+            await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id,"text":"Bu işlem için yetkili kullanıcı kimliği gerekli.","show_alert":True})
+            return True
+        await telegram_api_call(session,"editMessageText",{
+            "chat_id":chat_id,"message_id":msg.get("message_id"),
+            "text":"🧩 Günlük manuel ek risk\n\nEk risk tanımlamak için /riskresume 10 veya /riskresume 20 komutunu kullan. "
+                   "Riskin tamamını sıfırlamaz; geçmiş zarar kalır. Günlük en fazla bir kez, en çok 50 USDT / bakiyenin %5'i "
+                   "ve toplam günlük en fazla %10 sınırı geçerlidir. İptal: /riskresume off",
+            "reply_markup":{"inline_keyboard":[[{"text":"⬅️ Geri","callback_data":"at:panel"}]]}
+        })
+    elif action=="riskgrant" and len(parts)>=3:
+        if not _at_admin_allowed(chat_id,uid,require_user_id=True):
+            await telegram_api_call(session,"answerCallbackQuery",{"callback_query_id":callback_id,"text":"Sadece yetkili yönetici onaylayabilir.","show_alert":True})
+            return True
+        token=parts[2]
+        pending=_autotrade_pending_risk_resume.get(token)
+        if not pending or pending[0]!=uid or pending[-1]<time.time():
+            answer="İzin isteği bulunamadı, aktör uyuşmuyor veya süresi doldu."
+        else:
+            _autotrade_pending_risk_resume.pop(token,None)
+            try:
+                _ok, answer=_at_manual_risk_grant(
+                    pending[1],uid,expected_date=pending[2],expected_balance=pending[3],
+                    expected_daily_pct=pending[4]
+                )
+            except Exception as exc:
+                log.warning("Manual risk resume failed: %s",type(exc).__name__)
+                answer="Manuel risk kaydı yazılamadı; güvenli tarafta engellendi."
+        await telegram_api_call(session,"editMessageText",{
+            "chat_id":chat_id,"message_id":msg.get("message_id"),
+            "text":answer,"reply_markup":{"inline_keyboard":[[{"text":"🔄 Risk paneli","callback_data":"at:panel"}]]}
+        })
     elif action=="size":
         await telegram_api_call(session,"editMessageText",{"chat_id":chat_id,"message_id":msg.get("message_id"),"text":"💰 Yeni işlem başına marjin seç:","reply_markup":_at_choice_markup("trade_margin_usdt",[100,150,200,250,300,400,500])})
     elif action=="lev":
@@ -8253,6 +8440,34 @@ async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> boo
     if low in ("/settings","/tradesettings"):
         if not _at_admin_allowed(chat_id,user_id): return True
         await telegram_send(session,_at_panel_text(),chat_id=chat_id,reply_markup=_at_panel_markup()); return True
+    if low.startswith("/riskresume"):
+        if not _at_admin_allowed(chat_id,user_id,require_user_id=True):
+            await telegram_send(session,"Bu komut için yetkili yönetici kimliği gerekli.",chat_id=chat_id)
+            return True
+        parts=text.split()
+        if len(parts)==2 and parts[1].lower()=="off":
+            try:
+                _ok, message=_at_manual_risk_revoke(user_id)
+            except Exception as exc:
+                log.warning("Manual risk revoke failed: %s",type(exc).__name__)
+                message="İptal kaydı doğrulanamadı; işlemi kontrol et."
+            await telegram_send(session,message,chat_id=chat_id)
+            return True
+        if len(parts)!=2:
+            await telegram_send(session,"Kullanım: /riskresume 10 (USDT) veya /riskresume off",chat_id=chat_id)
+            return True
+        try:
+            requested=float(parts[1])
+            accepted, message, token=_at_manual_risk_offer(requested,user_id)
+        except Exception as exc:
+            log.warning("Manual risk request failed: %s",type(exc).__name__)
+            accepted,message,token=False,"Manuel risk kontrolü doğrulanamadı; istek engellendi.",None
+        markup=({"inline_keyboard":[
+            [{"text":"✅ Bir Defalık Onayla","callback_data":f"at:riskgrant:{token}"},
+             {"text":"❌ Vazgeç","callback_data":"at:panel"}]
+        ]} if accepted else None)
+        await telegram_send(session,message,chat_id=chat_id,reply_markup=markup)
+        return True
     if low=="/riskstatus":
         if not _at_admin_allowed(chat_id,user_id): return True
         await telegram_send(session,_at_panel_text(),chat_id=chat_id); return True
