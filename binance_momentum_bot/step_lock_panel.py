@@ -1,18 +1,24 @@
-"""Telegram STEP Lock configuration drafts; no trading or runtime control API.
+"""Telegram STEP Lock drafts and explicitly scoped runtime controls.
 
 The approved 25 USDT notional / max 5x reference is deliberately distinct
 from a proposed margin x target-leverage draft.  Neither is an active order
-instruction.  This module never reads NORMAL account data or trading settings.
+instruction.  Controls require a fresh, validated STEP control client snapshot;
+an unconfigured client leaves every operational action unavailable.  This module
+never reads NORMAL account data or trading settings or sends exchange requests.
 """
+import asyncio
 from dataclasses import dataclass
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 from pathlib import Path
 import re
 import secrets
 import sqlite3
 import time
+
+import step_lock_control
 
 
 MAX_MARGIN_USDT = Decimal("200")
@@ -22,6 +28,8 @@ REFERENCE_NOTIONAL_USDT = Decimal("25")
 REFERENCE_LEVERAGE_CAP = 5
 CONFIRM_TTL_SECONDS = 120
 SESSION_TTL_SECONDS = 1800
+CONTROL_VIEW_TTL_SECONDS = 120
+CONTROL_TIMEOUT_SECONDS = 5
 MARGIN_CHOICES = (5, 10, 25, 50, 100, 150, 200)
 LEVERAGE_CHOICES = tuple(range(1, 11))
 
@@ -156,8 +164,31 @@ class Confirmation:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class ControlView:
+    owner: tuple
+    revision: int
+    fingerprint: str
+    snapshot: dict
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class ControlConfirmation:
+    owner: tuple
+    revision: int
+    draft: Draft
+    action: str
+    fingerprint: str
+    snapshot: dict
+    request_id: str
+    expires_at: float
+
+
 sessions = {}
 pending_confirmations = {}
+control_views = {}
+control_confirmations = {}
 
 
 def _store_path(bot):
@@ -184,6 +215,10 @@ def _prune():
     for owner, state in list(sessions.items()):
         if state.updated_at + SESSION_TTL_SECONDS <= now:
             sessions.pop(owner, None)
+    for cache in (control_views, control_confirmations):
+        for token, item in list(cache.items()):
+            if item.expires_at <= now:
+                cache.pop(token, None)
 
 
 def _state(bot, chat_id, user_id):
@@ -209,6 +244,14 @@ def _invalidate(owner):
     for token, pending in list(pending_confirmations.items()):
         if pending.owner == owner:
             pending_confirmations.pop(token, None)
+    _invalidate_controls(owner)
+
+
+def _invalidate_controls(owner):
+    for cache in (control_views, control_confirmations):
+        for token, item in list(cache.items()):
+            if item.owner == owner:
+                cache.pop(token, None)
 
 
 def _stage(owner, state, draft):
@@ -217,6 +260,123 @@ def _stage(owner, state, draft):
     state.revision += 1
     if not state.storage_blocked:
         state.notice = "Seçim değişti. Kaydetmek için taslak özetini onayla."
+
+
+def _unavailable_snapshot(reason="Yönetim bağlantısı yapılandırılmadı."):
+    return {"protocol": "STEP_CONTROL_V1", "scope_id": "UNBOUND", "runtime_id": "UNBOUND",
+            "version": 0, "observed_at_ms": int(time.time() * 1000), "state": "UNAVAILABLE",
+            "ready": False, "live_capable": False, "entry_enabled": False,
+            "position_known": False, "position": None, "flat_confirmed": False,
+            "protection_active": None, "active_profile": None, "reason": reason,
+            "allowed_actions": []}
+
+
+async def _read_control(bot):
+    try:
+        client = step_lock_control.client_for(bot)
+        if client is None:
+            return None, _unavailable_snapshot()
+        snapshot = await asyncio.wait_for(client.status(), timeout=CONTROL_TIMEOUT_SECONDS)
+        step_lock_control.validate_snapshot(snapshot)
+        return client, json.loads(json.dumps(snapshot))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Do not expose URLs, keys, or transport exception details in Telegram.
+        return None, _unavailable_snapshot("STEP durumu doğrulanamadı. Kontrol komutları kilitli.")
+
+
+def _fingerprint(snapshot):
+    position = snapshot.get("position") or {}
+    bound = {key: snapshot.get(key) for key in ("scope_id", "runtime_id", "version", "state", "active_profile")}
+    bound["position"] = {key: position.get(key) for key in ("intent_id", "symbol", "quantity", "side")}
+    return hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _pending_entry(snapshot):
+    position = (snapshot or {}).get("position")
+    if not position or snapshot.get("flat_confirmed"):
+        return False
+    try:
+        return Decimal(str(position.get("quantity"))) == 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _allowed_controls(snapshot):
+    if not snapshot:
+        return set()
+    choices = {"OFF": {"start"}, "LIVE": {"pause", "close_stop"},
+               "PAUSED": {"resume", "close_stop"}}.get(snapshot.get("state"), set())
+    choices = choices.intersection(snapshot.get("allowed_actions") or [])
+    if not snapshot.get("ready") or not snapshot.get("live_capable"):
+        choices -= {"start", "resume"}
+    if not snapshot.get("live_capable") and not snapshot.get("flat_confirmed"):
+        choices.discard("close_stop")
+    if not snapshot.get("position_known"):
+        choices -= {"start", "resume", "close_stop"}
+    if snapshot.get("position") is not None or not snapshot.get("flat_confirmed"):
+        choices.discard("start")
+    if (snapshot.get("position") is not None and not _pending_entry(snapshot)
+            and snapshot.get("protection_active") is not True):
+        choices.discard("resume")
+    return choices
+
+
+def _control_lines(snapshot):
+    if not snapshot or snapshot.get("state") == "UNAVAILABLE":
+        reason = str((snapshot or {}).get("reason") or "Yönetim bağlantısı yapılandırılmadı.")[:180]
+        return ("Panel: AYAR TASLAĞI · canlı komutlar KİLİTLİ\n"
+                "STEP çalışma durumu: DOĞRULANAMADI\n"
+                "Bu panelin canlı bağlantısı / durumu: doğrulanamadı\n"
+                "Serbest bakiye: — · Pozisyon: — · Doğrulanmış stop: —\n"
+                "Son canlı veri zamanı: —\n" + reason)
+    labels = {"OFF": "⚪ KAPALI", "LIVE": "🟢 ÇALIŞIYOR", "PAUSED": "⏸ YENİ GİRİŞLER DURAKLATILDI",
+              "CLOSING": "⏳ KAPATILIYOR", "ERROR": "🔴 HATA · DURUMU KONTROL ET"}
+    state = snapshot.get("state")
+    lines = ["STEP durumu: " + labels.get(state, "DOĞRULANAMADI"),
+             "Yeni giriş kabulü: " + ("açık" if snapshot.get("entry_enabled") is True else "kapalı"),
+             "Hesap kapsamı: " + str(snapshot.get("scope_id") or "—")[:80]]
+    if not snapshot.get("live_capable"):
+        lines.append("Canlı işlem yetkisi: KİLİTLİ")
+    position = snapshot.get("position")
+    if not snapshot.get("position_known"):
+        lines.append("Pozisyon: — · doğrulanamadı")
+    elif position:
+        if _pending_entry(snapshot):
+            lines.append("Bekleyen STEP giriş emri: " + str(position.get("symbol"))[:30] + " · henüz dolmadı")
+        else:
+            lines.append("STEP pozisyonu: " + str(position.get("symbol"))[:30] + " · LONG · "
+                         + str(position.get("quantity"))[:30] + " adet")
+    elif snapshot.get("flat_confirmed"):
+        lines.append("STEP pozisyonu: açık pozisyon yok (doğrulanmış)")
+    else:
+        lines.append("STEP pozisyonu: kapanış doğrulaması bekleniyor")
+    protection = snapshot.get("protection_active")
+    lines.append("Koruma: " + ("aktif" if protection is True else "aktif değil" if protection is False else "doğrulanamadı"))
+    lines.append("Serbest bakiye: — · Stop fiyatı: —")
+    try:
+        observed = time.strftime("%d.%m.%Y %H:%M:%S UTC", time.gmtime(snapshot["observed_at_ms"] / 1000))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        observed = "—"
+    lines.append("Son durum verisi: " + observed)
+    if state == "PAUSED":
+        continuation = ("mevcut işlemlerin koruması sürer" if protection is True
+                        else "açık pozisyon bu işlemle kapatılmaz; koruma durumu yukarıda gösterilir")
+        lines.append("Yeni sinyal kabulü durur; " + continuation + ". "
+                     "Önceden kabul edilen giriş emri gerçekleşebilir.")
+    elif state == "CLOSING":
+        lines.append("Kapatma süreci devam ediyor. Kapanış henüz doğrulanmadı.")
+    reason = str(snapshot.get("reason") or "")[:180]
+    if reason:
+        lines.append("Durum notu: " + reason)
+    profile = snapshot.get("active_profile")
+    if profile:
+        try:
+            lines.append("Çalışma profili:\n" + _sizing_text(Draft.from_document(profile)))
+        except ValueError:
+            lines.append("Çalışma profili: ayrıntılar doğrulanamadı")
+    return "\n".join(lines)
 
 
 def _sizing_text(draft):
@@ -232,10 +392,9 @@ def _sizing_text(draft):
             f"Hedef pozisyon: {margin} × {draft.leverage} = {_number(draft.notional_usdt)} USDT")
 
 
-def panel_text(draft, *, saved=False, notice=""):
+def panel_text(draft, *, saved=False, notice="", snapshot=None):
     text = ("🪜 STEP LOCK KONTROL PANELİ\n\n"
-            "Panel: AYAR TASLAĞI · canlı komutlar KİLİTLİ\n"
-            "Hesap kapsamı: ayrı STEP hesabı · ONE_WAY / LONG\n\n"
+            + _control_lines(snapshot) + "\n\n"
             + ("💾 Kayıtlı taslak\n" if saved else "✏️ Kaydedilmemiş seçim\n")
             + _sizing_text(draft) + "\n\n"
             "Seçim sınırları: teminat ≤ 200 USDT · kaldıraç ≤ 10×\n"
@@ -244,10 +403,8 @@ def panel_text(draft, *, saved=False, notice=""):
             "25 USDT toplam pozisyon · en fazla 5×\n"
             "Aynı anda 1 işlem · UTC gününde 1 yeni giriş\n"
             "Gerçekleşmiş günlük net zarar 1 USDT: yeni giriş kilidi\n\n"
-            "Bu panelin canlı bağlantısı: bağlanmadı\n"
-            "Serbest bakiye: — · Pozisyon: — · Doğrulanmış stop: —\n"
-            "Son canlı veri zamanı: —\n\n"
             "Taslak kaydı emir göndermez, borsa kaldıracını değiştirmez. "
+            "Yeni ayarlar ayrı başlatma / devam onayında değerlendirilir. "
             "NORMAL bot ayarları ayrıdır.")
     if notice:
         text += "\n\nℹ️ " + notice
@@ -258,22 +415,37 @@ def _button(text, data):
     return {"text": text, "callback_data": data}
 
 
-def panel_markup(draft, revision=0, can_save=True):
+def panel_markup(draft, revision=0, can_save=True, *, snapshot=None, control_token=None, saved=False):
     try:
         draft.validate_ready()
     except ValueError:
         can_save = False
     margin = _number(draft.margin_usdt) + " USDT" if draft.margin_usdt is not None else "Teminat seç"
     leverage = str(draft.leverage) + "×" if draft.leverage is not None else "Kaldıraç seç"
-    return {"inline_keyboard": [
+    rows = [
         [_button("💰 " + margin, "slp:margin"), _button("⚡ " + leverage, "slp:leverage")],
         [_button("💾 Taslağı kaydet" if can_save else "ℹ️ Seçim / kayıt durumu",
                  f"slp:save:{revision}" if can_save else "slp:summary")],
         [_button("🧪 Küçük test profili", f"slp:legacy:{revision}"),
          _button("📋 Başlatma özeti", "slp:summary")],
-        [_button("🔒 Canlı başlatma kilitli", "slp:live")],
-        [_button("🔄 Yenile", "slp:panel"), _button("⬅️ Ana menü", "slp:menu")],
-    ]}
+    ]
+    actions = _allowed_controls(snapshot)
+    labels = {"start": "▶️ Canlı başlat", "pause": "⏸ Yeni girişleri duraklat",
+              "resume": "▶️ Yeni girişlere devam et", "close_stop": "⛔ Pozisyonu kapat ve STEP’i durdur"}
+    for action in ("start", "pause", "resume", "close_stop"):
+        if action not in actions:
+            continue
+        if action in ("start", "resume") and (not saved or not can_save):
+            rows.append([_button("💾 Önce seçili taslağı kaydet", "slp:summary")])
+        else:
+            data = f"slp:control:{action}:{control_token}" if control_token else "slp:controlinfo"
+            rows.append([_button(labels[action], data)])
+    if not actions:
+        state = (snapshot or {}).get("state")
+        label = "⏳ Kapanış doğrulanıyor" if state == "CLOSING" else "🔒 Canlı kontrol kilitli"
+        rows.append([_button(label, "slp:controlinfo")])
+    rows.append([_button("🔄 Yenile", "slp:panel"), _button("⬅️ Ana menü", "slp:menu")])
+    return {"inline_keyboard": rows}
 
 
 def _choices(kind, revision):
@@ -304,9 +476,19 @@ async def _send(bot, session, chat_id, text, markup, message=None):
 
 
 async def _show(bot, session, chat_id, state, message=None):
+    _, snapshot = await _read_control(bot)
+    owner = next((key for key, value in sessions.items() if value is state), None)
+    token = None
+    if owner is not None:
+        _invalidate_controls(owner)
+        token = secrets.token_hex(10)
+        control_views[token] = ControlView(owner, state.revision, _fingerprint(snapshot), snapshot,
+                                          time.monotonic() + CONTROL_VIEW_TTL_SECONDS)
+    saved = state.saved_draft == state.draft
     await _send(bot, session, chat_id,
-                panel_text(state.draft, saved=state.saved_draft == state.draft, notice=state.notice),
-                panel_markup(state.draft, state.revision, not state.storage_blocked), message)
+                panel_text(state.draft, saved=saved, notice=state.notice, snapshot=snapshot),
+                panel_markup(state.draft, state.revision, not state.storage_blocked,
+                             snapshot=snapshot, control_token=token, saved=saved), message)
 
 
 async def _answer(bot, session, cb, text="", alert=False):
@@ -322,16 +504,129 @@ def _check_revision(value, state):
         raise ValueError("Bu seçim ekranı eskidi. STEP panelini yenileyip tekrar seç.")
 
 
-def _summary(draft):
+def _summary(draft, snapshot=None):
     return ("📋 STEP BAŞLATMA ÖZETİ\n\n" + _sizing_text(draft) + "\n\n"
-            "Durum: yalnız ayar taslağı; canlı başlatma kullanıma açılmadı.\n"
+            + _control_lines(snapshot) + "\n\n"
             "200 USDT ve 10× seçimi, 2.000 USDT hedef pozisyondur.\n"
             "Diğer test limitleri otomatik büyümez.\n\n"
             "Canlı kullanım için STEP hesabı, bakiye, sembolün gerçek kaldıracı, "
             "miktar/fiyat adımları, minimum işlem tutarı ve koruyucu stop yolu "
             "doğrulanmalıdır. Uygun olmayan hedef otomatik büyütülmez.\n"
-            "Yönetim bağlantısı ve yeni limit profili ayrıca uygulanıp doğrulanmalıdır.\n\n"
-            "Bu panelden canlı başlatma, duraklatma veya pozisyon kapatma komutu gönderilmez.")
+            "Yönetim bağlantısı ve limit profili doğrulanmadan canlı komut kullanılamaz.\n\n"
+            "Duraklat: yeni sinyal kabulünü durdurur; mevcut işlemlerin koruması sürer.\n"
+            "Kapat ve durdur: ayrı onayla yalnız STEP pozisyonunun kapanışını başlatır.\n"
+            "Kapanış doğrulanana kadar durum KAPATILIYOR olarak gösterilir.")
+
+
+def _control_profile(state, action, snapshot):
+    if action not in ("start", "resume"):
+        return None
+    if state.storage_blocked or state.saved_draft != state.draft:
+        raise ValueError("Başlatmadan veya devam etmeden önce seçili taslağı kaydet.")
+    profile = state.draft.document()
+    if (action == "resume" and snapshot.get("position") is not None
+            and snapshot.get("active_profile") != profile):
+        raise ValueError("Açık STEP pozisyonu varken farklı profille devam edilemez. Çalışma profilini kontrol et.")
+    return profile
+
+
+def _control_review(action, state, snapshot):
+    titles = {"start": "▶️ STEP CANLI BAŞLATMA ONAYI", "resume": "▶️ STEP DEVAM ONAYI",
+              "close_stop": "⛔ STEP POZİSYONUNU KAPAT VE DURDUR"}
+    lines = [titles[action], "", "Hesap kapsamı: " + str(snapshot["scope_id"])[:80]]
+    if action in ("start", "resume"):
+        lines += [_sizing_text(state.draft), "", "Onay, STEP için yeni giriş kabulünü açar.",
+                  "Açık pozisyonun miktarı veya kaldıracı bu ayar seçimiyle değiştirilmez."]
+    else:
+        position = snapshot.get("position")
+        if position:
+            if _pending_entry(snapshot):
+                lines += ["Yalnız STEP’e ait bekleyen giriş:",
+                          str(position["symbol"]) + " · henüz dolmadı"]
+            else:
+                lines += ["Yalnız STEP’e ait pozisyon:",
+                          str(position["symbol"]) + " · LONG · " + str(position["quantity"]) + " adet"]
+            lines.append("İşlem kimliği: " + str(position["intent_id"])[:80])
+        else:
+            lines.append("Açık STEP pozisyonu görülmüyor; kapanış ve durdurma koşulları yeniden doğrulanacak.")
+        lines += ["", "Yeni giriş kabulü durdurulur ve STEP kapanış süreci başlatılır.",
+                  "Kapanış tamamlanana kadar koruma ve durum takibi sürer.",
+                  "Bu işlem NORMAL botun pozisyonlarını kapsamaz."]
+    lines += ["", "Onay 120 saniye geçerli; yalnız aynı yönetici kullanabilir.",
+              "Hesap, çalışma durumu, pozisyon veya seçili profil değişirse yeniden onay gerekir."]
+    return "\n".join(lines)
+
+
+def _require_control_match(item, owner, state, snapshot, action):
+    if (item is None or item.owner != owner or item.revision != state.revision
+            or item.expires_at <= time.monotonic()):
+        raise ValueError("Kontrol ekranı eskidi. /step ile güncel paneli aç.")
+    if _fingerprint(snapshot) != item.fingerprint:
+        raise ValueError("STEP durumu veya pozisyon değişti. Paneli yenileyip yeniden onayla.")
+    if action not in _allowed_controls(snapshot):
+        raise ValueError("STEP’in doğrulanmış durumu bu komuta izin vermiyor. Paneli yenile.")
+
+
+async def _execute_control(client, action, request_id, state, snapshot):
+    profile = _control_profile(state, action, snapshot)
+    position = snapshot.get("position") or {}
+    try:
+        result = await asyncio.wait_for(client.execute(
+            action=action, request_id=request_id,
+            expected_scope_id=snapshot["scope_id"], expected_runtime_id=snapshot["runtime_id"],
+            expected_version=snapshot["version"], profile=profile,
+            expected_position_id=position.get("intent_id")), timeout=CONTROL_TIMEOUT_SECONDS)
+        step_lock_control.validate_snapshot(result)
+        if (result["scope_id"] != snapshot["scope_id"] or result["runtime_id"] != snapshot["runtime_id"]
+                or result["version"] < snapshot["version"]):
+            raise ValueError("Control response binding changed")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise ValueError("Komutun sonucu doğrulanamadı. Komut otomatik tekrarlanmadı; /step ile durumu kontrol et.") from None
+    state.notice = "Kontrol isteği yanıtlandı. Aşağıdaki çalışma durumu yeniden okunarak gösteriliyor."
+
+
+async def _control_intent(bot, session, cb, owner, state, action, token):
+    view = control_views.get(token)
+    if (view is None or view.owner != owner or view.revision != state.revision
+            or view.expires_at <= time.monotonic()):
+        raise ValueError("Kontrol ekranı eskidi. /step ile güncel paneli aç.")
+    control_views.pop(token, None)
+    client, snapshot = await _read_control(bot)
+    _require_control_match(view, owner, state, snapshot, action)
+    _control_profile(state, action, snapshot)
+    _invalidate(owner)
+    request_id = secrets.token_hex(16)
+    if action == "pause":
+        await _execute_control(client, action, request_id, state, snapshot)
+        await _show(bot, session, owner[1], state, cb.get("message"))
+        return
+    if action not in ("start", "resume", "close_stop"):
+        raise ValueError("STEP kontrol isteği geçersiz.")
+    nonce = secrets.token_hex(12)
+    control_confirmations[nonce] = ControlConfirmation(
+        owner, state.revision, state.draft, action, _fingerprint(snapshot), snapshot,
+        request_id, time.monotonic() + CONFIRM_TTL_SECONDS)
+    await _send(bot, session, owner[1], _control_review(action, state, snapshot),
+                {"inline_keyboard": [[_button("✅ Onayla", "slp:controlconfirm:" + nonce),
+                                       _button("❌ Vazgeç", "slp:controlcancel:" + nonce)]]}, cb.get("message"))
+
+
+async def _control_confirm(bot, session, cb, owner, state, token, cancel=False):
+    pending = control_confirmations.get(token)
+    if (pending is None or pending.owner != owner or pending.revision != state.revision
+            or pending.draft != state.draft or pending.expires_at <= time.monotonic()):
+        raise ValueError("Kontrol onayı geçersiz, kullanılmış veya süresi dolmuş. /step ile yeniden aç.")
+    # Consume before any await: duplicate callback deliveries cannot dispatch twice.
+    control_confirmations.pop(token, None)
+    if cancel:
+        state.notice = "Kontrol isteği iptal edildi; komut gönderilmedi."
+    else:
+        client, snapshot = await _read_control(bot)
+        _require_control_match(pending, owner, state, snapshot, pending.action)
+        await _execute_control(client, pending.action, pending.request_id, state, snapshot)
+    await _show(bot, session, owner[1], state, cb.get("message"))
 
 
 async def handle(bot, session, text, chat_id, user_id):
@@ -374,6 +669,11 @@ async def callback(bot, session, cb):
         parts = data.split(":")
         if data == "slp:panel":
             await _show(bot, session, chat_id, state, message)
+        elif len(parts) == 4 and parts[1] == "control":
+            await _control_intent(bot, session, cb, owner, state, parts[2], parts[3])
+        elif len(parts) == 3 and parts[1] in ("controlconfirm", "controlcancel"):
+            await _control_confirm(bot, session, cb, owner, state, parts[2],
+                                   cancel=parts[1] == "controlcancel")
         elif data in ("slp:margin", "slp:leverage"):
             kind = "m" if data == "slp:margin" else "l"
             prompt = ("💰 STEP için hedef teminatı seç (en fazla 200 USDT).\n"
@@ -422,12 +722,13 @@ async def callback(bot, session, cb):
                     raise DraftUnavailable("Taslak deposu okunamadığı için kaydetme kilitli.")
                 DraftStore(owner[0]).save(chat_id, user_id, pending.draft)
                 state.saved_draft = pending.draft
-                state.notice = "Taslak kaydedildi. Canlı işlem başlamadı; bu panelin canlı bağlantısı kurulmadı."
+                state.notice = "Taslak kaydedildi. Bu kayıt çalışma profiline uygulanmadı; başlatma komutu gönderilmedi."
             else:
                 state.notice = "Bu kaydetme isteği iptal edildi. Önceki kayıt korundu."
             await _show(bot, session, chat_id, state, message)
-        elif data in ("slp:summary", "slp:live"):
-            await _send(bot, session, chat_id, _summary(state.draft),
+        elif data in ("slp:summary", "slp:live", "slp:controlinfo"):
+            _, snapshot = await _read_control(bot)
+            await _send(bot, session, chat_id, _summary(state.draft, snapshot),
                         {"inline_keyboard": [[_button("⬅️ STEP paneli", "slp:panel")]]}, message)
         elif data == "slp:menu":
             # Late import prevents an import cycle with the existing menu router.

@@ -4,6 +4,7 @@ from copy import deepcopy
 from contextlib import ExitStack
 from decimal import Decimal
 from pathlib import Path
+import os
 import sys
 import tempfile
 import time
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "binance_momentum_bot"))
 import step_lock_panel as panel
+import step_lock_control as control
 
 
 class DraftValidationTests(unittest.TestCase):
@@ -86,11 +88,17 @@ class PanelInteractionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        environment = patch.dict(os.environ, {"STEP_CONTROL_URL": "", "STEP_OPERATOR_CONTROL_KEY": "", "STEP_CONTROL_SCOPE": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.events = []
         panel.sessions.clear()
         panel.pending_confirmations.clear()
         self.addCleanup(panel.sessions.clear)
         self.addCleanup(panel.pending_confirmations.clear)
+        for cache in (panel.control_views, panel.control_confirmations):
+            cache.clear()
+            self.addCleanup(cache.clear)
 
         async def send(session, text, **kwargs):
             self.events.append(("send", {"text": text, **deepcopy(kwargs)}))
@@ -447,6 +455,195 @@ class PanelInteractionTests(unittest.TestCase):
             with patch.object(bot, "TELEGRAM_ADMIN_USER_ID", ""):
                 self.assertTrue(asyncio.run(bot._at_command(None, "/step", "admin", "user")))
             self.assertEqual(count, len(self.events))
+
+
+class ControlPanelTests(unittest.TestCase):
+    command = PanelInteractionTests.command
+    tap = PanelInteractionTests.tap
+    markup = PanelInteractionTests.markup
+    action = PanelInteractionTests.action
+    texts = PanelInteractionTests.texts
+    select_max = PanelInteractionTests.select_max
+    save_max = PanelInteractionTests.save_max
+    assert_no_trading = PanelInteractionTests.assert_no_trading
+
+    def setUp(self):
+        PanelInteractionTests.setUp(self)
+        self.snapshot = {"protocol": "STEP_CONTROL_V1", "scope_id": "STEP_TEST", "runtime_id": "runtime-1",
+                         "version": 1, "observed_at_ms": int(time.time() * 1000), "state": "OFF",
+                         "ready": True, "live_capable": True, "entry_enabled": False,
+                         "position_known": True, "position": None, "flat_confirmed": True,
+                         "protection_active": False, "active_profile": None,
+                         "reason": "", "allowed_actions": ["start"]}
+
+        async def status():
+            return deepcopy(self.snapshot)
+
+        async def execute(**request):
+            action = request["action"]
+            target = {"start": "LIVE", "pause": "PAUSED", "resume": "LIVE", "close_stop": "CLOSING"}[action]
+            self.snapshot["state"] = target
+            self.snapshot["entry_enabled"] = target == "LIVE"
+            self.snapshot["version"] += 1
+            self.snapshot["observed_at_ms"] = int(time.time() * 1000)
+            self.snapshot["allowed_actions"] = {"LIVE": ["pause", "close_stop"],
+                                                 "PAUSED": ["resume", "close_stop"], "CLOSING": []}[target]
+            if request.get("profile") is not None:
+                self.snapshot["active_profile"] = deepcopy(request["profile"])
+            if action == "close_stop":
+                self.snapshot["flat_confirmed"] = False
+            return deepcopy(self.snapshot)
+
+        self.client = Mock()
+        self.client.status = AsyncMock(side_effect=status)
+        self.client.execute = AsyncMock(side_effect=execute)
+        self.bot["STEP_CONTROL_CLIENT"] = self.client
+
+    def start(self):
+        self.save_max()
+        self.tap(self.action("slp:control:start:"))
+        self.client.execute.assert_not_awaited()
+        self.tap(self.action("slp:controlconfirm:"))
+        self.assertEqual("LIVE", self.snapshot["state"])
+
+    def control_actions(self):
+        return [button["callback_data"].split(":")[2]
+                for row in self.markup() for button in row
+                if button.get("callback_data", "").startswith("slp:control:")]
+
+    def test_full_control_flow_confirms_start_resume_close_and_pauses_immediately(self):
+        self.start()
+        request = self.client.execute.await_args.kwargs
+        self.assertEqual({"version": 1, "basis": "margin", "margin_usdt": "200", "leverage": 10}, request["profile"])
+        self.assertEqual("STEP_TEST", request["expected_scope_id"])
+        self.assertEqual("runtime-1", request["expected_runtime_id"])
+        self.snapshot["position"] = {"intent_id": "intent-1", "symbol": "BTCUSDT", "quantity": "0.01", "side": "LONG"}
+        self.snapshot["flat_confirmed"] = False
+        self.snapshot["protection_active"] = True
+        self.command("/step")
+        self.assertEqual({"pause", "close_stop"}, set(self.control_actions()))
+        self.tap(self.action("slp:control:pause:"))
+        self.assertEqual(2, self.client.execute.await_count)
+        self.assertEqual("pause", self.client.execute.await_args.kwargs["action"])
+        self.assertEqual("PAUSED", self.snapshot["state"])
+        self.assertTrue(self.snapshot["protection_active"])
+        self.tap(self.action("slp:control:resume:"))
+        self.assertEqual(2, self.client.execute.await_count)
+        self.tap(self.action("slp:controlconfirm:"))
+        self.assertEqual(3, self.client.execute.await_count)
+        self.tap(self.action("slp:control:close_stop:"))
+        self.assertEqual(3, self.client.execute.await_count)
+        confirmation = self.action("slp:controlconfirm:")
+        self.tap(confirmation)
+        self.assertEqual(4, self.client.execute.await_count)
+        self.assertEqual("intent-1", self.client.execute.await_args.kwargs["expected_position_id"])
+        self.assertEqual("CLOSING", self.snapshot["state"])
+        self.assertFalse(self.control_actions())
+        self.tap(confirmation)
+        self.assertEqual(4, self.client.execute.await_count)
+        self.snapshot.update(state="OFF", position=None, flat_confirmed=True, protection_active=False,
+                             allowed_actions=["start"], version=self.snapshot["version"] + 1)
+        self.command("/step")
+        self.assertEqual(["start"], self.control_actions())
+        self.assert_no_trading()
+
+    def test_control_confirmation_is_bound_to_chat_actor_and_single_use(self):
+        self.save_max()
+        self.tap(self.action("slp:control:start:"))
+        confirmation = self.action("slp:controlconfirm:")
+        self.authorized.update({("admin", "other"), ("other", "user")})
+        self.tap(confirmation, user="other")
+        self.tap(confirmation, chat="other")
+        self.client.execute.assert_not_awaited()
+        self.tap(confirmation)
+        self.tap(confirmation)
+        self.assertEqual(1, self.client.execute.await_count)
+
+    def test_expired_or_cancelled_control_confirmation_cannot_execute(self):
+        self.save_max()
+        self.tap(self.action("slp:control:start:"))
+        confirmation = self.action("slp:controlconfirm:")
+        with patch.object(panel.time, "monotonic", return_value=time.monotonic() + 121):
+            self.tap(confirmation)
+        self.client.execute.assert_not_awaited()
+        self.command("/step")
+        self.tap(self.action("slp:control:start:"))
+        confirmation = self.action("slp:controlconfirm:")
+        self.tap(self.action("slp:controlcancel:"))
+        self.tap(confirmation)
+        self.client.execute.assert_not_awaited()
+
+    def test_editing_saved_draft_invalidates_pending_start(self):
+        self.save_max()
+        self.tap(self.action("slp:control:start:"))
+        confirmation = self.action("slp:controlconfirm:")
+        self.command("/step margin 100")
+        self.tap(confirmation)
+        self.client.execute.assert_not_awaited()
+
+    def test_changed_authoritative_scope_epoch_version_or_stale_state_blocks_confirmation(self):
+        self.save_max()
+        baseline = deepcopy(self.snapshot)
+        for field, value in (("scope_id", "NORMAL_TEST"), ("runtime_id", "new-runtime"),
+                             ("version", 2), ("observed_at_ms", int(time.time() * 1000) - 60000)):
+            with self.subTest(field=field):
+                self.snapshot = deepcopy(baseline)
+                self.command("/step")
+                self.tap(self.action("slp:control:start:"))
+                confirmation = self.action("slp:controlconfirm:")
+                self.snapshot[field] = value
+                self.tap(confirmation)
+                self.client.execute.assert_not_awaited()
+
+    def test_changed_owned_position_blocks_close_confirmation(self):
+        self.start()
+        self.snapshot.update(position={"intent_id": "intent-1", "symbol": "BTCUSDT", "quantity": "0.01", "side": "LONG"},
+                             flat_confirmed=False, protection_active=True)
+        self.command("/step")
+        self.tap(self.action("slp:control:close_stop:"))
+        confirmation = self.action("slp:controlconfirm:")
+        self.snapshot["position"]["intent_id"] = "replacement-intent"
+        self.tap(confirmation)
+        self.assertEqual(1, self.client.execute.await_count)
+
+    def test_pending_entry_is_displayed_and_fill_invalidates_close_confirmation(self):
+        self.start()
+        self.snapshot.update(position={"intent_id": "pending-intent", "symbol": "BTCUSDT", "quantity": "0", "side": "LONG"},
+                             flat_confirmed=False, protection_active=False)
+        self.command("/step")
+        self.assertIn("Bekleyen STEP giriş emri", self.texts())
+        self.tap(self.action("slp:control:close_stop:"))
+        confirmation = self.action("slp:controlconfirm:")
+        self.snapshot["position"]["quantity"] = "0.01"
+        self.snapshot["protection_active"] = True
+        self.tap(confirmation)
+        self.assertEqual(1, self.client.execute.await_count)
+
+    def test_missing_client_keeps_operational_actions_unavailable(self):
+        with patch.object(control, "client_for", return_value=None):
+            self.command("/step")
+            self.assertFalse(self.control_actions())
+            self.tap("slp:control:start:missing-view")
+        self.client.execute.assert_not_awaited()
+        self.assert_no_trading()
+
+    def test_unknown_command_result_does_not_repeat_and_refresh_shows_actual_state(self):
+        self.save_max()
+        self.tap(self.action("slp:control:start:"))
+        confirmation = self.action("slp:controlconfirm:")
+
+        async def applied_but_reply_lost(**request):
+            self.snapshot.update(state="LIVE", entry_enabled=True, active_profile=deepcopy(request["profile"]),
+                                 version=2, allowed_actions=["pause", "close_stop"])
+            raise control.ControlUnavailable("Simulated response loss")
+
+        self.client.execute.side_effect = applied_but_reply_lost
+        self.tap(confirmation)
+        self.tap(confirmation)
+        self.assertEqual(1, self.client.execute.await_count)
+        self.command("/step")
+        self.assertEqual({"pause", "close_stop"}, set(self.control_actions()))
+        self.assert_no_trading()
 
 
 if __name__ == "__main__":
