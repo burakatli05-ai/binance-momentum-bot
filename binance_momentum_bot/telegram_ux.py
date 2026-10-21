@@ -9,6 +9,7 @@ import daytrades
 import trade_views
 import today_positions
 import visual_cards
+import step_lock_panel
 from position_observer import LeverageCache, roe_values
 from telegram_cards import ownership, number, pages, timestamp
 
@@ -18,7 +19,7 @@ MENU = (
     ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
     ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),
     ('🧪 ALT Shadow', '/altstats'), ('⚙️ Ayarlar', '/settings'),
-    ('❓ Yardım', '/help'),
+    ('🪜 STEP Lock', '/step'), ('❓ Yardım', '/help'),
 )
 ALIASES = {label.casefold(): command for label, command in MENU}
 ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu',
@@ -54,6 +55,7 @@ async def confirm_mode(bot, session, target, chat_id, user_id):
 
 
 async def mode_callback(bot, session, cb):
+    if await step_lock_panel.callback(bot, session, cb): return True
     data=str(cb.get('data') or '')
     if not data.startswith('uxmode:'):return False
     chat=str(((cb.get('message') or {}).get('chat') or {}).get('id',''))
@@ -142,6 +144,7 @@ async def show_positions(bot, session):
 
 
 async def handle(bot, session, text, chat_id, user_id):
+    if await step_lock_panel.handle(bot, session, text, chat_id, user_id): return True
     supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',
                  '/daytradesraw', '/positionsraw', '/todaypositionsraw')
     if text not in supported: return False

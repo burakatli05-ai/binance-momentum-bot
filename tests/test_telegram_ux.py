@@ -26,7 +26,7 @@ class MenuTests(unittest.TestCase):
             self.assertEqual('/menu',ux.normalize(text))
         self.assertEqual('/daytrades',ux.normalize('/daytrade'))
         self.assertEqual('/daytrades',ux.normalize('/DAYTRADE@scanner'))
-        self.assertEqual(['/earlyv2','/autotrade','/status','/positions','/daytrades','/daytradeslist','/todaypositions','/top','/altstats','/settings','/help'],[command for _,command in ux.MENU])
+        self.assertEqual(['/earlyv2','/autotrade','/status','/positions','/daytrades','/daytradeslist','/todaypositions','/top','/altstats','/settings','/step','/help'],[command for _,command in ux.MENU])
         for row in ux.menu_markup()['keyboard']:
             for button in row:self.assertIn(ux.normalize(button['text']),[command for _,command in ux.MENU])
         self.assertNotIn('latestexport',json.dumps(ux.menu_markup()))
