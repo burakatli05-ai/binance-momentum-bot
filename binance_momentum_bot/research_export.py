@@ -184,6 +184,34 @@ class Exporter:
                     telemetry('partial_cleanup_failed',snapshot_id=sid,error=type(cleanup_error).__name__)
             return directory,manifest
 
+    @serialized
+    def premium_bridge(self,now,printer=print):
+        """Bounded logical Premium cut; independent of restorable DB snapshots."""
+        sid='premium-'+datetime.fromtimestamp(now/1000,timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
+        try:
+            # Reserve only the bounded bridge allowance, never the full DB size.
+            # The same disk/budget/checkpoint policy and worker lock still apply.
+            self.safety.preflight(64*1024**2)
+            deadline=time.monotonic()+min(self.safety.policy.timeout,30)
+            def checkpoint():self.safety.checkpoint(deadline)
+            checkpoint()
+            code_hashes={}
+            for name in ('research_export.py','assistant_bridge.py','analysis_export.py','export_safety.py'):
+                with Path(__file__).with_name(name).open('rb') as source:
+                    code_hashes[name]=hashlib.file_digest(source,'sha256').hexdigest()
+            manifest={'snapshot_id':sid,'created_time_ms':now,'deployment_id':self.deployment,
+                      'version':self.version,'source_code_sha256':code_hashes,
+                      'config_identity':hashlib.sha256(json.dumps(self.config,sort_keys=True).encode()).hexdigest()}
+            meta=assistant_bridge.emit_live(self.source,manifest,printer=printer,checkpoint=checkpoint)
+            telemetry('premium_bridge_complete',snapshot_id=sid,sha256=meta['sha256'],raw_bytes=meta['raw_bytes'])
+            return dict(meta,status='VALID')
+        except Exception as exc:
+            result={'status':'ERROR','error':type(exc).__name__}
+            if isinstance(exc,ExportSkipped):
+                result.update(status='SKIPPED',skipped_export_reason=str(exc))
+            telemetry('premium_bridge_failed',snapshot_id=sid,**result)
+            return result
+
     def run_due(self,now=None):
         # Includes lock/lease acquisition, metadata writes, reporting and lease release.
         try:
@@ -215,8 +243,17 @@ class Exporter:
         state=self.state();result={'status':'NOT_DUE'}
         if now-state.get('last_hourly_attempt',-3600000)>=3600000:
             state['last_hourly_attempt']=now;atomic_json(self.root/'scheduler.json',state)
+            # This cut uses the existing hourly claim and runs before the full
+            # snapshot. Neither snapshot success nor its summaries gate it.
+            bridge_result=self.premium_bridge(now)
+            state['premium_bridge_last_attempt_ms']=now
+            state['premium_bridge_last_result']=bridge_result
+            if bridge_result['status']=='VALID':
+                state['premium_bridge_last_success']={'created_time_ms':now,'sha256':bridge_result['sha256']}
+            atomic_json(self.root/'scheduler.json',state)
             directory,manifest=self.snapshot(now)
             result={'status':'VALID' if manifest['valid'] else 'INVALID','snapshot_id':manifest['snapshot_id']}
+            result['assistant_bridge']=bridge_result
             if manifest.get('skipped_export_reason'):
                 result.update(status='SKIPPED',skipped_export_reason=manifest['skipped_export_reason'])
             if manifest['valid']:
@@ -231,17 +268,6 @@ class Exporter:
                         result['summary']='NEW_MATURE_DATA'
                     else:result['summary']='UNCHANGED' if manifest['unchanged'] else 'NO_NEW_MATURE_DATA'
                     state['watermarks']=marks
-                try:
-                    bridge_meta=assistant_bridge.emit(directory/'signals.db',manifest)
-                    result['assistant_bridge']={
-                        'chunks':bridge_meta['chunks'],
-                        'compressed_bytes':bridge_meta['compressed_bytes'],
-                        'sha256':bridge_meta['sha256'],
-                    }
-                except Exception as exc:
-                    # Bridge failure must never block the research scheduler or production bot.
-                    print(f"{assistant_bridge.LOG_PREFIX} ERROR {manifest['snapshot_id']} {type(exc).__name__}",flush=True)
-                    result['assistant_bridge']='ERROR'
         local=datetime.fromtimestamp(now/1000,IST);date=local.date().isoformat()
         if local.hour>=22 and state.get('daily_date')!=date:
             latest=self.latest()
