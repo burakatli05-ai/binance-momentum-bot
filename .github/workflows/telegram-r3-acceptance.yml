@@ -1,0 +1,130 @@
+name: Telegram R3 isolated acceptance
+on:
+  push:
+    branches: ['fix/telegram-reliability-r3-20261028']
+    paths: ['.github/workflows/telegram-r3-acceptance.yml']
+permissions:
+  contents: write
+concurrency:
+  group: telegram-r3-isolated-acceptance
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/fix/telegram-reliability-r3-20261028'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+      RESEARCH_EXPORT_ENABLED: '0'
+      STEP_LOCK_SHADOW_ENABLED: '0'
+      AUTO_TRADE_LIVE_ALLOWED: '0'
+      EARLY_V2_LIVE_ALLOWED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install application dependencies
+        run: python -m pip install -r binance_momentum_bot/requirements.txt
+      - name: Check source, run baseline, apply exact patch, compare regressions
+        run: |
+          cat > "$RUNNER_TEMP/r3_regressions.py" <<'PY'
+          from pathlib import Path
+          import json,os,sys,unittest
+          from unittest.mock import patch,MagicMock
+          root=Path(sys.argv[1]).resolve();output=Path(sys.argv[2]).resolve()
+          os.environ.update(PYTHON_DOTENV_DISABLED='1',TELEGRAM_BOT_TOKEN='',BINANCE_API_KEY='',BINANCE_API_SECRET='',RESEARCH_EXPORT_ENABLED='0',STEP_LOCK_SHADOW_ENABLED='0')
+          sys.path[:0]=[str(root/'binance_momentum_bot'),str(root/'tests')]
+          suite=unittest.defaultTestLoader.loadTestsFromNames(['test_observer_open','test_telegram_ux','test_tp_limit_execution','test_startup','test_railpack_startup'])
+          with patch('socket.socket.connect',side_effect=AssertionError('NETWORK_FORBIDDEN')),patch('subprocess.Popen',return_value=MagicMock()):
+              result=unittest.TextTestRunner(verbosity=2).run(suite)
+          output.write_text(json.dumps({'run':result.testsRun,'failures':[{'id':t.id(),'trace':m} for t,m in result.failures], 'errors':[{'id':t.id(),'trace':m} for t,m in result.errors]},indent=2))
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          import base64,hashlib,json,lzma,os,shutil,subprocess,sys
+          repo=Path.cwd();work=Path(os.environ['RUNNER_TEMP'])/'telegram-r3';work.mkdir()
+          blob=base64.b64decode((repo/'scripts/telegram_r3_source.b64').read_text())
+          assert hashlib.sha256(blob).hexdigest()=='1bbd08c69a923d8b32946ae2a8f72b7a9f9d9e335cc29ce95135dd7ca78a151e','PAYLOAD_HASH_MISMATCH'
+          payload=json.loads(lzma.decompress(blob))
+          allow={'candidate/telegram_dispatch.py','candidate/telegram_transport.py','results/bot.py.patch','results/position_observer.py.patch','metadata.json'}
+          assert set(payload)==allow
+          for name,text in payload.items():
+              p=work/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text)
+          meta=json.loads(payload['metadata.json'])
+          for name,digest in meta['base'].items():
+              assert hashlib.sha256((repo/'binance_momentum_bot'/name).read_bytes()).hexdigest()==digest,('BASE_DRIFT',name)
+          baseline=work/'baseline';baseline.mkdir()
+          for folder in ('binance_momentum_bot','tests'):
+              shutil.copytree(repo/folder,baseline/folder)
+          runner=str(Path(os.environ['RUNNER_TEMP'])/'r3_regressions.py')
+          def regress(label,folder):
+              with (work/'results'/f'{label}.log').open('w') as out:
+                  subprocess.run([sys.executable,runner,str(folder),str(work/'results'/f'{label}.json')],stdout=out,stderr=subprocess.STDOUT,check=True)
+          regress('baseline',baseline)
+          for name in ('bot.py','position_observer.py'):
+              p=str(work/'results'/f'{name}.patch')
+              subprocess.run(['git','apply','--check',p],check=True)
+              subprocess.run(['git','apply',p],check=True)
+          for name in ('telegram_dispatch.py','telegram_transport.py'):
+              shutil.copy2(work/'candidate'/name,repo/'binance_momentum_bot'/name)
+          for name,digest in meta['candidate'].items():
+              assert hashlib.sha256((repo/'binance_momentum_bot'/name).read_bytes()).hexdigest()==digest,('PATCH_HASH_MISMATCH',name)
+          subprocess.run([sys.executable,'-m','compileall','-q','binance_momentum_bot'],check=True)
+          regress('candidate',repo)
+          a=json.loads((work/'results/baseline.json').read_text());b=json.loads((work/'results/candidate.json').read_text())
+          expected={'test_telegram_ux.MenuTests.test_production_and_startup_research_baselines_unchanged'}
+          assert a['run']==b['run']==47
+          assert not a['errors'] and not b['errors']
+          assert {x['id'] for x in a['failures']}=={x['id'] for x in b['failures']}==expected,'REGRESSION_CHANGED'
+          result={'status':'NO_NEW_FAILURES_IN_SCOPED_REGRESSIONS','baseline_tests':47,'candidate_tests':47,'candidate_passed':46,'preexisting_failure_ids':sorted(expected),'candidate_sha256':meta['candidate'],'production_deployed':False,'runtime_exchange_test':False}
+          (work/'results/acceptance.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+          PY
+      - name: Durable outbox runtime smoke, no network
+        run: |
+          python - <<'PY'
+          import asyncio,sqlite3,tempfile,sys
+          from pathlib import Path
+          from contextlib import closing
+          sys.path.insert(0,'binance_momentum_bot')
+          from telegram_dispatch import NotificationDispatch
+          async def main():
+              with tempfile.TemporaryDirectory() as d:
+                  path=str(Path(d)/'outbox.db');seen=[]
+                  async def send(text,meta):seen.append(text.split('\n')[-1]);return True
+                  async with NotificationDispatch(path,send) as q:
+                      for kind in ('PREMIUM','OPEN','CLOSE'):
+                          assert q.submit(('owner',7),kind,kind,{'chat_id':'synthetic'}).status=='COMMITTED'
+                      with closing(sqlite3.connect(path)) as c:
+                          assert c.execute("SELECT COUNT(*) FROM outbox WHERE status='PENDING'").fetchone()[0]==3
+                      await q.join()
+                  assert seen==['PREMIUM','OPEN','CLOSE']
+                  with closing(sqlite3.connect(path)) as c:
+                      assert c.execute("SELECT COUNT(*) FROM outbox WHERE status='ACK_CONFIRMED'").fetchone()[0]==3
+                  async with NotificationDispatch(path,send) as q:await q.join()
+                  assert len(seen)==3,'ACK replayed'
+          asyncio.run(main())
+          PY
+      - name: Commit only tested notification code to the isolated branch
+        run: |
+          git diff --check
+          git add binance_momentum_bot/bot.py binance_momentum_bot/position_observer.py binance_momentum_bot/telegram_transport.py binance_momentum_bot/telegram_dispatch.py
+          python - <<'PY'
+          import subprocess
+          expected={'binance_momentum_bot/bot.py','binance_momentum_bot/position_observer.py','binance_momentum_bot/telegram_transport.py','binance_momentum_bot/telegram_dispatch.py'}
+          changed=set(subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines())
+          assert changed==expected,changed
+          PY
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(telegram): durable notifications and nonblocking position observation [skip ci]'
+          git push origin HEAD:fix/telegram-reliability-r3-20261028
+          git rev-parse HEAD > "$RUNNER_TEMP/telegram-r3/results/tested_commit.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telegram-r3-acceptance-evidence
+          path: ${{ runner.temp }}/telegram-r3/results/
+          retention-days: 7
+          if-no-files-found: warn
