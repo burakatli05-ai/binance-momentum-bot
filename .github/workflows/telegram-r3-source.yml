@@ -1,0 +1,38 @@
+name: Telegram R3 isolated source snapshot
+on:
+  push:
+    branches: ['fix/telegram-reliability-r3-20261028']
+    paths: ['.github/workflows/telegram-r3-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Package code only, without environment or trading data
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile, hashlib, json, subprocess
+          files = subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          manifest = {}
+          with zipfile.ZipFile('telegram-r3-source.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for name in files:
+                  p=pathlib.Path(name)
+                  if not p.is_file(): continue
+                  if not (name.startswith('binance_momentum_bot/') or name.startswith('tests/')): continue
+                  if p.suffix not in {'.py','.txt','.json','.sql','.toml','.yaml','.yml','.csv'}: continue
+                  if any(x in name.lower() for x in ('.env','secret','credential','token','__pycache__')): continue
+                  b=p.read_bytes(); z.writestr(name,b)
+                  manifest[name]={'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+              z.writestr('source_manifest.json',json.dumps(manifest,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: telegram-r3-pinned-source
+          path: telegram-r3-source.zip
+          retention-days: 1
+          if-no-files-found: error
