@@ -44,7 +44,7 @@ jobs:
           PY
           python - <<'PY'
           from pathlib import Path
-          import base64,hashlib,json,lzma,os,shutil,subprocess,sys
+          import ast,base64,hashlib,json,lzma,os,shutil,subprocess,sys
           repo=Path.cwd();work=Path(os.environ['RUNNER_TEMP'])/'telegram-r3';work.mkdir()
           blob=base64.b64decode((repo/'scripts/telegram_r3_source.b64').read_text())
           assert hashlib.sha256(blob).hexdigest()=='1bbd08c69a923d8b32946ae2a8f72b7a9f9d9e335cc29ce95135dd7ca78a151e','PAYLOAD_HASH_MISMATCH'
@@ -72,6 +72,14 @@ jobs:
               shutil.copy2(work/'candidate'/name,repo/'binance_momentum_bot'/name)
           for name,digest in meta['candidate'].items():
               assert hashlib.sha256((repo/'binance_momentum_bot'/name).read_bytes()).hexdigest()==digest,('PATCH_HASH_MISMATCH',name)
+          p=repo/'binance_momentum_bot/bot.py';old=p.read_text();lines=old.splitlines(True)
+          assert lines[6309]=='        \n','WHITESPACE_LOCATION_CHANGED'
+          lines[6309]='\n';new=''.join(lines)
+          assert ast.dump(ast.parse(old))==ast.dump(ast.parse(new)),'NON_FORMATTING_CHANGE'
+          p.write_text(new)
+          final_hash=hashlib.sha256(p.read_bytes()).hexdigest()
+          assert final_hash=='b228dc5a01f7649cb923d79e843d1ddac6d960c24ff9950cc34239930767ce26'
+          meta['candidate']['bot.py']=final_hash
           subprocess.run([sys.executable,'-m','compileall','-q','binance_momentum_bot'],check=True)
           regress('candidate',repo)
           a=json.loads((work/'results/baseline.json').read_text());b=json.loads((work/'results/candidate.json').read_text())
@@ -79,7 +87,7 @@ jobs:
           assert a['run']==b['run']==47
           assert not a['errors'] and not b['errors']
           assert {x['id'] for x in a['failures']}=={x['id'] for x in b['failures']}==expected,'REGRESSION_CHANGED'
-          result={'status':'NO_NEW_FAILURES_IN_SCOPED_REGRESSIONS','baseline_tests':47,'candidate_tests':47,'candidate_passed':46,'preexisting_failure_ids':sorted(expected),'candidate_sha256':meta['candidate'],'production_deployed':False,'runtime_exchange_test':False}
+          result={'status':'NO_NEW_FAILURES_IN_SCOPED_REGRESSIONS','baseline_tests':47,'candidate_tests':47,'candidate_passed':46,'preexisting_failure_ids':sorted(expected),'candidate_sha256':meta['candidate'],'production_deployed':False,'runtime_exchange_test':False,'formatting_correction':'ONE_WHITESPACE_ONLY_LINE_AST_IDENTICAL'}
           (work/'results/acceptance.json').write_text(json.dumps(result,indent=2))
           print(json.dumps(result,indent=2))
           PY
