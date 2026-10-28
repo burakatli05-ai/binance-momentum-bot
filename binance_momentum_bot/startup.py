@@ -1,6 +1,7 @@
 """Fail-closed persistent SQLite startup; never import bot before verification."""
 from contextlib import closing
 import hashlib
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -14,25 +15,37 @@ import uuid
 BASELINE = json.loads(Path(__file__).with_name('db_baseline.json').read_text())
 
 
+def _startup_trace(stage, **fields):
+    # Diagnostic metadata only: no credentials, rows or database writes.
+    print(json.dumps({'startup_stage': stage, **fields}), flush=True)
+
+
 def check_db(path, manifest=BASELINE):
     if not path.is_file():
         raise RuntimeError('Database missing')
+    _startup_trace('db_check_begin', file=path.name, bytes=path.stat().st_size)
     with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
         for pragma in ('quick_check', 'integrity_check'):
+            _startup_trace('pragma_begin', check=pragma)
             if conn.execute('PRAGMA ' + pragma).fetchall() != [('ok',)]:
                 raise RuntimeError('Database integrity failed')
+            _startup_trace('pragma_ok', check=pragma)
         counts = {}
+        _startup_trace('history_anchors_begin')
         for anchor in manifest.get('anchors', []):
             row = conn.execute('SELECT id,ts,symbol,price FROM signals_v2 WHERE id=?',
                                (anchor[0],)).fetchone()
             if row is None or list(row) != anchor:
                 raise RuntimeError('Database history identity mismatch')
+        _startup_trace('history_anchors_ok')
         for table, minimum in manifest['table_counts'].items():
             quoted = '"' + table.replace('"', '""') + '"'
+            _startup_trace('table_count_begin', table=table)
             count = conn.execute('SELECT count(*) FROM ' + quoted).fetchone()[0]
             if count < minimum:
                 raise RuntimeError('Missing historical rows: ' + table)
             counts[table] = count
+            _startup_trace('table_count_ok', table=table)
     return counts
 
 
@@ -71,6 +84,7 @@ def prepare_db(target, backup, manifest):
 
 
 def main():
+    _startup_trace('entrypoint_entered')
     # Explicit maintenance mode lets operators attach/upload without opening DB.
     if os.getenv('DB_MAINTENANCE') == '1':
         print('DB MAINTENANCE: bot disabled; waiting for verified restore', flush=True)
@@ -91,7 +105,9 @@ def main():
         if manifest['table_counts'].get(table, -1) < count:
             raise RuntimeError('Restore manifest predates verified history')
     backup = mount / 'restore-source.db'
+    _startup_trace('db_verification_begin')
     counts = prepare_db(target, backup, manifest)
+    _startup_trace('db_verification_ok')
     os.environ['DB_PATH'] = str(target)
     live_allowed = os.getenv('AUTO_TRADE_LIVE_ALLOWED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
     os.environ['AUTO_TRADE_LIVE_ALLOWED'] = '1' if live_allowed else '0'
@@ -130,8 +146,13 @@ def main():
     else:
         print(json.dumps({'research_exporter': 'disabled'}), flush=True)
 
+    _startup_trace('bot_exec')
     os.execv(sys.executable, [sys.executable, '-u', 'bot.py'])
 
 
 if __name__ == '__main__':
-    main()
+    faulthandler.dump_traceback_later(60, repeat=True)
+    try:
+        main()
+    finally:
+        faulthandler.cancel_dump_traceback_later()
