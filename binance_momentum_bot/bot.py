@@ -21,6 +21,8 @@ from statistics import mean, median
 from typing import Deque, Dict, Optional, List, Tuple, Set
 
 import aiohttp
+from telegram_transport import TelegramSessions, redact_telegram_error, valid_message_ack
+from telegram_dispatch import NotificationDispatch, Submission, DeliveryResult
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -4786,19 +4788,26 @@ def recover_pending_tracking():
         conn.close()
 
 
+telegram_http_sessions = None
+telegram_dispatcher = None
+telegram_retry_not_before = {}
+
+
+def _telegram_http(fallback, lane):
+    # Backward compatibility for isolated callers; main always supplies lanes.
+    return fallback if telegram_http_sessions is None else telegram_http_sessions.select(lane)
+
+
 telegram_command_context = contextvars.ContextVar("telegram_command_context", default=False)
 telegram_command_send_semaphore = asyncio.Semaphore(max(1, int(os.getenv("TELEGRAM_COMMAND_CONCURRENCY", "2"))))
 telegram_background_send_semaphore = asyncio.Semaphore(max(1, int(os.getenv("TELEGRAM_BACKGROUND_CONCURRENCY", "3"))))
 
 
 def _telegram_safe_error(exc: Exception) -> str:
-    detail = str(exc)
-    if TELEGRAM_BOT_TOKEN:
-        detail = detail.replace(TELEGRAM_BOT_TOKEN, "<redacted>")
-    return detail[:500]
+    return redact_telegram_error(exc, TELEGRAM_BOT_TOKEN)
 
 
-async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
+async def _telegram_send_with_ack(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
                         notification_kind: Optional[str] = None, notification_ordinal: Optional[int] = None,
                         signal_id: Optional[int] = None, signal_price: Optional[float] = None,
                         entry_status: Optional[str] = None, chat_id: Optional[str] = None,
@@ -4814,6 +4823,10 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
         log.warning("Telegram credentials/chat missing; alert printed only:\n%s", text)
         return False
 
+    retry_remaining = telegram_retry_not_before.get(target_chat_id, 0.0)-time.monotonic()
+    if retry_remaining > 0:
+        log.warning("TG_RETRY_DEFERRED kind=%s signal=%s wait_s=%.3f", notification_kind, signal_id, retry_remaining)
+        return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": target_chat_id, "text": text, "disable_web_page_preview": True}
     if reply_markup is not None:
@@ -4826,6 +4839,7 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
         }
 
     is_command = bool(telegram_command_context.get())
+    session = _telegram_http(session, "commands" if is_command else "alerts")
     timeout = aiohttp.ClientTimeout(
         total=5 if is_command else 8,
         connect=2 if is_command else 3,
@@ -4834,7 +4848,9 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
     max_attempts = 2
     send_gate = telegram_command_send_semaphore if is_command else telegram_background_send_semaphore
 
+    gate_started = time.monotonic()
     async with send_gate:
+        log.info("TG_GATE_WAIT kind=%s signal=%s wait_ms=%.3f", notification_kind, signal_id, (time.monotonic()-gate_started)*1000)
         send_start_ms = now_ms()
         live_bid = live_ask = drift = None
         if symbol and symbol in states:
@@ -4857,8 +4873,8 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                         try:
                             data = json.loads(body)
                         except Exception:
-                            data = {"ok": True}
-                        if data.get("ok", True):
+                            data = {}
+                        if valid_message_ack(data):
                             msg_id = None
                             try:
                                 msg_id = int((data.get("result") or {}).get("message_id"))
@@ -4871,7 +4887,8 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                                     price_drift_pct=drift, entry_status=entry_status,
                                 )
                             return True
-                        log.warning("Telegram API ok=false attempt=%d body=%s", attempt, body[:1000])
+                        log.warning("Telegram acknowledgement invalid attempt=%d", attempt)
+                        return False
                     elif r.status == 429:
                         retry_after = 1
                         try:
@@ -4879,13 +4896,14 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                             retry_after = int(data.get("parameters", {}).get("retry_after", 1))
                         except Exception:
                             pass
-                        retry_after = min(max(retry_after, 1), 3 if is_command else 5)
-                        log.warning("Telegram rate limited (429), retry_after=%ss body=%s", retry_after, body[:1000])
+                        retry_after = max(retry_after, 1)
+                        telegram_retry_not_before[target_chat_id] = max(telegram_retry_not_before.get(target_chat_id, 0.0), time.monotonic()+retry_after)
+                        log.warning("Telegram rate limited (429), retry_after=%ss body=%s", retry_after, _telegram_safe_error(body))
                         if attempt < max_attempts:
                             await asyncio.sleep(retry_after)
                             continue
                     else:
-                        log.warning("Telegram HTTP %s attempt=%d body=%s", r.status, attempt, body[:1000])
+                        log.warning("Telegram HTTP %s attempt=%d body=%s", r.status, attempt, _telegram_safe_error(body))
                         if 400 <= r.status < 500:
                             return False
             except asyncio.CancelledError:
@@ -4899,8 +4917,80 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
             if attempt < max_attempts:
                 await asyncio.sleep(0.5 if is_command else 1.0)
 
-    log.error("Telegram message abandoned after %d attempts; preview=%r", max_attempts, text[:160])
+    log.error("Telegram delivery unconfirmed after %d attempts kind=%s signal=%s", max_attempts, notification_kind, signal_id)
     return False
+
+
+async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
+                        notification_kind: Optional[str] = None, notification_ordinal: Optional[int] = None,
+                        signal_id: Optional[int] = None, signal_price: Optional[float] = None,
+                        entry_status: Optional[str] = None, chat_id: Optional[str] = None,
+                        reply_markup: Optional[dict] = None, track_delivery: bool = True) -> bool:
+    # Deadline includes semaphore wait, unlike the old per-request timeout.
+    # Synchronous event-loop blockage can still delay timeout handling.
+    started = time.monotonic()
+    budget = 12.0 if telegram_command_context.get() else 20.0
+    ok = False
+    outcome = "UNCONFIRMED"
+    try:
+        ok = await asyncio.wait_for(_telegram_send_with_ack(
+            session, text, symbol=symbol, notification_kind=notification_kind,
+            notification_ordinal=notification_ordinal, signal_id=signal_id,
+            signal_price=signal_price, entry_status=entry_status, chat_id=chat_id,
+            reply_markup=reply_markup, track_delivery=track_delivery), timeout=budget)
+        outcome = "ACK_CONFIRMED" if ok else "UNCONFIRMED"
+        return ok
+    except asyncio.CancelledError:
+        outcome = "CANCELLED_UNCONFIRMED"
+        raise
+    except asyncio.TimeoutError:
+        outcome = "DEADLINE_UNCONFIRMED"
+        log.warning("TG_DEADLINE kind=%s signal=%s budget_s=%s", notification_kind, signal_id, budget)
+        return False
+    finally:
+        log.info("TG_RESULT kind=%s signal=%s outcome=%s elapsed_ms=%.3f",
+                 notification_kind, signal_id, outcome, (time.monotonic()-started)*1000)
+
+
+async def _telegram_dispatch_send(text, metadata):
+    ok = await telegram_send(None, text, **metadata)
+    target = str(metadata.get("chat_id") or TELEGRAM_CHAT_ID)
+    retry = max(0.0, telegram_retry_not_before.get(target, 0.0)-time.monotonic())
+    return DeliveryResult(ok is True, retry)
+
+
+def telegram_notify(session, text, *, signal_id=None, symbol=None, notification_kind="EXECUTION", chat_id=None, **kwargs):
+    """Durable notification admission only; no Telegram or exchange I/O."""
+    if telegram_dispatcher is None:
+        log.error("TG_ADMISSION kind=%s signal=%s outcome=NOT_ADMITTED_NO_DISPATCHER", notification_kind, signal_id)
+        return Submission(0, "NOT_ADMITTED_NO_DISPATCHER")
+    target = str(chat_id or TELEGRAM_CHAT_ID)
+    key = (target, "premium", signal_id) if signal_id is not None else (target, "unlinked", symbol)
+    metadata = dict(kwargs)
+    metadata.setdefault("track_delivery", False)
+    metadata.update(chat_id=target, signal_id=signal_id, symbol=symbol,
+                    notification_kind=notification_kind,
+                    dispatch_lane="broadcast" if target == str(TELEGRAM_BROADCAST_CHAT_ID) and target != str(TELEGRAM_CHAT_ID) else "critical")
+    body = str(text).replace(TELEGRAM_BOT_TOKEN, "<redacted>") if TELEGRAM_BOT_TOKEN else str(text)
+    event_id = None
+    if signal_id is not None:
+        stable = json.dumps([target, signal_id, notification_kind, body], ensure_ascii=False)
+        event_id = hashlib.sha256(stable.encode()).hexdigest()
+    return telegram_dispatcher.submit(key, notification_kind, body, metadata, event_id=event_id)
+
+
+def telegram_queue_public_alert(session, text, *, symbol=None, notification_kind=None,
+                                notification_ordinal=None, signal_id=None, signal_price=None,
+                                entry_status=None):
+    primary = telegram_notify(session, text, symbol=symbol, notification_kind=notification_kind,
+        notification_ordinal=notification_ordinal, signal_id=signal_id, signal_price=signal_price,
+        entry_status=entry_status, track_delivery=True)
+    if (TELEGRAM_BROADCAST_ENABLED and notification_kind in PUBLIC_NOTIFICATION_KINDS
+            and str(TELEGRAM_BROADCAST_CHAT_ID) != str(TELEGRAM_CHAT_ID)):
+        telegram_notify(session, text, symbol=symbol, notification_kind=notification_kind,
+            notification_ordinal=notification_ordinal, signal_id=signal_id, signal_price=signal_price,
+            entry_status=entry_status, chat_id=TELEGRAM_BROADCAST_CHAT_ID, track_delivery=False)
+    return primary
 
 
 async def telegram_public_alert(session: aiohttp.ClientSession, text: str, symbol: Optional[str] = None,
@@ -4937,6 +5027,7 @@ async def telegram_api_call(session: aiohttp.ClientSession, method: str, payload
         return {"ok": False, "description": "bot token missing"}
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     is_command = bool(telegram_command_context.get())
+    session = _telegram_http(session, "commands" if is_command else "alerts")
     timeout = aiohttp.ClientTimeout(
         total=5 if is_command else 8,
         connect=2 if is_command else 3,
@@ -4950,9 +5041,9 @@ async def telegram_api_call(session: aiohttp.ClientSession, method: str, payload
                 try:
                     data = json.loads(response_text)
                 except Exception:
-                    data = {"ok": False, "description": response_text[:500]}
+                    data = {"ok": False, "description": _telegram_safe_error(response_text)}
                 if r.status != 200 or not data.get("ok", False):
-                    log.warning("Telegram %s failed HTTP=%s body=%s", method, r.status, response_text[:1000])
+                    log.warning("Telegram %s failed HTTP=%s body=%s", method, r.status, _telegram_safe_error(response_text))
                 return data
     except asyncio.CancelledError:
         raise
@@ -6200,6 +6291,13 @@ async def evaluate(session, symbol: str):
                  symbol, score, rise_score, quality, runup, m.get("oi_regime"), m["execution"]["status"], st.episode_id)
         # AutoTrade is a separate execution layer. OFF does nothing; DRY records/simulates; LIVE is triple-locked.
         try:
+            telegram_queue_public_alert(
+                session, build_message(m), symbol=symbol, notification_kind="PREMIUM", notification_ordinal=m.get("daily_notice_no"),
+                signal_id=signal_id, signal_price=m["price"], entry_status=m["execution"]["status"]
+            )
+        except Exception as notification_error:
+            log.error("TG_PREMIUM_ADMISSION_ERROR signal=%s type=%s", signal_id, type(notification_error).__name__)
+        try:
             if early_v2:
                 await early_v2.premium(session, signal_id, symbol, m, plan)
             else:
@@ -6208,11 +6306,8 @@ async def evaluate(session, symbol: str):
             _at_log_event("ENTRY_ERROR",signal_id=signal_id,symbol=symbol,detail=repr(e))
             log.error("AutoTrade premium handler %s: %r",symbol,e)
             if str(autotrade_cfg.get("mode")) == "LIVE":
-                await telegram_send(session,f"🚨 AutoTrade {symbol} giriş hatası: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
-        await telegram_public_alert(
-            session, build_message(m), symbol=symbol, notification_kind="PREMIUM", notification_ordinal=m.get("daily_notice_no"),
-            signal_id=signal_id, signal_price=m["price"], entry_status=m["execution"]["status"]
-        )
+                telegram_notify(session,f"🚨 AutoTrade {symbol} giriş hatası: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
+
         end_episode(symbol, "PREMIUM", m, score)
         reset_candidate(st)
     finally:
@@ -6958,6 +7053,7 @@ TELEGRAM_DOCUMENT_MAX_BYTES = 50_000_000
 
 
 async def telegram_send_document(session: aiohttp.ClientSession, file_path: str, caption: str = "", chat_id=None) -> bool:
+    session = _telegram_http(session, "files")
     target_chat=chat_id or TELEGRAM_CHAT_ID
     reason=None
     try:
@@ -7564,7 +7660,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
             _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
         tid=_at_insert_trade(signal_id,symbol,"DRY",signal_price,entry_ref,qty,levels,plan,frozen_profile=frozen_profile)
         _at_log_event("DRY_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"entry={entry_ref}; qty={qty}; profile={autotrade_cfg['exit_profile']}")
-        await telegram_send(session, f"🟡 DRY RUN — {symbol}\n{margin:.0f} USDT × {lev}x | giriş ~{fmt_price(entry_ref)}\nStop {fmt_price(levels['stop'])} | TP2 {fmt_price(levels['tp2'])}\nGerçek emir gönderilmedi.", chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        telegram_notify(session, f"🟡 DRY RUN — {symbol}\n{margin:.0f} USDT × {lev}x | giriş ~{fmt_price(entry_ref)}\nStop {fmt_price(levels['stop'])} | TP2 {fmt_price(levels['tp2'])}\nGerçek emir gönderilmedi.", chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
         return
     if mode != "LIVE": return
     if not AUTO_TRADE_LIVE_ALLOWED:
@@ -7590,7 +7686,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     existing=[x for x in positions if x.get("symbol")==symbol and abs(float(x.get("positionAmt",0) or 0))>1e-12]
     if existing:
         _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="MANUAL_OR_EXISTING_POSITION")
-        await telegram_send(session,f"⚠️ AutoTrade {symbol} girişini atladı: Binance'ta bu sembolde zaten açık pozisyon var. Manuel pozisyona dokunulmadı.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        telegram_notify(session,f"⚠️ AutoTrade {symbol} girişini atladı: Binance'ta bu sembolde zaten açık pozisyon var. Manuel pozisyona dokunulmadı.",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
         return
     hedge=bool(cfg.get("dualSidePosition")); position_side="LONG" if hedge else "BOTH"
     # Configure only an empty symbol; manual/open symbols were blocked above.
@@ -7631,7 +7727,7 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
         try: await _at_emergency_close(session,symbol,exec_qty,position_side,signal_id)
         finally:
             _at_close_trade(tid,"EMERGENCY_CLOSE",fill,0,0)
-        await telegram_send(session,f"🚨 {symbol} koruyucu STOP kurulamadı; pozisyon acil market emirle kapatılmaya çalışıldı. Hata: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        telegram_notify(session,f"🚨 {symbol} koruyucu STOP kurulamadı; pozisyon acil market emirle kapatılmaya çalışıldı. Hata: {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
         return
     try:
         profile=frozen_profile
@@ -7656,9 +7752,9 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
                           detail=f"order_id={o2.get('orderId')}; target={levels['tp2']}; qty={exec_qty}")
     except Exception as e:
         _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=f"TP_CREATE_FAILED {e}")
-        await telegram_send(session,f"⚠️ {symbol} pozisyonu açık ve STOP korumalı; TP emri kurulamadı. Manuel kontrol gerekli. {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+        telegram_notify(session,f"⚠️ {symbol} pozisyonu açık ve STOP korumalı; TP emri kurulamadı. Manuel kontrol gerekli. {e}",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
     _at_log_event("LIVE_OPEN",trade_id=tid,signal_id=signal_id,symbol=symbol,detail=f"fill={fill}; qty={exec_qty}; lev={lev}")
-    await telegram_send(session,f"🟢 LIVE AÇILDI — {symbol}\n{margin:.0f} USDT × {lev}x | fill {fmt_price(fill)}\nStop {fmt_price(levels['stop'])} | profil {autotrade_cfg['exit_profile']}\nTrade ID #{tid}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+    telegram_notify(session,f"🟢 LIVE AÇILDI — {symbol}\n{margin:.0f} USDT × {lev}x | fill {fmt_price(fill)}\nStop {fmt_price(levels['stop'])} | profil {autotrade_cfg['exit_profile']}\nTrade ID #{tid}",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
 
 
 def _at_profile_block(tr, reason):
@@ -7869,13 +7965,17 @@ async def position_observer_loop(session):
     observer=PositionObserver(db_connect,binance_signed_request,_observer_send,_po_bot_source,_po_zone,
         POSITION_ROE_MILESTONES,POSITION_ENTRY_CONFIRM_SECONDS,
         ttl=max(30,audit.nonnegative("POSITION_LEVERAGE_CACHE_SECONDS",300)))
-    while not stop_event.is_set():
-        try:
-            if POSITION_OBSERVER_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET:
-                await observer.poll(session)
-        except asyncio.CancelledError: raise
-        except Exception as e: log.warning("Position observer: %s",type(e).__name__)
-        await asyncio.sleep(POSITION_OBSERVER_POLL_SECONDS)
+    try:
+        while not stop_event.is_set():
+            try:
+                if POSITION_OBSERVER_ENABLED and BINANCE_API_KEY and BINANCE_API_SECRET:
+                    await observer.poll(session)
+            except asyncio.CancelledError: raise
+            except Exception as e: log.warning("Position observer: %s",type(e).__name__)
+            await asyncio.sleep(POSITION_OBSERVER_POLL_SECONDS)
+
+    finally:
+        await observer.close()
 
 
 async def _observer_send(session,text):
@@ -7919,7 +8019,7 @@ async def autotrade_reconcile_loop(session):
                     except ValueError:
                         if tr.get("last_error") != premium_lock.UNKNOWN:
                             _at_profile_block(tr, premium_lock.UNKNOWN)
-                            await telegram_send(session, f"⚠️ {sym}: {premium_lock.UNKNOWN}", chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            telegram_notify(session, f"⚠️ {sym}: {premium_lock.UNKNOWN}", chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                         continue
                     if managed_profile == premium_lock.PROFILE:
                         await _at_step_recovery_check(session, tr, positions)
@@ -7955,7 +8055,7 @@ async def autotrade_reconcile_loop(session):
                             realized += float(tr.get("partial_realized_pnl") or 0); comm += float(tr.get("commission") or 0)
                         await _at_cancel_trade_algos(session,tr)
                         daily=_at_close_trade(tid,reason,exit_px,realized,comm)
-                        await telegram_send(session,f"{'🛑' if reason=='STOP' else '✅'} AutoTrade kapandı — {sym} | {reason}\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT | stop serisi {daily['consecutive_stops']}/{autotrade_cfg['max_consecutive_stops']}",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                        telegram_notify(session,f"{'🛑' if reason=='STOP' else '✅'} AutoTrade kapandı — {sym} | {reason}\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT | stop serisi {daily['consecutive_stops']}/{autotrade_cfg['max_consecutive_stops']}",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                         continue
 
                     # New CURRENT_TP2 path: the GTC limit has been resting in the book since
@@ -8008,7 +8108,7 @@ async def autotrade_reconcile_loop(session):
                                 realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
                                 await _at_cancel_trade_algos(session,tr)
                                 daily=_at_close_trade(tid,"TP2",exit_px,realized,comm)
-                                await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                telegram_notify(session,f"✅ AutoTrade kapandı — {sym} | TP2\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                                 continue
                             await _at_emergency_close(session,sym,remaining,ps,int(tr.get("signal_id") or 0))
                             _at_log_event("TP2_RETRACE_FALLBACK",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
@@ -8016,7 +8116,7 @@ async def autotrade_reconcile_loop(session):
                             realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
                             await _at_cancel_trade_algos(session,tr)
                             daily=_at_close_trade(tid,"TP2_RETRACE_FALLBACK",exit_px,realized,comm)
-                            await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | TP2 RETRACE/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            telegram_notify(session,f"✅ AutoTrade kapandı — {sym} | TP2 RETRACE/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                             continue
                         if status in ("CANCELED","EXPIRED","REJECTED") and actual>1e-12:
                             # Never run a live position without either its resting TP or an alert.
@@ -8025,7 +8125,7 @@ async def autotrade_reconcile_loop(session):
                                 _at_update_trade(tid,status="PROTECTIVE_PARTIAL",last_error=err)
                                 _at_log_event("TP2_LIMIT_MISSING",trade_id=tid,signal_id=tr.get("signal_id"),symbol=sym,
                                               detail=f"order_id={tr.get('tp2_order_id')}; status={status}; position={actual}")
-                                await telegram_send(session,f"⚠️ {sym} TP2 limit emri {status}. STOP hâlâ aktif; pozisyon için manuel kontrol gerekli.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                telegram_notify(session,f"⚠️ {sym} TP2 limit emri {status}. STOP hâlâ aktif; pozisyon için manuel kontrol gerekli.",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                             continue
                         if status=="":
                             # Query uncertainty is fail-closed: keep protection and never guess.
@@ -8063,7 +8163,7 @@ async def autotrade_reconcile_loop(session):
                                     realized,comm,exit_px=await _at_window_net_pnl(session,sym,int(tr.get("opened_ts_ms") or 0))
                                     await _at_cancel_trade_algos(session,tr)
                                     daily=_at_close_trade(tid,"TP2_LIMIT_FALLBACK",exit_px,realized,comm)
-                                    await telegram_send(session,f"✅ AutoTrade kapandı — {sym} | LEGACY TP2 LIMIT/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                                    telegram_notify(session,f"✅ AutoTrade kapandı — {sym} | LEGACY TP2 LIMIT/FALLBACK\nNet P/L: {realized-comm:+.2f} USDT\nGünlük: {daily['realized_net_pnl']:+.2f} USDT",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
                                     continue
                                 if status in ("NEW","PARTIALLY_FILLED",""):
                                     continue
@@ -8079,7 +8179,7 @@ async def autotrade_reconcile_loop(session):
                             await _at_cancel_trade_algos(session,tr)
                             _at_update_trade(tid,status="MANUAL_INTERVENTION",manual_intervention=1,expected_qty=actual,last_error=f"qty expected={expected} actual={actual}")
                             _at_log_event("MANUAL_INTERVENTION",trade_id=tid,symbol=sym,detail=f"expected={expected}; actual={actual}")
-                            await telegram_send(session,f"🚨 MANUAL INTERVENTION — {sym}\nPozisyon miktarı bot kaydından farklı. Bot kendi TP/SL emirlerini iptal etti ve bu birleşmiş pozisyonu artık yönetmeyecek. Binance'tan manuel yönetmen gerekiyor.",chat_id=TELEGRAM_ADMIN_CHAT_ID)
+                            telegram_notify(session,f"🚨 MANUAL INTERVENTION — {sym}\nPozisyon miktarı bot kaydından farklı. Bot kendi TP/SL emirlerini iptal etti ve bu birleşmiş pozisyonu artık yönetmeyecek. Binance'tan manuel yönetmen gerekiyor.",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=tr.get("signal_id"), symbol=sym)
             await asyncio.sleep(AUTO_TRADE_RECONCILE_SECONDS)
         except asyncio.CancelledError:
             raise
@@ -8345,7 +8445,7 @@ async def telegram_command_loop(session):
             params = {"timeout": 20, "offset": telegram_offset, "allowed_updates": json.dumps(["message","chat_join_request","callback_query"])}
             # Keep a wide socket-read margin over Telegram's 20s long poll.
             # Brief event-loop pressure must not turn a healthy poll into a false timeout.
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=50, connect=6, sock_read=45)) as r:
+            async with _telegram_http(session, "poll").get(url, params=params, timeout=aiohttp.ClientTimeout(total=50, connect=6, sock_read=45)) as r:
                 raw = await r.text()
                 if r.status != 200:
                     log.warning("Telegram getUpdates HTTP %s body=%s", r.status, raw[:1000])
@@ -9096,7 +9196,7 @@ async def telegram_command_loop(session):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log.warning("Telegram command polling exception type=%s repr=%r", type(e).__name__, e)
+            log.warning("Telegram command polling exception type=%s detail=%s", type(e).__name__, _telegram_safe_error(e))
             await asyncio.sleep(3)
 
 
@@ -9267,11 +9367,13 @@ def _x_market(symbol):
 
 
 async def _x_photo(session,url):
+    session = _telegram_http(session, "files")
     result=await telegram_api_call(session,"sendPhoto",{"chat_id":TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID,"photo":url})
     return bool(result and result.get("ok"))
 
 
 async def main():
+    global telegram_http_sessions, telegram_dispatcher
     global early_v2
     global measurements,x_watcher,alt_engine,export_worker
     global symbols
@@ -9292,7 +9394,7 @@ async def main():
     early_v2 = early_v2_adapter.Integration(globals())
     timeout = aiohttp.ClientTimeout(total=30)
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session, TelegramSessions() as telegram_http_sessions, NotificationDispatch(os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "telegram_notifications.sqlite3"), _telegram_dispatch_send) as telegram_dispatcher:
         early_exit_task = asyncio.create_task(early_exit_export_once())
         symbols = await load_symbols(session)
         for s in symbols:
