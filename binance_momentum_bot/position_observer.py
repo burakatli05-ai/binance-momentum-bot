@@ -80,6 +80,9 @@ class PositionObserver:
         self.stage = "idle"
         self.milestones,self.confirm_s = milestones,confirm_s
         self.cache = LeverageCache(ttl)
+        self._delivery_task = None
+        self._delivery_lock = asyncio.Lock()
+        self._closing = False
 
     async def request(self, session, method, path):
         self.stage = path.rsplit('/', 1)[-1]
@@ -87,8 +90,8 @@ class PositionObserver:
 
     async def safe_delivery(self, session):
         try:
-            self.stage = 'delivery'
-            await self.deliver_pending(session)
+            async with self._delivery_lock:
+                await self.deliver_pending(session)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -102,6 +105,24 @@ class PositionObserver:
         except Exception as error:
             log.warning('Position observer poll failed at %s (%s); retry next poll', self.stage, type(error).__name__)
             return False
+        finally:
+            self.kick_delivery(session)
+
+    def kick_delivery(self, session):
+        # At most one owned worker; persisted event status remains authoritative.
+        if not self._closing and (self._delivery_task is None or self._delivery_task.done()):
+            self._delivery_task = asyncio.create_task(self.safe_delivery(session), name="position-observer-delivery")
+
+    async def close(self):
+        self._closing = True
+        task, self._delivery_task = self._delivery_task, None
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     def event(self,c,state,event,mark,roe,detail=None,notify=False):
         now = int(time.time()*1000)
@@ -116,7 +137,6 @@ class PositionObserver:
         return result.lastrowid
 
     async def _poll(self,session):
-        await self.safe_delivery(session)
         positions = await self.request(session,"GET","/fapi/v3/positionRisk")
         if not isinstance(positions,list):
             raise ValueError("positionRisk is not an array")
@@ -239,7 +259,6 @@ class PositionObserver:
 
         finally:
             c.close()
-        await self.safe_delivery(session)
         return True
 
     async def deliver_pending(self, session):
@@ -275,7 +294,7 @@ class PositionObserver:
                 ok = False
             c = self.connect()
             try:
-                c.execute("UPDATE position_observer_events SET notification_delivery=?,delivery_time_ms=? WHERE id=?",("DELIVERED" if ok else "FAILED",int(time.time()*1000),e["id"])); c.commit()
+                c.execute("UPDATE position_observer_events SET notification_delivery=?,delivery_time_ms=? WHERE id=?",("DELIVERED" if ok else "FAILED",int(time.time()*1000) if ok else None,e["id"])); c.commit()
             finally:
                 c.close()
 
