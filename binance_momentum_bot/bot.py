@@ -23,6 +23,8 @@ from typing import Deque, Dict, Optional, List, Tuple, Set
 import aiohttp
 from telegram_transport import TelegramSessions, redact_telegram_error, valid_message_ack
 from telegram_dispatch import NotificationDispatch, Submission, DeliveryResult
+from notification_policy import early_signal_notifications_enabled
+from runtime_io import loop_health
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -4926,6 +4928,9 @@ async def telegram_send(session: aiohttp.ClientSession, text: str, symbol: Optio
                         signal_id: Optional[int] = None, signal_price: Optional[float] = None,
                         entry_status: Optional[str] = None, chat_id: Optional[str] = None,
                         reply_markup: Optional[dict] = None, track_delivery: bool = True) -> bool:
+    if notification_kind == "EARLY" and not early_signal_notifications_enabled():
+        log.info("TG_SUPPRESSED kind=EARLY symbol=%s reason=USER_POLICY delivered=0", symbol)
+        return False
     # Deadline includes semaphore wait, unlike the old per-request timeout.
     # Synchronous event-loop blockage can still delay timeout handling.
     started = time.monotonic()
@@ -4961,6 +4966,9 @@ async def _telegram_dispatch_send(text, metadata):
 
 def telegram_notify(session, text, *, signal_id=None, symbol=None, notification_kind="EXECUTION", chat_id=None, **kwargs):
     """Durable notification admission only; no Telegram or exchange I/O."""
+    if notification_kind == "EARLY" and not early_signal_notifications_enabled():
+        log.info("TG_SUPPRESSED kind=EARLY symbol=%s reason=USER_POLICY delivered=0", symbol)
+        return Submission(0, "SUPPRESSED_BY_POLICY")
     if telegram_dispatcher is None:
         log.error("TG_ADMISSION kind=%s signal=%s outcome=NOT_ADMITTED_NO_DISPATCHER", notification_kind, signal_id)
         return Submission(0, "NOT_ADMITTED_NO_DISPATCHER")
@@ -5003,6 +5011,9 @@ async def telegram_public_alert(session: aiohttp.ClientSession, text: str, symbo
     delivery cannot overwrite execution measurements. Admin commands/research messages do not use
     this wrapper and therefore remain private.
     """
+    if notification_kind == "EARLY" and not early_signal_notifications_enabled():
+        log.info("TG_SUPPRESSED kind=EARLY symbol=%s reason=USER_POLICY delivered=0", symbol)
+        return False
     primary_ok = await telegram_send(
         session, text, symbol=symbol, notification_kind=notification_kind,
         notification_ordinal=notification_ordinal, signal_id=signal_id,
@@ -6133,7 +6144,7 @@ async def evaluate(session, symbol: str):
                     )
                     _arm_stage_entry(symbol, "EARLY", m, st.episode_id or 0, created_ts=now, decision="PUBLIC_EARLY_2OF3")
                     if early_v2:
-                        early_v2.arm(st.active_radar_id, symbol, m, score)
+                        await early_v2.arm_async(st.active_radar_id, symbol, m, score)
                     await telegram_public_alert(session, build_early_message(m, score, st), symbol=symbol,
                                                 notification_kind="EARLY", notification_ordinal=m.get("daily_notice_no"), signal_price=m.get("price"))
         else:
@@ -6513,7 +6524,7 @@ async def aggtrade_chunk_ws(session, chunk: List[str], idx: int):
                                           st.bid_price, st.ask_price, st.last_book_event_ms, st.last_book_receive_ms)
                     autotrade_on_tick(sym, price, ts / 1000.0)
                     if early_v2:
-                        early_v2.tick(sym, price, ts, recv_ms, d.get("a"))
+                        await early_v2.tick_async(sym, price, ts, recv_ms, d.get("a"))
                     if measurements:
                         try:
                             st_audit=states[sym]
@@ -8536,7 +8547,7 @@ async def telegram_command_loop(session):
                         f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} HARD | {int(autotrade_cfg['max_consecutive_stops'])} stop→{int(autotrade_cfg['stop_cooldown_minutes'])}dk cooldown | "
                         f"{'🔴 LIVE: AKTİF' if str(autotrade_cfg.get('mode','OFF')).upper()=='LIVE' else ('🔓 LIVE: HAZIR / ONAY GEREKLİ' if (AUTO_TRADE_LIVE_ALLOWED and BINANCE_API_KEY and BINANCE_API_SECRET and TELEGRAM_ADMIN_USER_ID) else ('🔒 LIVE: KİLİTLİ / API-ADMIN EKSİK' if AUTO_TRADE_LIVE_ALLOWED else '🔒 LIVE: KİLİTLİ / İZİN YOK'))}\n"
                         f"👥 Kanal katılım onayı: {'açık' if JOIN_REQUEST_APPROVAL_ENABLED else 'kapalı/kanal ID yok'}\n"
-                        f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Early + Premium + Continuation\n"
+                        f"📣 Abone kanal yayını: {'açık' if TELEGRAM_BROADCAST_ENABLED else 'kapalı'} | Premium + Continuation | EARLY: {'ACIK' if early_signal_notifications_enabled() else 'KAPALI'}\n"
                         f"🏆 Gainers: arka plan kayıt AÇIK | Telegram push: {'açık' if GAINERS_NOTIFY else 'kapalı'} | TOP {GAINERS_TOP_N}"
                     )
                 elif text == "/top":
@@ -9404,6 +9415,8 @@ async def main():
         log.info("Bootstrapping %d closed 1m candles per symbol", BOOTSTRAP_CANDLES)
         await bootstrap_all(session)
         log.info("Bootstrap complete")
+        log.info("NOTIFICATION_POLICY version=R4 early_signal_telegram=%s premium_telegram=UNCHANGED execution_telegram=UNCHANGED research_recording=UNCHANGED",
+                 int(early_signal_notifications_enabled()))
         recover_pending_tracking()
 
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -9414,7 +9427,7 @@ async def main():
                 f"💵 Min 24s hacim: {fmt_money(MIN_24H_QUOTE_VOLUME)} USDT\n"
                 f"⭐ Sessiz aday skoru: {EARLY_SCORE}+\n"
                 f"🎯 Teyit: {CONFIRM_REQUIRED} × {CONFIRM_INTERVAL_SECONDS} sn | premium momentum {PREMIUM_MIN_MOMENTUM_SCORE}+ | giriş {PREMIUM_ENTRY_MIN_SCORE}+ | yükseliş {PREMIUM_RISE_MIN_SCORE}+\n"
-                f"👀 Erken radar: 2/3 seçici Telegram; production eşikleri değişmedi\n"
+                f"EARLY sinyal Telegram: {'ACIK' if early_signal_notifications_enabled() else 'KAPALI'} | radar kaydi ve sinyal esikleri degismedi\n"
                 f"🧪 Shadow Exit + first-wave/session-peak + post-shadow outcome: AÇIK; işlem sinyali değil\n"
                 f"🔬 Second-wave / Pre-Breakout / reject outcome araştırması: {'AÇIK' if RESEARCH_ENABLED else 'KAPALI'}\n"
                 f"🧭 15sn breakout acceptance + 60sn Progress + stop sonrası reclaim + TP2 runner: SHADOW\n"
@@ -9425,7 +9438,7 @@ async def main():
                 f"⚡ Ignition V2: SHADOW | price acceleration + BTC-relative + flow efficiency odaklı\n"
                 f"💸 Funding/mark stream: AÇIK | OI 5m + OI ivmesi: kayıt AÇIK\n"
                 f"👥 Join-request onayı: {'AÇIK' if JOIN_REQUEST_APPROVAL_ENABLED else 'KAPALI (TELEGRAM_APPROVAL_CHAT_ID yok)'}\n"
-                f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Early + Premium + Continuation\n"
+                f"📣 Abone kanal yayını: {'AÇIK' if TELEGRAM_BROADCAST_ENABLED else 'KAPALI'} | Premium + Continuation | EARLY: {'ACIK' if early_signal_notifications_enabled() else 'KAPALI'}\n"
                 f"🏆 Gainers: arka plan rank-velocity/outcome AÇIK | Telegram push: {'AÇIK' if GAINERS_NOTIFY else 'KAPALI'}\n"
                 f"👁 Pozisyon gözlemcisi: tüm gerçek Futures pozisyonları | entry-cross + ROE %5/%10/%20\n"
                 f"🤖 AutoTrade: {autotrade_cfg['mode']} | {float(autotrade_cfg['trade_margin_usdt']):.0f} USDT × {int(autotrade_cfg['leverage'])}x | max {int(autotrade_cfg['max_open_positions'])} | günlük %{float(autotrade_cfg['daily_max_loss_pct']):g} | 4-stop koruması {int(autotrade_cfg['max_consecutive_stops'])} | LIVE varsayılan KAPALI\n\n"
@@ -9441,7 +9454,11 @@ async def main():
         tasks.extend((alt_shadow_loop(),research_export_loop(),quality_shadow_loop()))
         tasks.append(early_exit_task)
         tasks.append(early_v2.run(session))
-        await asyncio.gather(*tasks)
+        tasks.append(loop_health(stop_event))
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            await early_v2.close_io()
 
 
 

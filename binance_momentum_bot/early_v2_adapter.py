@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from early_autotrader_v2 import Pilot
 from execution_v2 import Blocked, Uncertain, positive, quantize
 import step_lock_shadow
+from runtime_io import SerialIO
+from notification_policy import early_signal_notifications_enabled
 
 
 def flag(name):
@@ -312,6 +314,7 @@ class Integration:
             except Blocked as exc:
                 self.pilot.event('BOOT_DRY_BLOCKED', {'reason': str(exc)})
                 logging.getLogger(__name__).warning('EarlyV2 auto-dry blocked: %s', exc)
+        self._shadow_io = SerialIO("legacy-shadow-io")
         self.queue = asyncio.Queue(maxsize=20)
         self.notify_queue = asyncio.Queue(maxsize=100)
         self._notified_open = set()
@@ -343,9 +346,38 @@ class Integration:
                 daemon=True,
             ).start()
 
-    def arm(self, radar_id, symbol, m, base_score):
+    async def arm_async(self, radar_id, symbol, m, base_score):
         decision_ms = self.pilot.clock()
+        frozen = dict(m)
+        state = self.b.get('states', {}).get(symbol)
+        episode_id = getattr(state, 'episode_id', None) if state is not None else None
         if self.step_lock:
+            try:
+                await self._shadow_io.call(self.step_lock.arm, radar_id, symbol,
+                                           float(frozen['price']), decision_ms, episode_id)
+            except Exception as exc:
+                self.pilot.event('STEP_LOCK_ARM_FAILED', {'signal_id': str(radar_id),
+                    'symbol': symbol, 'reason': type(exc).__name__})
+        return self.arm(radar_id, symbol, frozen, base_score,
+                        _skip_step_shadow=True, _decision_ms=decision_ms)
+
+    async def tick_async(self, symbol, price, event_ms, received_ms, trade_id):
+        if self.step_lock:
+            try:
+                await self._shadow_io.call(self.step_lock.tick, symbol, float(price),
+                                           int(event_ms), int(received_ms), int(trade_id))
+            except Exception as exc:
+                self.pilot.event('STEP_LOCK_TICK_FAILED', {'symbol': symbol,
+                    'reason': type(exc).__name__})
+        # Financial pilot state remains on its original event-loop thread.
+        return self.tick(symbol, price, event_ms, received_ms, trade_id, _skip_step_shadow=True)
+
+    async def close_io(self):
+        await self._shadow_io.close()
+
+    def arm(self, radar_id, symbol, m, base_score, *, _skip_step_shadow=False, _decision_ms=None):
+        decision_ms = self.pilot.clock() if _decision_ms is None else _decision_ms
+        if self.step_lock and not _skip_step_shadow:
             try:
                 state = self.b.get('states', {}).get(symbol)
                 episode_id = getattr(state, 'episode_id', None) if state is not None else None
@@ -415,8 +447,8 @@ class Integration:
                 return
             return await self.b['autotrade_handle_premium'](session, signal_id, symbol, m, plan)
 
-    def tick(self, symbol, price, event_ms, received_ms, trade_id):
-        if self.step_lock:
+    def tick(self, symbol, price, event_ms, received_ms, trade_id, *, _skip_step_shadow=False):
+        if self.step_lock and not _skip_step_shadow:
             try:
                 self.step_lock.tick(symbol, float(price), int(event_ms), int(received_ms), int(trade_id))
             except Exception as exc:
@@ -447,6 +479,9 @@ class Integration:
             self.pilot.kill('TICK:' + type(exc).__name__)
 
     def _queue_notify(self, kind, text):
+        if kind == 'selector' and not early_signal_notifications_enabled():
+            logging.getLogger(__name__).info('TG_SUPPRESSED kind=EARLY_V2_SELECTOR reason=USER_POLICY delivered=0')
+            return
         if not flag('EARLY_V2_NOTIFY'):
             return
         try:
@@ -690,7 +725,7 @@ class Integration:
                     "EARLY_HISTORICAL_PROFIT_REVIEW_FAILED %s", type(exc).__name__
                 )
         while not self.b['stop_event'].is_set():
-            self._log_step_lock_report()
+            await asyncio.to_thread(self._log_step_lock_report)
             try:
                 await self.pilot.reconcile(exchange)
                 try:
@@ -837,7 +872,7 @@ class Integration:
                 return True
             parts = raw.split()[1:]
             include_recent = bool(parts and parts[0].lower() in ('recent','son','detay'))
-            report = self.step_lock.summary(notional_usdt=2000.0, recent_limit=10 if include_recent else 0)
+            report = await asyncio.to_thread(self.step_lock.summary, notional_usdt=2000.0, recent_limit=10 if include_recent else 0)
             await self.b['telegram_send'](
                 session, self.step_lock_report_text(report, include_recent=include_recent), chat_id=chat
             )
