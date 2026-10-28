@@ -1,0 +1,81 @@
+name: Telegram R4 acceptance and clean release
+on:
+  push:
+    branches: ['fix/telegram-r4-acceptance-20261028']
+    paths: ['maintenance_r4/**', 'binance_momentum_bot/runtime_io.py', 'binance_momentum_bot/notification_policy.py', '.github/workflows/telegram-r4-acceptance.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BASE_COMMIT: 95f60d9cdb2b2c80fd95121a000329fb5f3510d4
+      PYTHON_DOTENV_DISABLED: '1'
+      TELEGRAM_BOT_TOKEN: ''
+      BINANCE_API_KEY: ''
+      BINANCE_API_SECRET: ''
+      AUTO_TRADE_LIVE_ALLOWED: '0'
+      EARLY_V2_LIVE_ALLOWED: '0'
+      EARLY_V2_BOOT_DRY: '0'
+      EARLY_V2_AUTO_DRY: '0'
+      STEP_LOCK_SHADOW_ENABLED: '0'
+      RESEARCH_EXPORT_ENABLED: '0'
+      EARLY_SIGNAL_TELEGRAM_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install exact application dependency constraints
+        run: python -m pip install -r binance_momentum_bot/requirements.txt
+      - name: Apply hash-guarded tested patch
+        run: |
+          mkdir -p /tmp/r4-baseline r4-evidence
+          git archive "$BASE_COMMIT" binance_momentum_bot | tar -x -C /tmp/r4-baseline
+          python maintenance_r4/apply.py | tee r4-evidence/source-hashes.txt
+          python -m py_compile binance_momentum_bot/bot.py binance_momentum_bot/early_v2_adapter.py binance_momentum_bot/runtime_io.py binance_momentum_bot/notification_policy.py
+      - name: R4 real-module synthetic acceptance, network forbidden
+        run: |
+          R4_APP="$PWD/binance_momentum_bot" R4_BASE=/tmp/r4-baseline/binance_momentum_bot python maintenance_r4/test_r4.py 2>&1 | tee r4-evidence/r4-tests.txt
+      - name: Affected safety and shadow regressions, network forbidden
+        run: |
+          python - <<'PY' 2>&1 | tee r4-evidence/regressions.txt
+          import sys, unittest
+          from unittest.mock import patch, MagicMock
+          sys.path[:0]=['binance_momentum_bot','tests']
+          names=['test_step_lock_shadow','test_early_fallback_tp','test_observer_open','test_tp_limit_execution']
+          with patch('socket.socket.connect',side_effect=AssertionError('NETWORK_FORBIDDEN')),patch('subprocess.Popen',return_value=MagicMock()):
+              result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+          if not result.wasSuccessful(): raise SystemExit(1)
+          PY
+      - name: Create release containing only the four tested runtime files
+        run: |
+          export GIT_INDEX_FILE=/tmp/r4-clean-release.index
+          git read-tree "$BASE_COMMIT"
+          git add binance_momentum_bot/bot.py binance_momentum_bot/early_v2_adapter.py binance_momentum_bot/runtime_io.py binance_momentum_bot/notification_policy.py
+          git diff --cached --name-only "$BASE_COMMIT" > r4-evidence/changed-files.txt
+          python - <<'PY'
+          from pathlib import Path
+          expected={'binance_momentum_bot/'+x for x in ['bot.py','early_v2_adapter.py','runtime_io.py','notification_policy.py']}
+          assert set(Path('r4-evidence/changed-files.txt').read_text().splitlines())==expected
+          PY
+          tree=$(git write-tree)
+          git config user.name 'Momentum Bot Maintenance'
+          git config user.email 'maintenance@users.noreply.github.com'
+          commit=$(printf '%s\n' 'fix(telegram): mute EARLY signal delivery and isolate ordered shadow I/O' | git commit-tree "$tree" -p "$BASE_COMMIT")
+          git push origin "$commit:refs/heads/fix/telegram-reliability-r4-release-20261028"
+          printf 'R4_RELEASE_COMMIT=%s\n' "$commit" | tee r4-evidence/release.txt
+          git ls-tree "$commit" binance_momentum_bot/bot.py binance_momentum_bot/early_v2_adapter.py binance_momentum_bot/runtime_io.py binance_momentum_bot/notification_policy.py | tee r4-evidence/release-blobs.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telegram-r4-acceptance
+          retention-days: 7
+          path: |
+            r4-evidence/
+            maintenance_r4/
+            binance_momentum_bot/runtime_io.py
+            binance_momentum_bot/notification_policy.py
