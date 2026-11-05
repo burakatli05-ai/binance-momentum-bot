@@ -321,7 +321,7 @@ class PilotTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_contains_all_requested_controls(self):
         adapter=Integration.__new__(Integration);adapter.pilot=self.p
         labels=[b['text'] for row in adapter.markup()['inline_keyboard'] for b in row]
-        self.assertEqual(len(labels),12);self.assertIn('Kill Switch',labels);self.assertIn('Min V2 Score',labels)
+        self.assertEqual(len(labels),13);self.assertIn('Bildirimler',labels);self.assertIn('Kill Switch',labels);self.assertIn('Min V2 Score',labels)
     async def test_unauthorized_telegram_cannot_change_state(self):
         adapter=Integration.__new__(Integration);adapter.pilot=self.p
         adapter.b={'_at_admin_allowed':lambda *a,**k:False,'telegram_send':AsyncMock()}

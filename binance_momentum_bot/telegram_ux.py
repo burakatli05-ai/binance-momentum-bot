@@ -13,17 +13,17 @@ from position_observer import LeverageCache, roe_values
 from telegram_cards import ownership, number, pages, timestamp
 
 MENU = (
-    ("⚡ Early AutoTrader V2", "/earlyv2"), ("🤖 Premium AutoTrader", "/autotrade"),
-    ('📊 Durum', '/status'), ('📈 Açık Pozisyonlar', '/positions'),
-    ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
-    ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),
-    ('🧪 ALT Shadow', '/altstats'), ('⚙️ Ayarlar', '/settings'),
-    ('❓ Yardım', '/help'),
+    ('\u26a1 Early Terminali', '/earlyv2'), ('\U0001f916 Premium AutoTrader', '/autotrade'),
+    ('\U0001f4ca Durum', '/status'), ('\U0001f4c8 A\u00e7\u0131k Pozisyonlar', '/positions'),
+    ('\U0001f4cb Bug\u00fcn\u00fcn \u0130\u015flemleri', '/daytrades'), ('\U0001f9fe \u0130\u015flem Listesi', '/daytradeslist'),
+    ('\U0001f4c5 Bug\u00fcn A\u00e7\u0131lanlar', '/todaypositions'), ('\U0001f525 Is\u0131nan Coinler', '/top'),
+    ('\U0001f9ea ALT Shadow', '/altstats'), ('\u2699\ufe0f Ayarlar', '/settings'),
+    ('\u2753 Yard\u0131m', '/help'),
 )
 ALIASES = {label.casefold(): command for label, command in MENU}
 ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu',
                 '/daytrade': '/daytrades', '/todayopened': '/todaypositions',
-                '/todayposition': '/todaypositions'})
+                '/todayposition': '/todaypositions', '/earlyterminal': '/earlyv2'})
 leverage_cache = LeverageCache()
 pending_modes = {}
 

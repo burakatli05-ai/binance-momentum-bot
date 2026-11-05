@@ -15,7 +15,8 @@ from early_autotrader_v2 import Pilot
 from execution_v2 import Blocked, Uncertain, positive, quantize
 import step_lock_shadow
 from runtime_io import SerialIO
-from notification_policy import early_signal_notifications_enabled
+from notification_policy import (early_signal_notifications_enabled,
+                                 set_early_signal_notifications_enabled)
 
 
 def flag(name):
@@ -821,20 +822,39 @@ class Integration:
     def status(self):
         p = self.pilot
         selector = p.selector_report(recent_limit=0)
-        return (f'⚡ Early AutoTrader V2: {p.mode} | {p.cfg.margin:g} USDT × {p.cfg.leverage}x | '
-            f'skor ≥{p.cfg.min_score:g} | max {p.cfg.max_positions} | Profit Lock {p.profit_mode}\n'
-            f'V2 doğrulama: {"ON" if p.score_validated else "YOK — yalnız DRY"} | '
-            f'Kill: {"AKTİF" if p.halted else "kapalı"} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\n'
-            f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
+        notifications = early_signal_notifications_enabled()
+        nominal = float(p.cfg.margin) * int(p.cfg.leverage)
+        api_ready = bool(self.b.get('BINANCE_API_KEY') and self.b.get('BINANCE_API_SECRET'))
+        live_ready = bool(p.live_allowed and p.score_validated and api_ready)
+        state = '\U0001f7e2 A\u00c7IK' if notifications else '\u26aa KAPALI'
+        execution = 'A\u00c7IK' if p.cfg.execution else 'KAPALI'
+        score_gate = 'A\u00c7IK' if p.cfg.score_gate else 'KAPALI'
+        readiness = 'HAZIR' if live_ready else 'K\u0130L\u0130TL\u0130'
+        kill = 'AKT\u0130F' if p.halted else 'kapal\u0131'
+        return (
+            f'\u26a1 EARLY TERM\u0130NAL\u0130\n\n'
+            f'Bildirimler: {state}\n'
+            f'\u0130\u015flem modu: {p.mode}\n'
+            f'Anapara (teminat): {p.cfg.margin:g} USDT\n'
+            f'Kald\u0131ra\u00e7: {p.cfg.leverage}x\n'
+            f'Nominal pozisyon: yakla\u015f\u0131k {nominal:g} USDT\n\n'
+            f'Kaynak: Public Early + mevcut Early V2 se\u00e7ici/g\u00fcvenlik kap\u0131lar\u0131\n'
+            f'Min V2 skor: {p.cfg.min_score:g} | max pozisyon: {p.cfg.max_positions}\n'
+            f'G\u00fcnl\u00fck giri\u015f: {p.cfg.daily_trades} | zarar rezervi: {p.cfg.daily_loss:g} USDT | cooldown: {p.cfg.cooldown_s} sn\n'
+            f'Execution V2: {execution} | score gate: {score_gate}\n'
+            f'LIVE yetkisi/do\u011frulamas\u0131: {readiness}\n'
+            f'Kill: {kill} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\n'
+            f'Selector shadow: {selector["qualified"]}/{selector["total"]} se\u00e7ildi | '
             f'60dk olgun: {selector["qualified_stats"]["mature60"]}\n'
-            f'Boot DRY: {"ON" if (flag("EARLY_V2_BOOT_DRY") or flag("EARLY_V2_AUTO_DRY")) else "OFF"} | '
-            f'Bildirim: {"ON" if flag("EARLY_V2_NOTIFY") else "OFF"} | '
-            f'Profit LIVE geçişi: {"bekliyor" if p.profit_live_pending else "yok"}\n')
+            f'Profit Lock: {p.profit_mode}\n\n'
+            'LIVE ge\u00e7i\u015fi ikinci onay gerektirir. Ayarlar yaln\u0131z OFF modunda de\u011fi\u015ftirilir.'
+        )
 
     def markup(self):
-        buttons = [('Mod','mode'),('Tutar','margin'),('Kaldıraç','leverage'),('Min V2 Score','min_score'),
-            ('Max Pozisyon','max_positions'),('Risk Ayarları','risk'),('Execution V2','execution'),
-            ('Profit Lock','profit'),('Pozisyonlar','positions'),('Günlük Rapor','report'),('Kill Switch','kill'),('Fallback TP','fallback_tp_pct')]
+        buttons = [('Bildirimler','notify'),('Mod','mode'),('Anapara','margin'),('Kald\u0131ra\u00e7','leverage'),
+            ('Min V2 Score','min_score'),('Max Pozisyon','max_positions'),('Risk Ayarlar\u0131','risk'),
+            ('Execution V2','execution'),('Profit Lock','profit'),('Pozisyonlar','positions'),
+            ('G\u00fcnl\u00fck Rapor','report'),('Kill Switch','kill'),('Fallback TP','fallback_tp_pct')]
         return {'inline_keyboard': [[{'text':label, 'callback_data':'ev2:'+action} for label,action in buttons[i:i+2]]
                                     for i in range(0,len(buttons),2)]}
 
@@ -902,13 +922,17 @@ class Integration:
             elif cmd == 'set' and len(parts) == 3:
                 p.configure(parts[1], json.loads(parts[2]))
             elif cmd in ('margin','leverage','min_score','max_positions','fallback_tp_pct'):
-                choices = dict(margin=(5,10,25,50,100), leverage=(1,2,3,5), min_score=(85,90,95,98),
+                choices = dict(margin=(5,10,25,50,100,150,200), leverage=(1,2,3,5,7,10), min_score=(85,90,95,98),
                     max_positions=(1,2,3), fallback_tp_pct=(.3,.5,.8,1,1.5,2,3))[cmd]
                 message = f'{cmd}: {getattr(p.cfg,cmd)}\nDeğiştir: /earlyv2 set {cmd} SAYI\nAyar değişimi için önce OFF.'
                 await self.show(session, chat, message, {'inline_keyboard': [
                     [{'text':str(value), 'callback_data':f'ev2:set:{cmd}:{value}'} for value in choices],
                     [{'text':'Geri', 'callback_data':'ev2:menu'}]]})
                 return True
+            elif cmd == 'notify':
+                enabled = not early_signal_notifications_enabled()
+                set_early_signal_notifications_enabled(enabled)
+                message = 'Early bildirimleri a\u00e7\u0131ld\u0131.' if enabled else 'Early bildirimleri kapat\u0131ld\u0131.'
             elif cmd == 'risk':
                 message = (f'Günlük en fazla {p.cfg.daily_trades} giriş denemesi; zarar rezervi {p.cfg.daily_loss:g} USDT; '
                     f'cooldown {p.cfg.cooldown_s} sn.\n/earlyv2 set daily_trades 3\n/earlyv2 set daily_loss 1\n'
