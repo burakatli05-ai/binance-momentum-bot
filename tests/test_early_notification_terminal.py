@@ -16,7 +16,7 @@ class EarlyNotificationTerminalTests(unittest.TestCase):
         self.old_default = os.environ.get("EARLY_SIGNAL_TELEGRAM_ENABLED")
         os.environ["EARLY_NOTIFICATION_STATE_PATH"] = str(self.state_path)
         os.environ["EARLY_SIGNAL_TELEGRAM_ENABLED"] = "0"
-        from binance_momentum_bot import notification_policy
+        import notification_policy
         self.policy = importlib.reload(notification_policy)
 
     def tearDown(self):
