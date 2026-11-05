@@ -6,14 +6,14 @@
     "handle_autotrade_callback",
     "telegram_command_loop"
   ],
-  "protected_bot_ast": "f914273bf9924ac227f36cc2df91580b4bb20ed92d824db14fcfa99d229e7c3d",
+  "protected_bot_ast": "79f088f747f0c85f915d4d447b637dd1758dca340e1331b8c8e1eff112f0b4d1",
   "files": {
     "binance_momentum_bot/.env.example": "40b8284d36bfb3dd8a1e320d7b16f25f3b2bd026d230a3f8cf4e22ea3739694c",
     "binance_momentum_bot/alt_shadow.py": "bb9c4c9576bce99a0a79eddc9ed708f5ce49b3fd9e3e26b5a193d3c5a03475f9",
     "binance_momentum_bot/db_baseline.json": "1c149ed7d2430525be31c2fef65ff745a646ba5b1da00e562d1a7986df3dad3c",
     "binance_momentum_bot/railpack.json": "f4da4fb87cb184f530ef4b75f36d24a4c93a60240650f8b97337f1c71c5659dd",
     "binance_momentum_bot/railway.toml": "02451811c0186e8d6b87195a5d9c8942c13ec2aa0982d5f30cbc1ea3c9f106e5",
-    "binance_momentum_bot/README.md": "0e5a83701abda3fd37bbc5cbda5433ed43067c853838b0558b07bab87883110b",
+    "binance_momentum_bot/README.md": "0e5a83701abda3fd37bbc5cbda5433ed43067c853838b055b07bab87883110b",
     "binance_momentum_bot/requirements.txt": "cb0878dc6de7d749b13fca9d3f192ef7266784424494489b54c3c3b2f0e21afe",
     "binance_momentum_bot/research_export.py": "71f6535d2f59dacd2769f94122980214877a08e35810f9de3894aefbd06bfeee",
     "binance_momentum_bot/research_reports.py": "cc37629de85b8f014bcfaa2513058b2b38ec960f51996a55e5e6231c0f9d4f83",
@@ -23,5 +23,6 @@
     "binance_momentum_bot/X_WATCHER_SETUP.md": "0066bc1de95e06cd72f4e3ce69c4bc07f3b75c482fc1ee0b221794c76f8c2c23"
   },
   "prior_protected_bot_ast": "1080eab1d278f9282cd20d1d3384603ae57419b0dfdd184e6267a5b28a739d64",
-  "premium_step_lock_source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f"
+  "premium_step_lock_source_base": "29cc15ea261c0a148cd57cee46b986946b4c492f",
+  "early_notification_terminal_review": "bot.py is unchanged; the normalized digest changes only because the reviewed Early hook stripper now recognizes deployed async adapter hooks"
 }
