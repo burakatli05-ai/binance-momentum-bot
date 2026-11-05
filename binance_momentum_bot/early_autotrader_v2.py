@@ -37,7 +37,7 @@ class Config:
     score_gate: bool = True
 
     def validate(self):
-        limits = dict(margin=(5, 100), leverage=(1, 5), min_score=(85, 100),
+        limits = dict(margin=(5, 200), leverage=(1, 10), min_score=(85, 100),
             max_positions=(1, 3), daily_trades=(1, 20), daily_loss=(.1, 25),
             cooldown_s=(60, 86400), slippage_pct=(.01, .3), min_rr=(.5, 5),
             fee_reserve_pct=(.1, 2), signal_ttl_ms=(200, 5000), retry=(0, 1),
