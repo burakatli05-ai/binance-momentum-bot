@@ -3,13 +3,13 @@ import ast
 
 SNIPPETS = [
 '''if early_v2:
-    early_v2.arm(st.active_radar_id, symbol, m, score)''',
+    await early_v2.arm_async(st.active_radar_id, symbol, m, score)''',
 '''if early_v2:
     await early_v2.premium(session, signal_id, symbol, m, plan)
 else:
     await autotrade_handle_premium(session, signal_id, symbol, m, plan)''',
 '''if early_v2:
-    early_v2.tick(sym, price, ts, recv_ms, d.get("a"))''',
+    await early_v2.tick_async(sym, price, ts, recv_ms, d.get("a"))''',
 '''if early_v2 and await early_v2.callback(session, upd["callback_query"]):
     continue''',
 '''if early_v2 and raw_text and await early_v2.command(session, raw_text, chat_id, user_id):
@@ -21,6 +21,10 @@ else:
 'early_v2 = None',
 'import early_v2_adapter',
 ' tasks.append(early_v2.run(session))'.strip(),
+'''try:
+    await asyncio.gather(*tasks)
+finally:
+    await early_v2.close_io()''',
 '''_h1_observe_early_checkpoint_shadow(symbol, m, score, now)''',
 '''early_checkpoint_shadow.public_early(
     db_connect,
@@ -104,5 +108,9 @@ APPROVED={ast.dump(ast.parse(s).body[0],include_attributes=False) for s in SNIPP
 class StripEarlyHooks(ast.NodeTransformer):
     def visit(self,node):
         if ast.dump(node,include_attributes=False) in APPROVED:
-            return node.orelse if isinstance(node,ast.If) and node.orelse else None
+            if isinstance(node,ast.If) and node.orelse:
+                return node.orelse
+            if isinstance(node,ast.Try):
+                return node.body
+            return None
         return super().visit(node)
