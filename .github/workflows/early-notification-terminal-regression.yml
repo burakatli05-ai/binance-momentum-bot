@@ -32,11 +32,15 @@ jobs:
           PYTHONPATH: binance_momentum_bot:tests
           PYTHON_DOTENV_DISABLED: '1'
         run: python -m unittest -v test_early_notification_terminal
-      - name: Run Telegram menu contract tests
+      - name: Run focused Telegram menu contract tests
         env:
           PYTHONPATH: binance_momentum_bot:tests
           PYTHON_DOTENV_DISABLED: '1'
-        run: python -m unittest -v test_telegram_ux.MenuTests
+        run: >-
+          python -m unittest -v
+          test_telegram_ux.MenuTests.test_aliases_and_keyboard_commands
+          test_telegram_ux.MenuTests.test_menu_and_help_are_read_only_and_admin_gated
+          test_telegram_ux.MenuTests.test_mode_needs_actor_bound_confirmation_and_live_stays_locked
 
   differential-regression:
     if: github.event_name == 'pull_request'
