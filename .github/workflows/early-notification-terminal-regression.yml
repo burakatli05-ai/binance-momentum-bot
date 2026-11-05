@@ -1,0 +1,104 @@
+name: Early notification terminal regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r binance_momentum_bot/requirements.txt
+      - name: Compile changed Python
+        run: python -m compileall -q binance_momentum_bot tests
+      - name: Prove production bot source is unchanged
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git diff --exit-code "$BASE_SHA" "$HEAD_SHA" -- binance_momentum_bot/bot.py
+      - name: Run Early terminal policy and authorization tests
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: python -m unittest -v test_early_notification_terminal
+      - name: Run Telegram menu contract tests
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: python -m unittest -v test_telegram_ux.MenuTests
+
+  differential-regression:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r binance_momentum_bot/requirements.txt
+      - name: Compare complete failure sets against deployed base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git worktree add --detach /tmp/pr71-base "$BASE_SHA"
+          git worktree add --detach /tmp/pr71-head "$HEAD_SHA"
+          set +e
+          (cd /tmp/pr71-base && PYTHONPATH=binance_momentum_bot:tests PYTHON_DOTENV_DISABLED=1 python -m unittest discover -s tests -v > /tmp/pr71-base.log 2>&1)
+          BASE_RC=$?
+          (cd /tmp/pr71-head && PYTHONPATH=binance_momentum_bot:tests PYTHON_DOTENV_DISABLED=1 python -m unittest discover -s tests -v > /tmp/pr71-head.log 2>&1)
+          HEAD_RC=$?
+          set -e
+          BASE_RC="$BASE_RC" HEAD_RC="$HEAD_RC" python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(r'^(FAIL|ERROR): (.+)$')
+
+          def failures(path):
+              rows = set()
+              summary = None
+              for raw in Path(path).read_text(encoding='utf-8', errors='replace').splitlines():
+                  match = pattern.match(raw.strip())
+                  if match:
+                      rows.add(match.group(1) + ': ' + match.group(2))
+                  if raw.startswith('FAILED (') or raw == 'OK' or raw.startswith('OK ('):
+                      summary = raw.strip()
+              if summary is None:
+                  raise SystemExit(f'missing unittest summary in {path}')
+              return rows, summary
+
+          base, base_summary = failures('/tmp/pr71-base.log')
+          head, head_summary = failures('/tmp/pr71-head.log')
+          introduced = sorted(head - base)
+          resolved = sorted(base - head)
+
+          print(f'BASE_EXIT={os.environ["BASE_RC"]} BASE_SUMMARY={base_summary}')
+          print(f'HEAD_EXIT={os.environ["HEAD_RC"]} HEAD_SUMMARY={head_summary}')
+          print(f'BASE_FAILURE_IDENTITIES={len(base)}')
+          print(f'HEAD_FAILURE_IDENTITIES={len(head)}')
+          print(f'RESOLVED_BY_PR={len(resolved)}')
+          for item in resolved:
+              print('RESOLVED ' + item)
+          print(f'INTRODUCED_BY_PR={len(introduced)}')
+          for item in introduced:
+              print('INTRODUCED ' + item)
+
+          if introduced:
+              raise SystemExit('PR introduces regression identities not present in deployed base')
+          PY
