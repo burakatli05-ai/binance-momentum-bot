@@ -86,7 +86,9 @@ class CapabilityTests(unittest.TestCase):
                 execute = stack.enter_context(patch.object(startup.os, 'execv', side_effect=check_exec))
                 startup.main()
                 execute.assert_called_once()
-                record = json.loads(output.getvalue().splitlines()[0])
+                records = [json.loads(line) for line in output.getvalue().splitlines()
+                           if line.strip().startswith('{')]
+                record = next(item for item in records if item.get('startup') == 'verified')
                 self.assertEqual(record['live_allowed'], int(expected))
                 self.assertEqual(record['boot_mode'], 'OFF')
 
