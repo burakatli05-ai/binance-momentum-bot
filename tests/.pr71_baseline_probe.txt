@@ -1,0 +1,2 @@
+PR #71 baseline-only CI probe.
+No production, signal, Telegram, execution, or test logic is changed.
