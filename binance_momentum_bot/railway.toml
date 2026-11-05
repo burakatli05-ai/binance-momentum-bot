@@ -1,4 +1,4 @@
 [deploy]
-startCommand = "python startup.py"
+startCommand = "python startup_shared.py"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
