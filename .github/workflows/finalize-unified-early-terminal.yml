@@ -40,23 +40,14 @@ jobs:
           if ux.count(callback_hook) != 1:
               raise SystemExit('legacy callback hook mismatch')
           ux = ux.replace(callback_hook, '', 1)
-          ux = ux.replace(
-              "    supported = ('/menu', '/help', '/earlyterminal', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n",
-              "    supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n",
-              1,
-          )
-          legacy_route = """    if text == '/earlyterminal':
-              await bot['telegram_send'](
-                  session,
-                  early_notification_text(),
-                  chat_id=chat_id,
-                  reply_markup=early_notification_markup(),
-              )
-              return True
-          """
-          if ux.count(legacy_route) != 1:
-              raise SystemExit('legacy /earlyterminal route mismatch')
-          ux = ux.replace(legacy_route, '', 1)
+          supported_old = "    supported = ('/menu', '/help', '/earlyterminal', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n"
+          supported_new = "    supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n"
+          if ux.count(supported_old) != 1:
+              raise SystemExit('legacy supported route mismatch')
+          ux = ux.replace(supported_old, supported_new, 1)
+          route_start = ux.index("    if text == '/earlyterminal':\n")
+          route_end = ux.index("    if text == '/help':\n", route_start)
+          ux = ux[:route_start] + ux[route_end:]
           ux_path.write_text(ux, encoding='utf-8')
 
           Path('tests/test_early_notification_terminal.py').write_text(r'''import importlib
