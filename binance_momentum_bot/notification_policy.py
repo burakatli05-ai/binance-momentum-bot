@@ -38,9 +38,10 @@ def _read_override() -> Optional[bool]:
         return None
     except (OSError, ValueError, TypeError):
         return None
-    if not isinstance(payload, dict) or "enabled" not in payload:
+    if not isinstance(payload, dict):
         return None
-    return bool(payload["enabled"])
+    enabled = payload.get("enabled")
+    return enabled if isinstance(enabled, bool) else None
 
 
 def _ensure_loaded() -> None:
@@ -71,10 +72,11 @@ def early_signal_notification_status() -> dict:
 def set_early_signal_notifications_enabled(enabled: bool) -> bool:
     """Persist the delivery switch atomically, then update the in-process cache."""
     global _LOADED, _OVERRIDE
-    value = bool(enabled)
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be bool")
     path = _state_path()
     payload = json.dumps(
-        {"version": 1, "enabled": value},
+        {"version": 1, "enabled": enabled},
         sort_keys=True,
         ensure_ascii=True,
     )
@@ -83,6 +85,6 @@ def set_early_signal_notifications_enabled(enabled: bool) -> bool:
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(payload + "\n", encoding="utf-8")
         os.replace(temporary, path)
-        _OVERRIDE = value
+        _OVERRIDE = enabled
         _LOADED = True
-    return value
+    return enabled
