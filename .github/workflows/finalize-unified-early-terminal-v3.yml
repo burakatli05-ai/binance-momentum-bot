@@ -1,0 +1,93 @@
+name: Finalize unified Early LIVE terminal v3
+
+on:
+  push:
+    branches:
+      - feat/early-notification-terminal-20261105
+    paths:
+      - .github/workflows/finalize-unified-early-terminal-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/early-notification-terminal-20261105
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r binance_momentum_bot/requirements.txt
+      - name: Keep one Early terminal and remove notification-only duplicate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          ux_path = Path('binance_momentum_bot/telegram_ux.py')
+          ux = ux_path.read_text(encoding='utf-8')
+          if ux.count('import notification_policy\n') != 1:
+              raise SystemExit('notification_policy import mismatch')
+          ux = ux.replace('import notification_policy\n', '', 1)
+          start = ux.index('def early_notification_text():\n')
+          end = ux.index('async def observer_open', start)
+          ux = ux[:start] + ux[end:]
+          hook = "    if data.startswith('earlynotify:'):\n        return await early_notification_callback(bot, session, cb)\n"
+          if ux.count(hook) != 1:
+              raise SystemExit('legacy callback hook mismatch')
+          ux = ux.replace(hook, '', 1)
+          old_supported = "    supported = ('/menu', '/help', '/earlyterminal', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n"
+          new_supported = "    supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',\n"
+          if ux.count(old_supported) != 1:
+              raise SystemExit('legacy supported route mismatch')
+          ux = ux.replace(old_supported, new_supported, 1)
+          route_start = ux.index("    if text == '/earlyterminal':\n")
+          route_end = ux.index("    if text == '/help':\n", route_start)
+          ux = ux[:route_start] + ux[route_end:]
+          ux_path.write_text(ux, encoding='utf-8')
+
+          workflow_path = Path('.github/workflows/early-notification-terminal-regression.yml')
+          workflow = workflow_path.read_text(encoding='utf-8')
+          old = 'run: python -m unittest -v test_early_notification_terminal'
+          new = 'run: python -m unittest -v test_early_notification_terminal test_early_live_terminal'
+          if workflow.count(old) != 1:
+              raise SystemExit('focused test command mismatch')
+          workflow_path.write_text(workflow.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Install verified behavior tests
+        run: |
+          echo 'aW1wb3J0IGltcG9ydGxpYgppbXBvcnQganNvbgppbXBvcnQgb3MKaW1wb3J0IHRlbXBmaWxlCmltcG9ydCB1bml0dGVzdApmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKCgpjbGFzcyBFYXJseU5vdGlmaWNhdGlvblBvbGljeVRlc3RzKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiBzZXRVcChzZWxmKToKICAgICAgICBzZWxmLnRlbXBkaXIgPSB0ZW1wZmlsZS5UZW1wb3JhcnlEaXJlY3RvcnkoKQogICAgICAgIHNlbGYuc3RhdGVfcGF0aCA9IFBhdGgoc2VsZi50ZW1wZGlyLm5hbWUpIC8gJ2Vhcmx5LW5vdGlmaWNhdGlvbi5qc29uJwogICAgICAgIHNlbGYub2xkX3BhdGggPSBvcy5lbnZpcm9uLmdldCgnRUFSTFlfTk9USUZJQ0FUSU9OX1NUQVRFX1BBVEgnKQogICAgICAgIHNlbGYub2xkX2RlZmF1bHQgPSBvcy5lbnZpcm9uLmdldCgnRUFSTFlfU0lHTkFMX1RFTEVHUkFNX0VOQUJMRUQnKQogICAgICAgIG9zLmVudmlyb25bJ0VBUkxZX05PVElGSUNBVElPTl9TVEFURV9QQVRIJ10gPSBzdHIoc2VsZi5zdGF0ZV9wYXRoKQogICAgICAgIG9zLmVudmlyb25bJ0VBUkxZX1NJR05BTF9URUxFR1JBTV9FTkFCTEVEJ10gPSAnMCcKICAgICAgICBpbXBvcnQgbm90aWZpY2F0aW9uX3BvbGljeQogICAgICAgIHNlbGYucG9saWN5ID0gaW1wb3J0bGliLnJlbG9hZChub3RpZmljYXRpb25fcG9saWN5KQoKICAgIGRlZiB0ZWFyRG93bihzZWxmKToKICAgICAgICBpZiBzZWxmLm9sZF9wYXRoIGlzIE5vbmU6CiAgICAgICAgICAgIG9zLmVudmlyb24ucG9wKCdFQVJMWV9OT1RJRklDQVRJT05fU1RBVEVfUEFUSCcsIE5vbmUpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgb3MuZW52aXJvblsnRUFSTFlfTk9USUZJQ0FUSU9OX1NUQVRFX1BBVEgnXSA9IHNlbGYub2xkX3BhdGgKICAgICAgICBpZiBzZWxmLm9sZF9kZWZhdWx0IGlzIE5vbmU6CiAgICAgICAgICAgIG9zLmVudmlyb24ucG9wKCdFQVJMWV9TSUdOQUxfVEVMRUdSQU1fRU5BQkxFRCcsIE5vbmUpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgb3MuZW52aXJvblsnRUFSTFlfU0lHTkFMX1RFTEVHUkFNX0VOQUJMRUQnXSA9IHNlbGYub2xkX2RlZmF1bHQKICAgICAgICBzZWxmLnRlbXBkaXIuY2xlYW51cCgpCgogICAgZGVmIHRlc3RfZW52aXJvbm1lbnRfZGVmYXVsdF9pc191c2VkX2JlZm9yZV90ZXJtaW5hbF9vdmVycmlkZShzZWxmKToKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKHNlbGYucG9saWN5LmVhcmx5X3NpZ25hbF9ub3RpZmljYXRpb25zX2VuYWJsZWQoKSkKICAgICAgICBvcy5lbnZpcm9uWydFQVJMWV9TSUdOQUxfVEVMRUdSQU1fRU5BQkxFRCddID0gJzEnCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKHNlbGYucG9saWN5LmVhcmx5X3NpZ25hbF9ub3RpZmljYXRpb25zX2VuYWJsZWQoKSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKAogICAgICAgICAgICBzZWxmLnBvbGljeS5lYXJseV9zaWduYWxfbm90aWZpY2F0aW9uX3N0YXR1cygpWydzb3VyY2UnXSwKICAgICAgICAgICAgJ2Vudmlyb25tZW50JywKICAgICAgICApCgogICAgZGVmIHRlc3RfdGVybWluYWxfdG9nZ2xlX3BlcnNpc3RzX2Fjcm9zc19yZWxvYWQoc2VsZik6CiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKAogICAgICAgICAgICBzZWxmLnBvbGljeS5zZXRfZWFybHlfc2lnbmFsX25vdGlmaWNhdGlvbnNfZW5hYmxlZChUcnVlKQogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKAogICAgICAgICAgICBqc29uLmxvYWRzKHNlbGYuc3RhdGVfcGF0aC5yZWFkX3RleHQoKSlbJ2VuYWJsZWQnXSwKICAgICAgICAgICAgVHJ1ZSwKICAgICAgICApCiAgICAgICAgc2VsZi5wb2xpY3kgPSBpbXBvcnRsaWIucmVsb2FkKHNlbGYucG9saWN5KQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShzZWxmLnBvbGljeS5lYXJseV9zaWduYWxfbm90aWZpY2F0aW9uc19lbmFibGVkKCkpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgc2VsZi5wb2xpY3kuZWFybHlfc2lnbmFsX25vdGlmaWNhdGlvbl9zdGF0dXMoKVsnc291cmNlJ10sCiAgICAgICAgICAgICdwZXJzaXN0ZW50JywKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZSgKICAgICAgICAgICAgc2VsZi5wb2xpY3kuc2V0X2Vhcmx5X3NpZ25hbF9ub3RpZmljYXRpb25zX2VuYWJsZWQoRmFsc2UpCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2Uoc2VsZi5wb2xpY3kuZWFybHlfc2lnbmFsX25vdGlmaWNhdGlvbnNfZW5hYmxlZCgpKQoKICAgIGRlZiB0ZXN0X21hbGZvcm1lZF9vdmVycmlkZV9mYWxsc19iYWNrX2FuZF9ub25fYm9vbGVhbl9pc19yZWplY3RlZChzZWxmKToKICAgICAgICBvcy5lbnZpcm9uWydFQVJMWV9TSUdOQUxfVEVMRUdSQU1fRU5BQkxFRCddID0gJzEnCiAgICAgICAgcGF5bG9hZHMgPSAoCiAgICAgICAgICAgICdub3QtanNvbicsCiAgICAgICAgICAgIGpzb24uZHVtcHMoW10pLAogICAgICAgICAgICBqc29uLmR1bXBzKHt9KSwKICAgICAgICAgICAganNvbi5kdW1wcyh7J2VuYWJsZWQnOiAnZmFsc2UnfSksCiAgICAgICAgKQogICAgICAgIGZvciBwYXlsb2FkIGluIHBheWxvYWRzOgogICAgICAgICAgICB3aXRoIHNlbGYuc3ViVGVzdChwYXlsb2FkPXBheWxvYWQpOgogICAgICAgICAgICAgICAgc2VsZi5zdGF0ZV9wYXRoLndyaXRlX3RleHQocGF5bG9hZCwgZW5jb2Rpbmc9J3V0Zi04JykKICAgICAgICAgICAgICAgIHNlbGYucG9saWN5ID0gaW1wb3J0bGliLnJlbG9hZChzZWxmLnBvbGljeSkKICAgICAgICAgICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZSgKICAgICAgICAgICAgICAgICAgICBzZWxmLnBvbGljeS5lYXJseV9zaWduYWxfbm90aWZpY2F0aW9uc19lbmFibGVkKCkKICAgICAgICAgICAgICAgICkKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKFR5cGVFcnJvcik6CiAgICAgICAgICAgIHNlbGYucG9saWN5LnNldF9lYXJseV9zaWduYWxfbm90aWZpY2F0aW9uc19lbmFibGVkKCdmYWxzZScpCgoKaWYgX19uYW1lX18gPT0gJ19fbWFpbl9fJzoKICAgIHVuaXR0ZXN0Lm1haW4oKQo=' | base64 -d > tests/test_early_notification_terminal.py
+          echo 'aW1wb3J0IGFzeW5jaW8KaW1wb3J0IGltcG9ydGxpYgppbXBvcnQgb3MKaW1wb3J0IHNxbGl0ZTMKaW1wb3J0IHRlbXBmaWxlCmltcG9ydCB1bml0dGVzdApmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKZnJvbSB1bml0dGVzdC5tb2NrIGltcG9ydCBBc3luY01vY2sKCmZyb20gZWFybHlfYXV0b3RyYWRlcl92MiBpbXBvcnQgQ29uZmlnLCBQaWxvdApmcm9tIGVhcmx5X3YyX2FkYXB0ZXIgaW1wb3J0IEFkYXB0ZXIKZnJvbSBleGVjdXRpb25fdjIgaW1wb3J0IEJsb2NrZWQKaW1wb3J0IG5vdGlmaWNhdGlvbl9wb2xpY3kKaW1wb3J0IHRlbGVncmFtX3V4CgoKY2xhc3MgRWFybHlMaXZlVGVybWluYWxUZXN0cyh1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICBkZWYgc2V0VXAoc2VsZik6CiAgICAgICAgc2VsZi50ZW1wZGlyID0gdGVtcGZpbGUuVGVtcG9yYXJ5RGlyZWN0b3J5KCkKICAgICAgICBzZWxmLmRiX3BhdGggPSBQYXRoKHNlbGYudGVtcGRpci5uYW1lKSAvICdlYXJseS1saXZlLmRiJwogICAgICAgIHNlbGYuc3RhdGVfcGF0aCA9IFBhdGgoc2VsZi50ZW1wZGlyLm5hbWUpIC8gJ2Vhcmx5LW5vdGlmaWNhdGlvbi5qc29uJwogICAgICAgIHNlbGYub2xkX3N0YXRlID0gb3MuZW52aXJvbi5nZXQoJ0VBUkxZX05PVElGSUNBVElPTl9TVEFURV9QQVRIJykKICAgICAgICBzZWxmLm9sZF9kZWZhdWx0ID0gb3MuZW52aXJvbi5nZXQoJ0VBUkxZX1NJR05BTF9URUxFR1JBTV9FTkFCTEVEJykKICAgICAgICBvcy5lbnZpcm9uWydFQVJMWV9OT1RJRklDQVRJT05fU1RBVEVfUEFUSCddID0gc3RyKHNlbGYuc3RhdGVfcGF0aCkKICAgICAgICBvcy5lbnZpcm9uWydFQVJMWV9TSUdOQUxfVEVMRUdSQU1fRU5BQkxFRCddID0gJzAnCiAgICAgICAgaW1wb3J0bGliLnJlbG9hZChub3RpZmljYXRpb25fcG9saWN5KQoKICAgICAgICBkZWYgY29ubmVjdCgpOgogICAgICAgICAgICByZXR1cm4gc3FsaXRlMy5jb25uZWN0KHNlbGYuZGJfcGF0aCkKCiAgICAgICAgc2VsZi5waWxvdCA9IFBpbG90KAogICAgICAgICAgICBjb25uZWN0LAogICAgICAgICAgICBsaXZlX2FsbG93ZWQ9VHJ1ZSwKICAgICAgICAgICAgc2NvcmVfdmFsaWRhdGVkPVRydWUsCiAgICAgICAgKQogICAgICAgIHNlbGYuYWRhcHRlciA9IG9iamVjdC5fX25ld19fKEFkYXB0ZXIpCiAgICAgICAgc2VsZi5hZGFwdGVyLnBpbG90ID0gc2VsZi5waWxvdAogICAgICAgIHNlbGYuYWRhcHRlci5zdGVwX2xvY2sgPSBOb25lCiAgICAgICAgc2VsZi5hZGFwdGVyLmIgPSB7CiAgICAgICAgICAgICdfYXRfYWRtaW5fYWxsb3dlZCc6ICgKICAgICAgICAgICAgICAgIGxhbWJkYSBjaGF0LCB1c2VyLCByZXF1aXJlX3VzZXJfaWQ9RmFsc2U6CiAgICAgICAgICAgICAgICAoY2hhdCwgdXNlcikgPT0gKCdhZG1pbicsICdvd25lcicpCiAgICAgICAgICAgICksCiAgICAgICAgICAgICdCSU5BTkNFX0FQSV9LRVknOiAnY29uZmlndXJlZCcsCiAgICAgICAgICAgICdCSU5BTkNFX0FQSV9TRUNSRVQnOiAnY29uZmlndXJlZCcsCiAgICAgICAgfQogICAgICAgIHNlbGYuYWRhcHRlci5zaG93ID0gQXN5bmNNb2NrKHJldHVybl92YWx1ZT1Ob25lKQoKICAgIGRlZiB0ZWFyRG93bihzZWxmKToKICAgICAgICBpZiBzZWxmLm9sZF9zdGF0ZSBpcyBOb25lOgogICAgICAgICAgICBvcy5lbnZpcm9uLnBvcCgnRUFSTFlfTk9USUZJQ0FUSU9OX1NUQVRFX1BBVEgnLCBOb25lKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIG9zLmVudmlyb25bJ0VBUkxZX05PVElGSUNBVElPTl9TVEFURV9QQVRIJ10gPSBzZWxmLm9sZF9zdGF0ZQogICAgICAgIGlmIHNlbGYub2xkX2RlZmF1bHQgaXMgTm9uZToKICAgICAgICAgICAgb3MuZW52aXJvbi5wb3AoJ0VBUkxZX1NJR05BTF9URUxFR1JBTV9FTkFCTEVEJywgTm9uZSkKICAgICAgICBlbHNlOgogICAgICAgICAgICBvcy5lbnZpcm9uWydFQVJMWV9TSUdOQUxfVEVMRUdSQU1fRU5BQkxFRCddID0gc2VsZi5vbGRfZGVmYXVsdAogICAgICAgIHNlbGYudGVtcGRpci5jbGVhbnVwKCkKCiAgICBkZWYgdGVzdF8yMDBfdXNkdF9hbmRfMTB4X2FyZV92YWxpZF9mYWlsX2Nsb3NlZF9jZWlsaW5ncyhzZWxmKToKICAgICAgICBDb25maWcobWFyZ2luPTIwMCwgbGV2ZXJhZ2U9MTApLnZhbGlkYXRlKCkKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKEJsb2NrZWQpOgogICAgICAgICAgICBDb25maWcobWFyZ2luPTIwMC4wMSwgbGV2ZXJhZ2U9MTApLnZhbGlkYXRlKCkKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKEJsb2NrZWQpOgogICAgICAgICAgICBDb25maWcobWFyZ2luPTIwMCwgbGV2ZXJhZ2U9MTEpLnZhbGlkYXRlKCkKCiAgICBkZWYgdGVzdF9vbmVfcGFuZWxfc2hvd3NfY29tYmluZWRfY29udHJvbHMoc2VsZik6CiAgICAgICAgc2VsZi5waWxvdC5jb25maWd1cmUoJ21hcmdpbicsIDIwMCkKICAgICAgICBzZWxmLnBpbG90LmNvbmZpZ3VyZSgnbGV2ZXJhZ2UnLCAxMCkKICAgICAgICBub3RpZmljYXRpb25fcG9saWN5LnNldF9lYXJseV9zaWduYWxfbm90aWZpY2F0aW9uc19lbmFibGVkKFRydWUpCiAgICAgICAgdGV4dCA9IHNlbGYuYWRhcHRlci5zdGF0dXMoKQogICAgICAgIHNlbGYuYXNzZXJ0SW4oJ1x1MjZhMSBFQVJMWSBURVJNXHUwMTMwTkFMXHUwMTMwJywgdGV4dCkKICAgICAgICBzZWxmLmFzc2VydEluKCdCaWxkaXJpbWxlcjogXFUwMDAxZjdlMiBBXHUwMGM3SUsnLCB0ZXh0KQogICAgICAgIHNlbGYuYXNzZXJ0SW4oJ1x1MDEzMFx1MDE1ZmxlbSBtb2R1OiBPRkYnLCB0ZXh0KQogICAgICAgIHNlbGYuYXNzZXJ0SW4oJ0FuYXBhcmEgKHRlbWluYXQpOiAyMDAgVVNEVCcsIHRleHQpCiAgICAgICAgc2VsZi5hc3NlcnRJbignS2FsZFx1MDEzMXJhXHUwMGU3OiAxMHgnLCB0ZXh0KQogICAgICAgIHNlbGYuYXNzZXJ0SW4oCiAgICAgICAgICAgICdOb21pbmFsIHBvemlzeW9uOiB5YWtsYVx1MDE1Zlx1MDEzMWsgMjAwMCBVU0RUJywKICAgICAgICAgICAgdGV4dCwKICAgICAgICApCiAgICAgICAgbGFiZWxzID0gWwogICAgICAgICAgICBidXR0b25bJ3RleHQnXQogICAgICAgICAgICBmb3Igcm93IGluIHNlbGYuYWRhcHRlci5tYXJrdXAoKVsnaW5saW5lX2tleWJvYXJkJ10KICAgICAgICAgICAgZm9yIGJ1dHRvbiBpbiByb3cKICAgICAgICBdCiAgICAgICAgZm9yIGxhYmVsIGluICgKICAgICAgICAgICAgJ0JpbGRpcmltbGVyJywKICAgICAgICAgICAgJ01vZCcsCiAgICAgICAgICAgICdBbmFwYXJhJywKICAgICAgICAgICAgJ0thbGRcdTAxMzFyYVx1MDBlNycsCiAgICAgICAgKToKICAgICAgICAgICAgc2VsZi5hc3NlcnRJbihsYWJlbCwgbGFiZWxzKQoKICAgIGRlZiB0ZXN0X3BhbmVsX2Nob2ljZXNfaW5jbHVkZV8yMDBfdXNkdF9hbmRfMTB4KHNlbGYpOgogICAgICAgIGFzeW5jaW8ucnVuKAogICAgICAgICAgICBzZWxmLmFkYXB0ZXIuY29tbWFuZCgKICAgICAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgICAgICAnL2Vhcmx5djIgbWFyZ2luJywKICAgICAgICAgICAgICAgICdhZG1pbicsCiAgICAgICAgICAgICAgICAnb3duZXInLAogICAgICAgICAgICApCiAgICAgICAgKQogICAgICAgIG1hcmdpbl9tYXJrdXAgPSBzZWxmLmFkYXB0ZXIuc2hvdy5hd2FpdF9hcmdzLmFyZ3NbM10KICAgICAgICBtYXJnaW5fdmFsdWVzID0gWwogICAgICAgICAgICBidXR0b25bJ3RleHQnXQogICAgICAgICAgICBmb3Igcm93IGluIG1hcmdpbl9tYXJrdXBbJ2lubGluZV9rZXlib2FyZCddCiAgICAgICAgICAgIGZvciBidXR0b24gaW4gcm93CiAgICAgICAgXQogICAgICAgIHNlbGYuYXNzZXJ0SW4oJzIwMCcsIG1hcmdpbl92YWx1ZXMpCgogICAgICAgIHNlbGYuYWRhcHRlci5zaG93LnJlc2V0X21vY2soKQogICAgICAgIGFzeW5jaW8ucnVuKAogICAgICAgICAgICBzZWxmLmFkYXB0ZXIuY29tbWFuZCgKICAgICAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgICAgICAnL2Vhcmx5djIgbGV2ZXJhZ2UnLAogICAgICAgICAgICAgICAgJ2FkbWluJywKICAgICAgICAgICAgICAgICdvd25lcicsCiAgICAgICAgICAgICkKICAgICAgICApCiAgICAgICAgbGV2ZXJhZ2VfbWFya3VwID0gc2VsZi5hZGFwdGVyLnNob3cuYXdhaXRfYXJncy5hcmdzWzNdCiAgICAgICAgbGV2ZXJhZ2VfdmFsdWVzID0gWwogICAgICAgICAgICBidXR0b25bJ3RleHQnXQogICAgICAgICAgICBmb3Igcm93IGluIGxldmVyYWdlX21hcmt1cFsnaW5saW5lX2tleWJvYXJkJ10KICAgICAgICAgICAgZm9yIGJ1dHRvbiBpbiByb3cKICAgICAgICBdCiAgICAgICAgc2VsZi5hc3NlcnRJbignMTAnLCBsZXZlcmFnZV92YWx1ZXMpCgogICAgZGVmIHRlc3Rfbm90aWZpY2F0aW9uX3RvZ2dsZV9pc19pbnNpZGVfc2FtZV9lYXJseV90ZXJtaW5hbChzZWxmKToKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKAogICAgICAgICAgICBub3RpZmljYXRpb25fcG9saWN5LmVhcmx5X3NpZ25hbF9ub3RpZmljYXRpb25zX2VuYWJsZWQoKQogICAgICAgICkKICAgICAgICBoYW5kbGVkID0gYXN5bmNpby5ydW4oCiAgICAgICAgICAgIHNlbGYuYWRhcHRlci5jb21tYW5kKAogICAgICAgICAgICAgICAgTm9uZSwKICAgICAgICAgICAgICAgICcvZWFybHl2MiBub3RpZnknLAogICAgICAgICAgICAgICAgJ2FkbWluJywKICAgICAgICAgICAgICAgICdvd25lcicsCiAgICAgICAgICAgICkKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGhhbmRsZWQpCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKAogICAgICAgICAgICBub3RpZmljYXRpb25fcG9saWN5LmVhcmx5X3NpZ25hbF9ub3RpZmljYXRpb25zX2VuYWJsZWQoKQogICAgICAgICkKICAgICAgICBzZWxmLmFkYXB0ZXIuc2hvdy5hc3NlcnRfYXdhaXRlZF9vbmNlKCkKCiAgICBkZWYgdGVzdF9saXZlX3JlcXVpcmVzX3NlY29uZF9jb25maXJtYXRpb25fYW5kX3NldHRpbmdzX2ZyZWV6ZShzZWxmKToKICAgICAgICBzZWxmLnBpbG90LmNvbmZpZ3VyZSgnbWFyZ2luJywgMjAwKQogICAgICAgIHNlbGYucGlsb3QuY29uZmlndXJlKCdsZXZlcmFnZScsIDEwKQogICAgICAgIHNlbGYucGlsb3Quc2V0X21vZGUoJ0RSWScpCiAgICAgICAgd2l0aCBzZWxmLmFzc2VydFJhaXNlcyhCbG9ja2VkKToKICAgICAgICAgICAgc2VsZi5waWxvdC5zZXRfbW9kZSgnTElWRScpCiAgICAgICAgdG9rZW4gPSBzZWxmLnBpbG90LmNoYWxsZW5nZSgnYWRtaW46b3duZXInLCAnTElWRScpCiAgICAgICAgc2VsZi5waWxvdC5jb25maXJtKAogICAgICAgICAgICAnYWRtaW46b3duZXInLAogICAgICAgICAgICB0b2tlbiwKICAgICAgICAgICAgcmVhZHk9VHJ1ZSwKICAgICAgICAgICAga2luZD0nTElWRScsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoc2VsZi5waWxvdC5tb2RlLCAnTElWRScpCiAgICAgICAgd2l0aCBzZWxmLmFzc2VydFJhaXNlcyhCbG9ja2VkKToKICAgICAgICAgICAgc2VsZi5waWxvdC5jb25maWd1cmUoJ21hcmdpbicsIDEwMCkKCiAgICBkZWYgdGVzdF9zaW5nbGVfbWVudV9lbnRyeV9hbGlhc19hbmRfcHVibGljX2Vhcmx5X2JpbmRpbmcoc2VsZik6CiAgICAgICAgbGFiZWxzID0gW2xhYmVsIGZvciBsYWJlbCwgXyBpbiB0ZWxlZ3JhbV91eC5NRU5VXQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGFiZWxzLmNvdW50KCdcdTI2YTEgRWFybHkgVGVybWluYWxpJyksIDEpCiAgICAgICAgc2VsZi5hc3NlcnROb3RJbignXFUwMDAxZjUxNCBFYXJseSBCaWxkaXJpbWxlcmknLCBsYWJlbHMpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgdGVsZWdyYW1fdXgubm9ybWFsaXplKCcvZWFybHl0ZXJtaW5hbCcpLAogICAgICAgICAgICAnL2Vhcmx5djInLAogICAgICAgICkKICAgICAgICBzb3VyY2UgPSBQYXRoKCdiaW5hbmNlX21vbWVudHVtX2JvdC9ib3QucHknKS5yZWFkX3RleHQoCiAgICAgICAgICAgIGVuY29kaW5nPSd1dGYtOCcKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRJbigKICAgICAgICAgICAgJ2F3YWl0IGVhcmx5X3YyLmFybV9hc3luYygnCiAgICAgICAgICAgICdzdC5hY3RpdmVfcmFkYXJfaWQsIHN5bWJvbCwgbSwgc2NvcmUpJywKICAgICAgICAgICAgc291cmNlLAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEluKCdub3RpZmljYXRpb25fa2luZD0iRUFSTFkiJywgc291cmNlKQoKCmlmIF9fbmFtZV9fID09ICdfX21haW5fXyc6CiAgICB1bml0dGVzdC5tYWluKCkK' | base64 -d > tests/test_early_live_terminal.py
+      - name: Compile and run focused safety tests
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: |
+          python -m compileall -q binance_momentum_bot tests
+          python -m unittest -v \
+            test_early_notification_terminal \
+            test_early_live_terminal \
+            test_early_autotrader_v2.MathTests \
+            test_early_autotrader_v2.PilotTests.test_live_requires_second_confirmation \
+            test_early_autotrader_v2.PilotTests.test_menu_contains_all_requested_controls \
+            test_early_autotrader_v2.PilotTests.test_price_chase_blocked \
+            test_early_autotrader_v2.PilotTests.test_unauthorized_telegram_cannot_change_state \
+            test_early_autotrader_v2.PilotTests.test_unvalidated_score_blocks_live \
+            test_telegram_ux.MenuTests.test_aliases_and_keyboard_commands \
+            test_telegram_ux.MenuTests.test_menu_and_help_are_read_only_and_admin_gated \
+            test_telegram_ux.MenuTests.test_mode_needs_actor_bound_confirmation_and_live_stays_locked
+          git diff --exit-code 5e56e1a3dfc9071bfc2405cb1e7b43e0c3148a34 HEAD -- binance_momentum_bot/bot.py
+      - name: Commit verified implementation
+        run: |
+          rm -f .github/workflows/finalize-unified-early-terminal.yml
+          rm -f .github/workflows/finalize-unified-early-terminal-v3.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'test: finalize unified Early LIVE terminal behavior'
+          git push origin HEAD:feat/early-notification-terminal-20261105
