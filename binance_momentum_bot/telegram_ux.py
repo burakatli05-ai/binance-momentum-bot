@@ -6,6 +6,7 @@ import time
 import secrets
 
 import daytrades
+import notification_policy
 import trade_views
 import today_positions
 import visual_cards
@@ -14,11 +15,11 @@ from telegram_cards import ownership, number, pages, timestamp
 
 MENU = (
     ("⚡ Early AutoTrader V2", "/earlyv2"), ("🤖 Premium AutoTrader", "/autotrade"),
-    ('📊 Durum', '/status'), ('📈 Açık Pozisyonlar', '/positions'),
-    ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
-    ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),
-    ('🧪 ALT Shadow', '/altstats'), ('⚙️ Ayarlar', '/settings'),
-    ('❓ Yardım', '/help'),
+    ("🔔 Early Bildirimleri", "/earlyterminal"), ('📊 Durum', '/status'),
+    ('📈 Açık Pozisyonlar', '/positions'), ('📋 Bugünün İşlemleri', '/daytrades'),
+    ('🧾 İşlem Listesi', '/daytradeslist'), ('📅 Bugün Açılanlar', '/todaypositions'),
+    ('🔥 Isınan Coinler', '/top'), ('🧪 ALT Shadow', '/altstats'),
+    ('⚙️ Ayarlar', '/settings'), ('❓ Yardım', '/help'),
 )
 ALIASES = {label.casefold(): command for label, command in MENU}
 ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '/menu',
@@ -26,6 +27,84 @@ ALIASES.update({'menu': '/menu', 'menü': '/menu', '/menu': '/menu', '/start': '
                 '/todayposition': '/todaypositions'})
 leverage_cache = LeverageCache()
 pending_modes = {}
+
+
+def early_notification_text():
+    state = notification_policy.early_signal_notification_status()
+    enabled = bool(state['enabled'])
+    return (
+        '🔔 EARLY BİLDİRİM TERMİNALİ\n\n'
+        f'Durum: {"🟢 AÇIK" if enabled else "⚪ KAPALI"}\n'
+        'Kaynak: mevcut production Early kuralları\n'
+        'Gönderim: aynı Telegram botu ve mevcut yayın kanalı\n'
+        'Premium bildirimleri: etkilenmez\n'
+        'Otomatik emir: YOK — bu panel yalnız Early kartlarını yönetir\n\n'
+        'Açıldığında yalnız bundan sonra oluşan uygun Early bildirimleri gönderilir; '
+        'geçmiş sinyaller tekrar gönderilmez.'
+    )
+
+
+def early_notification_markup():
+    enabled = notification_policy.early_signal_notifications_enabled()
+    toggle = (
+        {'text': '🔴 Bildirimleri Kapat', 'callback_data': 'earlynotify:off'}
+        if enabled else
+        {'text': '🟢 Bildirimleri Aç', 'callback_data': 'earlynotify:on'}
+    )
+    return {'inline_keyboard': [
+        [toggle],
+        [{'text': '🔄 Durumu Yenile', 'callback_data': 'earlynotify:status'}],
+    ]}
+
+
+async def early_notification_callback(bot, session, cb):
+    data = str(cb.get('data') or '')
+    if not data.startswith('earlynotify:'):
+        return False
+    callback_id = cb.get('id')
+    message = cb.get('message') or {}
+    chat = str((message.get('chat') or {}).get('id', ''))
+    user = str((cb.get('from') or {}).get('id', ''))
+    if not bot['_at_admin_allowed'](chat, user):
+        if callback_id:
+            await bot['telegram_api_call'](session, 'answerCallbackQuery', {
+                'callback_query_id': callback_id,
+                'text': 'Bu işlem için yetkin yok.',
+                'show_alert': True,
+            })
+        return True
+    action = data.split(':', 1)[1]
+    try:
+        if action == 'on':
+            notification_policy.set_early_signal_notifications_enabled(True)
+            answer = 'Early bildirimleri açıldı.'
+        elif action == 'off':
+            notification_policy.set_early_signal_notifications_enabled(False)
+            answer = 'Early bildirimleri kapatıldı.'
+        elif action == 'status':
+            answer = 'Durum yenilendi.'
+        else:
+            answer = 'Komut tanınmadı.'
+    except OSError:
+        if callback_id:
+            await bot['telegram_api_call'](session, 'answerCallbackQuery', {
+                'callback_query_id': callback_id,
+                'text': 'Ayar kalıcı olarak kaydedilemedi.',
+                'show_alert': True,
+            })
+        return True
+    if callback_id:
+        await bot['telegram_api_call'](session, 'answerCallbackQuery', {
+            'callback_query_id': callback_id,
+            'text': answer,
+        })
+    await bot['telegram_send'](
+        session,
+        early_notification_text(),
+        chat_id=chat,
+        reply_markup=early_notification_markup(),
+    )
+    return True
 
 
 async def observer_open(bot, session, message):
@@ -55,6 +134,8 @@ async def confirm_mode(bot, session, target, chat_id, user_id):
 
 async def mode_callback(bot, session, cb):
     data=str(cb.get('data') or '')
+    if data.startswith('earlynotify:'):
+        return await early_notification_callback(bot, session, cb)
     if not data.startswith('uxmode:'):return False
     chat=str(((cb.get('message') or {}).get('chat') or {}).get('id',''))
     user=str((cb.get('from') or {}).get('id',''))
@@ -142,7 +223,7 @@ async def show_positions(bot, session):
 
 
 async def handle(bot, session, text, chat_id, user_id):
-    supported = ('/menu', '/help', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',
+    supported = ('/menu', '/help', '/earlyterminal', '/daytradeslist', '/positions', '/todaypositions', '/reportstatus',
                  '/daytradesraw', '/positionsraw', '/todaypositionsraw')
     if text not in supported: return False
     if not bot['_at_admin_allowed'](chat_id, user_id): return True
@@ -158,6 +239,14 @@ async def handle(bot, session, text, chat_id, user_id):
     if text == '/menu':
         await bot['telegram_send'](session, '🏠 ANA MENÜ\nBir görünüm seçin. İşlem ayarları ⚙️ Ayarlar bölümündedir.',
                                    chat_id=chat_id, reply_markup=menu_markup())
+        return True
+    if text == '/earlyterminal':
+        await bot['telegram_send'](
+            session,
+            early_notification_text(),
+            chat_id=chat_id,
+            reply_markup=early_notification_markup(),
+        )
         return True
     if text == '/help':
         message = '❓ YARDIM\n'+'\n'.join(f'{label} — {command}' for label, command in MENU)
