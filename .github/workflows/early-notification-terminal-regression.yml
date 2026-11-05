@@ -1,4 +1,4 @@
-name: Early notification terminal regression
+name: Early LIVE terminal regression
 
 on:
   pull_request:
@@ -27,11 +27,26 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: git diff --exit-code "$BASE_SHA" "$HEAD_SHA" -- binance_momentum_bot/bot.py
-      - name: Run Early terminal policy and authorization tests
+      - name: Run Early terminal policy and LIVE behavior tests
         env:
           PYTHONPATH: binance_momentum_bot:tests
           PYTHON_DOTENV_DISABLED: '1'
-        run: python -m unittest -v test_early_notification_terminal
+        run: >-
+          python -m unittest -v
+          test_early_notification_terminal
+          test_early_live_terminal
+      - name: Run existing Early V2 safety contracts
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: >-
+          python -m unittest -v
+          test_early_autotrader_v2.MathTests
+          test_early_autotrader_v2.PilotTests.test_live_requires_second_confirmation
+          test_early_autotrader_v2.PilotTests.test_menu_contains_all_requested_controls
+          test_early_autotrader_v2.PilotTests.test_price_chase_blocked
+          test_early_autotrader_v2.PilotTests.test_unauthorized_telegram_cannot_change_state
+          test_early_autotrader_v2.PilotTests.test_unvalidated_score_blocks_live
       - name: Run focused Telegram menu contract tests
         env:
           PYTHONPATH: binance_momentum_bot:tests
