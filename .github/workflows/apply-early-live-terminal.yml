@@ -1,0 +1,332 @@
+name: Apply unified Early LIVE terminal patch
+
+on:
+  push:
+    branches:
+      - feat/early-notification-terminal-20261105
+    paths:
+      - .github/workflows/apply-early-live-terminal.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/early-notification-terminal-20261105
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch unified Early terminal
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one exact match, found {count}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Expand only the user-approved Early pilot ceiling: 200 USDT margin and 10x leverage.
+          replace_once(
+              'binance_momentum_bot/early_autotrader_v2.py',
+              "limits = dict(margin=(5, 100), leverage=(1, 5), min_score=(85, 100),",
+              "limits = dict(margin=(5, 200), leverage=(1, 10), min_score=(85, 100),",
+          )
+
+          adapter_path = Path('binance_momentum_bot/early_v2_adapter.py')
+          adapter = adapter_path.read_text(encoding='utf-8')
+          old_import = 'from notification_policy import early_signal_notifications_enabled'
+          new_import = ('from notification_policy import (early_signal_notifications_enabled,\n'
+                        '                                 set_early_signal_notifications_enabled)')
+          if adapter.count(old_import) != 1:
+              raise SystemExit('early_v2_adapter.py: notification policy import mismatch')
+          adapter = adapter.replace(old_import, new_import, 1)
+
+          status_pattern = re.compile(r"    def status\(self\):\n.*?\n    def markup\(self\):", re.S)
+          status_replacement = '''    def status(self):
+        p = self.pilot
+        selector = p.selector_report(recent_limit=0)
+        notifications = early_signal_notifications_enabled()
+        nominal = float(p.cfg.margin) * int(p.cfg.leverage)
+        api_ready = bool(self.b.get('BINANCE_API_KEY') and self.b.get('BINANCE_API_SECRET'))
+        live_ready = bool(p.live_allowed and p.score_validated and api_ready)
+        return (
+            f'⚡ EARLY TERMİNALİ\\n\\n'
+            f'Bildirimler: {"🟢 AÇIK" if notifications else "⚪ KAPALI"}\\n'
+            f'İşlem modu: {p.mode}\\n'
+            f'İşlem teminatı (anapara): {p.cfg.margin:g} USDT\\n'
+            f'Kaldıraç: {p.cfg.leverage}x\\n'
+            f'Nominal pozisyon: yaklaşık {nominal:g} USDT\\n\\n'
+            f'Kaynak: Public Early + mevcut Early V2 seçici/güvenlik kapıları\\n'
+            f'Min V2 skor: {p.cfg.min_score:g} | max pozisyon: {p.cfg.max_positions}\\n'
+            f'Günlük giriş: {p.cfg.daily_trades} | zarar rezervi: {p.cfg.daily_loss:g} USDT | cooldown: {p.cfg.cooldown_s} sn\\n'
+            f'Execution V2: {"AÇIK" if p.cfg.execution else "KAPALI"} | score gate: {"AÇIK" if p.cfg.score_gate else "KAPALI"}\\n'
+            f'LIVE yetkisi/doğrulaması: {"HAZIR" if live_ready else "KİLİTLİ"}\\n'
+            f'Kill: {"AKTİF" if p.halted else "kapalı"} | Fallback TP +%{p.cfg.fallback_tp_pct:g}\\n'
+            f'Selector shadow: {selector["qualified"]}/{selector["total"]} seçildi | '
+            f'60dk olgun: {selector["qualified_stats"]["mature60"]}\\n'
+            f'Boot DRY: {"ON" if (flag("EARLY_V2_BOOT_DRY") or flag("EARLY_V2_AUTO_DRY")) else "OFF"} | '
+            f'İşlem bildirimi: {"ON" if flag("EARLY_V2_NOTIFY") else "OFF"} | '
+            f'Profit Lock: {p.profit_mode}\\n\\n'
+            'LIVE geçişi ikinci onay gerektirir. Ayar değişiklikleri yalnız OFF modunda yapılır.'
+        )
+
+    def markup(self):'''
+          adapter, n = status_pattern.subn(status_replacement, adapter, count=1)
+          if n != 1:
+              raise SystemExit(f'early_v2_adapter.py: status block replacement count={n}')
+
+          markup_pattern = re.compile(r"    def markup\(self\):\n.*?\n    async def show\(self, session, chat, message=None, markup=None\):", re.S)
+          markup_replacement = '''    def markup(self):
+        buttons = [('Bildirimler','notify'),('Mod','mode'),('Anapara','margin'),('Kaldıraç','leverage'),
+            ('Min V2 Score','min_score'),('Max Pozisyon','max_positions'),('Risk Ayarları','risk'),
+            ('Execution V2','execution'),('Profit Lock','profit'),('Pozisyonlar','positions'),
+            ('Günlük Rapor','report'),('Kill Switch','kill'),('Fallback TP','fallback_tp_pct')]
+        return {'inline_keyboard': [[{'text':label, 'callback_data':'ev2:'+action} for label,action in buttons[i:i+2]]
+                                    for i in range(0,len(buttons),2)]}
+
+    async def show(self, session, chat, message=None, markup=None):'''
+          adapter, n = markup_pattern.subn(markup_replacement, adapter, count=1)
+          if n != 1:
+              raise SystemExit(f'early_v2_adapter.py: markup block replacement count={n}')
+
+          old_choices = "choices = dict(margin=(5,10,25,50,100), leverage=(1,2,3,5), min_score=(85,90,95,98),"
+          new_choices = "choices = dict(margin=(5,10,25,50,100,150,200), leverage=(1,2,3,5,7,10), min_score=(85,90,95,98),"
+          if adapter.count(old_choices) != 1:
+              raise SystemExit('early_v2_adapter.py: choices mismatch')
+          adapter = adapter.replace(old_choices, new_choices, 1)
+
+          notify_anchor = "            elif cmd == 'risk':\n"
+          notify_block = """            elif cmd == 'notify':
+                enabled = not early_signal_notifications_enabled()
+                set_early_signal_notifications_enabled(enabled)
+                message = 'Early bildirimleri açıldı.' if enabled else 'Early bildirimleri kapatıldı.'
+            elif cmd == 'risk':
+"""
+          if adapter.count(notify_anchor) != 1:
+              raise SystemExit('early_v2_adapter.py: notify insertion anchor mismatch')
+          adapter = adapter.replace(notify_anchor, notify_block, 1)
+          adapter_path.write_text(adapter, encoding='utf-8')
+
+          ux_path = Path('binance_momentum_bot/telegram_ux.py')
+          ux = ux_path.read_text(encoding='utf-8')
+          menu_pattern = re.compile(r"MENU = \(\n.*?\n\)\nALIASES =", re.S)
+          menu_replacement = '''MENU = (
+    ("⚡ Early Terminali", "/earlyv2"), ("🤖 Premium AutoTrader", "/autotrade"),
+    ('📊 Durum', '/status'), ('📈 Açık Pozisyonlar', '/positions'),
+    ('📋 Bugünün İşlemleri', '/daytrades'), ('🧾 İşlem Listesi', '/daytradeslist'),
+    ('📅 Bugün Açılanlar', '/todaypositions'), ('🔥 Isınan Coinler', '/top'),
+    ('🧪 ALT Shadow', '/altstats'), ('⚙️ Ayarlar', '/settings'),
+    ('❓ Yardım', '/help'),
+)
+ALIASES ='''
+          ux, n = menu_pattern.subn(menu_replacement, ux, count=1)
+          if n != 1:
+              raise SystemExit(f'telegram_ux.py: menu replacement count={n}')
+
+          alias_old = "                '/todayposition': '/todaypositions'})"
+          alias_new = "                '/todayposition': '/todaypositions', '/earlyterminal': '/earlyv2'})"
+          if ux.count(alias_old) != 1:
+              raise SystemExit('telegram_ux.py: alias anchor mismatch')
+          ux = ux.replace(alias_old, alias_new, 1)
+          ux = ux.replace(
+              "        'Otomatik emir: YOK — bu panel yalnız Early kartlarını yönetir\\n\\n'",
+              "        'İşlem ayarları ve LIVE kontrolü: ⚡ Early Terminali\\n\\n'",
+              1,
+          )
+
+          old_send = '''    await bot['telegram_send'](
+        session,
+        early_notification_text(),
+        chat_id=chat,
+        reply_markup=early_notification_markup(),
+    )
+    return True
+'''
+          new_send = '''    controller = bot.get('early_v2')
+    if controller is not None:
+        await controller.show(session, chat)
+    else:
+        await bot['telegram_send'](
+            session,
+            early_notification_text(),
+            chat_id=chat,
+            reply_markup=early_notification_markup(),
+        )
+    return True
+'''
+          if ux.count(old_send) != 1:
+              raise SystemExit('telegram_ux.py: legacy callback send mismatch')
+          ux = ux.replace(old_send, new_send, 1)
+
+          old_route = '''    if text == '/earlyterminal':
+        await bot['telegram_send'](
+            session,
+            early_notification_text(),
+            chat_id=chat_id,
+            reply_markup=early_notification_markup(),
+        )
+        return True
+'''
+          new_route = '''    if text == '/earlyterminal':
+        controller = bot.get('early_v2')
+        if controller is not None:
+            await controller.show(session, chat_id)
+        else:
+            await bot['telegram_send'](
+                session,
+                early_notification_text(),
+                chat_id=chat_id,
+                reply_markup=early_notification_markup(),
+            )
+        return True
+'''
+          if ux.count(old_route) != 1:
+              raise SystemExit('telegram_ux.py: legacy route mismatch')
+          ux = ux.replace(old_route, new_route, 1)
+          ux_path.write_text(ux, encoding='utf-8')
+
+          workflow_path = Path('.github/workflows/early-notification-terminal-regression.yml')
+          workflow = workflow_path.read_text(encoding='utf-8')
+          old_test = 'run: python -m unittest -v test_early_notification_terminal'
+          new_test = 'run: python -m unittest -v test_early_notification_terminal test_early_live_terminal'
+          if workflow.count(old_test) != 1:
+              raise SystemExit('focused workflow test command mismatch')
+          workflow_path.write_text(workflow.replace(old_test, new_test, 1), encoding='utf-8')
+
+          Path('tests/test_early_live_terminal.py').write_text(r'''import asyncio
+import importlib
+import os
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+from execution_v2 import Blocked
+from early_autotrader_v2 import Config, Pilot
+import early_v2_adapter
+import notification_policy
+import telegram_ux
+
+
+class EarlyLiveTerminalTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tempdir.name) / 'early-live.db'
+        self.state_path = Path(self.tempdir.name) / 'early-notification.json'
+        self.old_state_path = os.environ.get('EARLY_NOTIFICATION_STATE_PATH')
+        self.old_default = os.environ.get('EARLY_SIGNAL_TELEGRAM_ENABLED')
+        os.environ['EARLY_NOTIFICATION_STATE_PATH'] = str(self.state_path)
+        os.environ['EARLY_SIGNAL_TELEGRAM_ENABLED'] = '0'
+        importlib.reload(notification_policy)
+
+        def connect():
+            return sqlite3.connect(self.db_path)
+
+        self.pilot = Pilot(connect, live_allowed=True, score_validated=True)
+        self.adapter = object.__new__(early_v2_adapter.Adapter)
+        self.adapter.pilot = self.pilot
+        self.adapter.step_lock = None
+        self.adapter.b = {
+            '_at_admin_allowed': lambda chat, user, require_user_id=False: (chat, user) == ('admin', 'owner'),
+            'BINANCE_API_KEY': 'configured',
+            'BINANCE_API_SECRET': 'configured',
+        }
+        self.adapter.show = AsyncMock(return_value=None)
+
+    def tearDown(self):
+        if self.old_state_path is None:
+            os.environ.pop('EARLY_NOTIFICATION_STATE_PATH', None)
+        else:
+            os.environ['EARLY_NOTIFICATION_STATE_PATH'] = self.old_state_path
+        if self.old_default is None:
+            os.environ.pop('EARLY_SIGNAL_TELEGRAM_ENABLED', None)
+        else:
+            os.environ['EARLY_SIGNAL_TELEGRAM_ENABLED'] = self.old_default
+        self.tempdir.cleanup()
+
+    def test_user_approved_200_usdt_and_10x_are_valid_ceiling(self):
+        Config(margin=200, leverage=10).validate()
+        with self.assertRaises(Blocked):
+            Config(margin=200.01, leverage=10).validate()
+        with self.assertRaises(Blocked):
+            Config(margin=200, leverage=11).validate()
+
+    def test_terminal_status_and_buttons_show_combined_controls(self):
+        self.pilot.configure('margin', 200)
+        self.pilot.configure('leverage', 10)
+        notification_policy.set_early_signal_notifications_enabled(True)
+        text = self.adapter.status()
+        self.assertIn('⚡ EARLY TERMİNALİ', text)
+        self.assertIn('Bildirimler: 🟢 AÇIK', text)
+        self.assertIn('İşlem teminatı (anapara): 200 USDT', text)
+        self.assertIn('Kaldıraç: 10x', text)
+        self.assertIn('Nominal pozisyon: yaklaşık 2000 USDT', text)
+        self.assertIn('Public Early + mevcut Early V2 seçici/güvenlik kapıları', text)
+        labels = [button['text'] for row in self.adapter.markup()['inline_keyboard'] for button in row]
+        self.assertIn('Bildirimler', labels)
+        self.assertIn('Mod', labels)
+        self.assertIn('Anapara', labels)
+        self.assertIn('Kaldıraç', labels)
+
+    def test_notification_toggle_is_part_of_same_terminal(self):
+        self.assertFalse(notification_policy.early_signal_notifications_enabled())
+        handled = asyncio.run(self.adapter.command(None, '/earlyv2 notify', 'admin', 'owner'))
+        self.assertTrue(handled)
+        self.assertTrue(notification_policy.early_signal_notifications_enabled())
+        self.adapter.show.assert_awaited_once()
+
+    def test_live_still_requires_second_confirmation_and_freezes_settings(self):
+        self.pilot.set_mode('DRY')
+        with self.assertRaises(Blocked):
+            self.pilot.set_mode('LIVE')
+        token = self.pilot.challenge('admin:owner', 'LIVE')
+        self.pilot.confirm('admin:owner', token, ready=True, kind='LIVE')
+        self.assertEqual(self.pilot.mode, 'LIVE')
+        with self.assertRaises(Blocked):
+            self.pilot.configure('margin', 100)
+
+    def test_menu_has_one_early_terminal_and_legacy_alias(self):
+        labels = [label for label, _ in telegram_ux.MENU]
+        self.assertEqual(labels.count('⚡ Early Terminali'), 1)
+        self.assertNotIn('🔔 Early Bildirimleri', labels)
+        self.assertEqual(telegram_ux.normalize('/earlyterminal'), '/earlyv2')
+
+    def test_public_early_source_remains_wired_to_existing_engine(self):
+        source = Path('binance_momentum_bot/bot.py').read_text(encoding='utf-8')
+        self.assertIn('await early_v2.arm_async(st.active_radar_id, symbol, m, score)', source)
+        self.assertIn('notification_kind="EARLY"', source)
+
+
+if __name__ == '__main__':
+    unittest.main()
+''', encoding='utf-8')
+
+          # This helper is one-shot; remove it from the resulting branch commit.
+          Path('.github/workflows/apply-early-live-terminal.yml').unlink()
+          PY
+      - name: Compile focused changes
+        run: python -m compileall -q binance_momentum_bot tests
+      - name: Run focused tests
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+          PYTHON_DOTENV_DISABLED: '1'
+        run: python -m unittest -v test_early_notification_terminal test_early_live_terminal
+      - name: Commit patch to feature branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat: unify Early notifications and LIVE trading terminal'
+          git push origin HEAD:feat/early-notification-terminal-20261105
