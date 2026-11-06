@@ -35,6 +35,7 @@ jobs:
           python -m unittest -v
           test_early_notification_terminal
           test_early_live_terminal
+          test_early_public_execution
       - name: Run existing Early V2 safety contracts
         env:
           PYTHONPATH: binance_momentum_bot:tests
