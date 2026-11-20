@@ -8328,6 +8328,8 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
 
 async def _at_command(session, raw_text: str, chat_id: str, user_id: str) -> bool:
     text=telegram_ux.normalize(raw_text); low=text.lower()
+    if low=='/latestpremiumexport':
+        return await research_export.handle_premium_download(globals(),session,chat_id,user_id)
     if low=='/analysisexport':
         import analysis_export
         return await analysis_export.handle(globals(),session,chat_id,user_id)

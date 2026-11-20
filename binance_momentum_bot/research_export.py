@@ -1,5 +1,9 @@
 """SQLite-safe export and repository scheduler. Never starts or repairs the bot DB."""
 import argparse
+import asyncio
+import re
+import stat
+import zlib
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -184,10 +188,229 @@ class Exporter:
                     telemetry('partial_cleanup_failed',snapshot_id=sid,error=type(cleanup_error).__name__)
             return directory,manifest
 
+
+    def _premium_area(self, *, reserve=False):
+        """Separate bounded namespace; never delete an existing archive."""
+        self.safety.validate_root()
+        area = no_links(self.root/'premium-files')
+        if area.exists():
+            if not area.is_dir() or area.stat().st_dev != self.safety.identity[0]:
+                raise ValueError('PREMIUM_AREA_INVALID')
+        else:
+            area.mkdir()
+        entries = list(area.iterdir())
+        for entry in entries:
+            no_links(entry)
+            if not entry.is_dir() or entry.stat().st_dev != self.safety.identity[0]:
+                raise ValueError('PREMIUM_AREA_UNKNOWN_CONTENT')
+            if not re.fullmatch(r'(?:\.partial-)?premium-\d{8}T\d{6}Z-[0-9a-f]{8}', entry.name):
+                raise ValueError('PREMIUM_AREA_UNKNOWN_CONTENT')
+        if reserve and len(entries) >= self.safety.policy.retain:
+            raise ExportSkipped('PREMIUM_CAPACITY')
+        return area
+
+    def _premium_regular(self, path):
+        no_links(path)
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_dev != self.safety.identity[0]:
+            raise ValueError('PREMIUM_LINK_OR_FILE')
+        return st
+
+    def _verify_premium_bundle(self, bundle, checkpoint):
+        """Bounded independent disk read; no source DB access."""
+        size = self._premium_regular(bundle).st_size
+        if size > assistant_bridge.MAX_RAW_BYTES + 2*1024**2:
+            raise ValueError('PREMIUM_FILE_LIMIT')
+        checkpoint()
+        with zipfile.ZipFile(bundle) as archive:
+            infos = archive.infolist()
+            if (len(infos) != 2 or {i.filename for i in infos} != {'payload.json.zlib','manifest.json'}
+                    or any(i.compress_type != zipfile.ZIP_STORED for i in infos)):
+                raise ValueError('PREMIUM_FILE_MEMBERS')
+            info = archive.getinfo('manifest.json')
+            if info.file_size > 1024**2:
+                raise ValueError('PREMIUM_MANIFEST_LIMIT')
+            meta = json.loads(archive.read(info))
+            info = archive.getinfo('payload.json.zlib')
+            if info.file_size > assistant_bridge.MAX_RAW_BYTES + 65536:
+                raise ValueError('PREMIUM_COMPRESSED_LIMIT')
+            compressed = archive.read(info)
+        checkpoint()
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, assistant_bridge.MAX_RAW_BYTES+1)
+        if len(raw) > assistant_bridge.MAX_RAW_BYTES:
+            raise ValueError('PREMIUM_BYTE_LIMIT')
+        if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise ValueError('PREMIUM_COMPRESSED_INVALID')
+        digest = hashlib.sha256(raw).hexdigest()
+        payload = json.loads(raw)
+        assistant_bridge.validate_live_payload(payload)
+        if (meta.get('payload_sha256') != digest or meta.get('raw_bytes') != len(raw)
+                or meta.get('compressed_bytes') != len(compressed)
+                or meta.get('snapshot_id') != payload['snapshot_id']
+                or meta.get('schema_sha256') != payload['logical_export']['schema_sha256']
+                or meta.get('source_read_at_ms') != payload['logical_export']['read_at_ms']
+                or meta.get('source_read_completed_at_ms') != payload['logical_export']['read_completed_at_ms']
+                or meta.get('table_rows') != {k:len(v['rows']) for k,v in payload['tables'].items()}
+                or meta.get('premium_count') != payload['logical_export']['premium_count']):
+            raise ValueError('PREMIUM_FILE_MANIFEST')
+        checkpoint()
+        with bundle.open('rb') as handle:
+            file_hash = hashlib.file_digest(handle,'sha256').hexdigest()
+        checkpoint()
+        return meta, raw, file_hash, size
+
+    def _store_premium_file(self, payload, raw, compressed, digest, checkpoint):
+        """Persist exactly the bytes already reconciled by emit_live, once."""
+        checkpoint()
+        if len(raw) > assistant_bridge.MAX_RAW_BYTES or len(compressed) > assistant_bridge.MAX_RAW_BYTES+65536:
+            raise ValueError('PREMIUM_BYTE_LIMIT')
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('PREMIUM_PAYLOAD_HASH')
+        area = self._premium_area(reserve=True)
+        sid = payload['snapshot_id']
+        if not isinstance(sid,str) or not re.fullmatch(r'premium-\d{8}T\d{6}Z-[0-9a-f]{8}',sid):
+            raise ValueError('PREMIUM_FILE_ID')
+        directory = no_links(area/('.partial-'+sid))
+        final = no_links(area/sid)
+        pointer = no_links(self.root/'premium-latest.json')
+        temporary = no_links(self.root/'premium-latest.json.tmp')
+        if directory.exists() or final.exists() or temporary.exists():
+            raise ExportSkipped('PREMIUM_STAGING_EXISTS')
+        if pointer.exists():self._premium_regular(pointer)
+        ranges = {}
+        for table,data in payload['tables'].items():
+            ranges[table] = {}
+            for i,column in enumerate(data['columns']):
+                if column == 'ts' or column.endswith(('_ts','_ms','_time')):
+                    values = [row[i] for row in data['rows'] if row[i] is not None]
+                    numeric = [v for v in values if type(v) in (int,float)]
+                    ranges[table][column] = {
+                        'min':min(numeric) if numeric else None,
+                        'max':max(numeric) if numeric else None,
+                        'null_count':len(data['rows'])-len(values),
+                        'nonnumeric_count':len(values)-len(numeric),
+                        'unit':'AS_RECORDED; see payload schema and source contract'}
+            checkpoint()
+        logical = payload['logical_export']
+        meta = dict(format='premium-file-v1', snapshot_id=sid,
+                    file_generated_at_ms=int(time.time()*1000),
+                    source_read_at_ms=logical['read_at_ms'],
+                    source_read_completed_at_ms=logical['read_completed_at_ms'],
+                    payload_sha256=digest, raw_bytes=len(raw),compressed_bytes=len(compressed),
+                    schema_sha256=logical['schema_sha256'],premium_count=logical['premium_count'],
+                    table_rows={k:len(v['rows']) for k,v in payload['tables'].items()},
+                    recorded_time_ranges=ranges, source_identity=payload.get('source_identity'),
+                    deployment_id=payload.get('deployment_id'),
+                    source_kind=logical['kind'],logical_not_restorable=True,
+                    as_of='NOT_PROVEN; recorded context/outcomes are not decision-time attestations',
+                    capacity='No automatic archive deletion; occupied generations count against existing retain policy',
+                    pointer_durability='Atomic visibility; power-loss persistence not attested')
+        encoded = assistant_bridge._json_bytes(meta)
+        if len(encoded)>1024**2:raise ValueError('PREMIUM_MANIFEST_LIMIT')
+        created_pointer_temp = False
+        directory.mkdir()
+        try:
+            bundle = directory/'premium.zip'
+            with bundle.open('xb') as handle:
+                with zipfile.ZipFile(handle,'w',zipfile.ZIP_STORED) as archive:
+                    archive.writestr('payload.json.zlib',compressed)
+                    checkpoint()
+                    archive.writestr('manifest.json',encoded)
+                handle.flush();os.fsync(handle.fileno())
+            with (directory/'manifest.json').open('xb') as handle:
+                handle.write(encoded);handle.flush();os.fsync(handle.fileno())
+            actual, recovered, file_hash, size = self._verify_premium_bundle(bundle,checkpoint)
+            sidecar=directory/'manifest.json'
+            self._premium_regular(sidecar)
+            if recovered != raw or actual != meta or sidecar.read_bytes() != encoded:
+                raise ValueError('PREMIUM_FILE_ROUNDTRIP')
+            checkpoint()
+            os.replace(directory,final)
+            # Files are immutable after publication; downloads need no copy/delete.
+            # This does not change latest.json (the physical snapshot pointer).
+            info = dict(format='premium-file-pointer-v1',snapshot_id=sid,
+                        file_name='premium.zip',file_sha256=file_hash,file_bytes=size,
+                        payload_sha256=digest,manifest_sha256=hashlib.sha256(encoded).hexdigest(),
+                        file_verified_at_ms=int(time.time()*1000))
+            checkpoint()
+            with temporary.open('xb') as handle:
+                created_pointer_temp=True
+                handle.write(assistant_bridge._json_bytes(info))
+                handle.flush();os.fsync(handle.fileno())
+            checkpoint()
+            os.replace(temporary,pointer)  # commit only after readback; last fallible write
+            return info
+        finally:
+            # Only this attempt's unfinished files; never a published generation.
+            if directory.exists():
+                for name in ('premium.zip','manifest.json'):
+                    p=directory/name
+                    if p.exists():
+                        self._premium_regular(p);p.unlink()
+                directory.rmdir()
+            if created_pointer_temp and temporary.exists():
+                self._premium_regular(temporary);temporary.unlink()
+
+    @serialized
+    def latest_premium_file(self):
+        pointer = no_links(self.root/'premium-latest.json')
+        if not pointer.exists():return None
+        if self._premium_regular(pointer).st_size>4096:
+            raise ValueError('PREMIUM_POINTER_LIMIT')
+        info=json.loads(pointer.read_text(encoding='utf8'))
+        sid=info.get('snapshot_id')
+        if (info.get('format')!='premium-file-pointer-v1' or info.get('file_name')!='premium.zip'
+                or not isinstance(sid,str) or not re.fullmatch(r'premium-\d{8}T\d{6}Z-[0-9a-f]{8}',sid)):
+            raise ValueError('PREMIUM_POINTER_INVALID')
+        area=self._premium_area()
+        directory=no_links(area/sid)
+        if directory.resolve().parent!=area:raise ValueError('PREMIUM_POINTER_PATH')
+        manifest_path=directory/'manifest.json'
+        if self._premium_regular(manifest_path).st_size>1024**2:
+            raise ValueError('PREMIUM_MANIFEST_LIMIT')
+        encoded=manifest_path.read_bytes()
+        if hashlib.sha256(encoded).hexdigest()!=info['manifest_sha256']:
+            raise ValueError('PREMIUM_MANIFEST_HASH')
+        deadline=time.monotonic()+min(self.safety.policy.timeout,30)
+        def checkpoint():self.safety.checkpoint(deadline)
+        bundle=directory/'premium.zip'
+        meta,raw,digest,size=self._verify_premium_bundle(bundle,checkpoint)
+        if (meta!=json.loads(encoded) or meta['snapshot_id']!=sid or digest!=info['file_sha256']
+                or size!=info['file_bytes'] or meta['payload_sha256']!=info['payload_sha256']):
+            raise ValueError('PREMIUM_FILE_HASH')
+        return bundle,meta,info
+
     @serialized
     def premium_bridge(self,now,printer=print):
         """Bounded logical Premium cut; independent of restorable DB snapshots."""
         sid='premium-'+datetime.fromtimestamp(now/1000,timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
+        file_info=None
+        file_error=None
+        file_status='NOT_PUBLISHED'
+        def persist(payload,raw,compressed,digest,check):
+            nonlocal file_info,file_error,file_status
+            guard_error=None
+            def checkpoint():
+                nonlocal guard_error
+                try:check()
+                except Exception as exc:
+                    guard_error=exc
+                    raise
+            try:
+                file_info=self._store_premium_file(payload,raw,compressed,digest,checkpoint)
+                file_status='VERIFIED_PUBLISHED'
+            except (ExportSkipped,OSError,ValueError,zipfile.BadZipFile,zlib.error) as exc:
+                if guard_error is not None:raise guard_error
+                if isinstance(exc,ExportSkipped) and str(exc) not in ('PREMIUM_CAPACITY','PREMIUM_STAGING_EXISTS'):
+                    raise
+                if isinstance(exc,ValueError) and str(exc) in ('PREMIUM_TIME_LIMIT','PREMIUM_ROW_LIMIT','PREMIUM_BYTE_LIMIT','export root changed'):
+                    raise
+                # Only the extra file publication may fail independently;
+                # the existing shared guard still gates legacy emit.
+                file_status='SKIPPED' if isinstance(exc,ExportSkipped) else 'ERROR'
+                file_error={'type':type(exc).__name__,'reason':str(exc)}
+                check()
         try:
             # Reserve only the bounded bridge allowance, never the full DB size.
             # The same disk/budget/checkpoint policy and worker lock still apply.
@@ -202,11 +425,15 @@ class Exporter:
             manifest={'snapshot_id':sid,'created_time_ms':now,'deployment_id':self.deployment,
                       'version':self.version,'source_code_sha256':code_hashes,
                       'config_identity':hashlib.sha256(json.dumps(self.config,sort_keys=True).encode()).hexdigest()}
-            meta=assistant_bridge.emit_live(self.source,manifest,printer=printer,checkpoint=checkpoint)
+            meta=assistant_bridge.emit_live(self.source,manifest,printer=printer,checkpoint=checkpoint,
+                                            persist=persist)
             telemetry('premium_bridge_complete',snapshot_id=sid,sha256=meta['sha256'],raw_bytes=meta['raw_bytes'])
-            return dict(meta,status='VALID')
+            return dict(meta,status='VALID',file_status=file_status,file_info=file_info,file_error=file_error,
+                        log_status='COMPLETE')
         except Exception as exc:
-            result={'status':'ERROR','error':type(exc).__name__}
+            result={'status':'ERROR','error':type(exc).__name__,
+                    'file_status':file_status,'file_info':file_info,'file_error':file_error,
+                    'log_status':'INCOMPLETE_OR_NOT_RUN'}
             if isinstance(exc,ExportSkipped):
                 result.update(status='SKIPPED',skipped_export_reason=str(exc))
             telemetry('premium_bridge_failed',snapshot_id=sid,**result)
@@ -281,6 +508,41 @@ class Exporter:
                 state['daily_date']=date;result['daily']=date
         atomic_json(self.root/'scheduler.json',state)
         return result
+
+
+
+async def handle_premium_download(bot, session, chat_id, user_id):
+    """Select an existing verified file; never trigger a source read or export."""
+    if not bot['_at_admin_allowed'](chat_id,user_id):
+        return True
+    if not str(chat_id).isdigit() or int(chat_id)<=0 or str(chat_id)!=str(user_id):
+        return True
+    async def notify(message):
+        try:
+            return await bot['telegram_send'](session,message,chat_id=chat_id)
+        except Exception as exc:
+            bot['log'].error('Premium download notification failed: %s',type(exc).__name__)
+            return False
+    worker=bot['export_worker']
+    if worker is None:
+        await notify('Premium dosya exportu kapalı; ayar değiştirilmedi.')
+        return True
+    try:
+        result=await asyncio.to_thread(worker.latest_premium_file)
+        if result is None:
+            await notify('Doğrulanmış Premium dosyası yok. Bu komut yeni export üretmez.')
+            return True
+        bundle,meta,info=result
+        caption=(f"Premium kayıt dosyası | {meta['snapshot_id']} | N={meta['premium_count']}\n"
+                 f"Kaynak okuma UTC epoch-ms: {meta['source_read_at_ms']}\n"
+                 f"ZIP SHA256: {info['file_sha256']}\nPayload SHA256: {meta['payload_sha256']}")
+        accepted=await bot['telegram_send_document'](session,str(bundle),caption,chat_id=chat_id)
+        await notify('Telegram API dosyayı kabul etti; teslim için indirip ZIP/payload hashini doğrulayın.'
+                     if accepted else 'Premium dosyası gönderilemedi; teslim tamamlanmadı.')
+    except Exception as exc:
+        bot['log'].error('Premium file download failed: %s',type(exc).__name__)
+        await notify(f'Premium dosyası doğrulanamadı/gönderilemedi: {type(exc).__name__}.')
+    return True
 
 
 def main():

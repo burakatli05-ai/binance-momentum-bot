@@ -284,7 +284,7 @@ def build_live_payload(source_path, manifest, checkpoint=lambda: None):
     return payload
 
 
-def emit_live(source_path, manifest, printer=print, checkpoint=lambda: None):
+def emit_live(source_path, manifest, printer=print, checkpoint=lambda: None, persist=None):
     """Emit the independent logical export only after reconciliation and roundtrip."""
     check = _guard(checkpoint)
     payload = build_live_payload(source_path, manifest, checkpoint=check)
@@ -295,6 +295,9 @@ def emit_live(source_path, manifest, printer=print, checkpoint=lambda: None):
     if decode_chunks(chunks, digest) != json.loads(raw.decode('utf-8')):
         raise ValueError('PREMIUM_ROUNDTRIP_MISMATCH')
     check()
+    if persist is not None:
+        persist(payload, raw, compressed, digest, check)
+        check()
     return _emit_encoded(payload, raw, compressed, digest, chunks, printer, check)
 
 
