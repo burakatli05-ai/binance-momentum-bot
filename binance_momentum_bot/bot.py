@@ -41,6 +41,7 @@ import early_v2_adapter
 import early_checkpoint_shadow
 import early_exit_export
 import premium_step_lock as premium_lock
+import binance_rest_guard
 
 _premium_step_tick_watermarks = {}
 from position_observer import PositionObserver, roe_values
@@ -680,6 +681,7 @@ autotrade_account_config_cache = {
     "value": None,
     "updated_ts": 0.0,
 }
+_binance_new_entry = contextvars.ContextVar("binance_new_entry", default=False)
 binance_rate_state = {
     "used_weight_1m": 0,
     "observed_mono": 0.0,
@@ -5149,54 +5151,34 @@ async def create_approval_invite_link(session: aiohttp.ClientSession) -> Optiona
     return None
 
 
-def _binance_observe_rate_headers(headers, status: int = 200):
-    """Track Binance's actual IP request-weight header and any 429 cooldown."""
-    now = time.monotonic()
-    try:
-        raw = headers.get("X-MBX-USED-WEIGHT-1M")
-        if raw is not None:
-            binance_rate_state["used_weight_1m"] = max(0, int(float(raw)))
-            binance_rate_state["observed_mono"] = now
-    except Exception:
-        pass
-    if int(status or 0) == 429:
-        retry = BINANCE_RATE_LIMIT_429_FALLBACK_SECONDS
-        try:
-            raw_retry = headers.get("Retry-After")
-            if raw_retry is not None:
-                retry = max(1.0, float(raw_retry))
-        except Exception:
-            pass
-        binance_rate_state["blocked_until_mono"] = max(
-            float(binance_rate_state.get("blocked_until_mono") or 0.0), now + retry
-        )
+def _binance_observe_rate_headers(headers, status: int = 200, body: str = ""):
+    """Honor exchange 418/429 cooldown for public and signed REST."""
+    wait = binance_rest_guard.observe(
+        binance_rate_state, headers, status, body,
+        fallback_429=BINANCE_RATE_LIMIT_429_FALLBACK_SECONDS,
+    )
+    if wait:
+        log.warning("BINANCE_REST_COOLDOWN status=%s remaining_s=%.1f", status, wait)
 
 
 async def _binance_rate_gate(*, priority: bool = False):
-    """Reserve Binance REST capacity for execution; 429 cooldown applies to everyone."""
-    now = time.monotonic()
-    blocked_until = float(binance_rate_state.get("blocked_until_mono") or 0.0)
-    if blocked_until > now:
-        await asyncio.sleep(blocked_until - now)
-        now = time.monotonic()
-
-    used = int(binance_rate_state.get("used_weight_1m") or 0)
-    observed = float(binance_rate_state.get("observed_mono") or 0.0)
-    # Discard stale observations. A minute-budget sample older than ~70s cannot
-    # describe the current Binance interval anymore.
-    if observed and now - observed > 70.0:
-        binance_rate_state["used_weight_1m"] = 0
-        used = 0
-    if not priority and used >= BINANCE_RATE_LIMIT_SOFT_WEIGHT:
-        # A short back-pressure pause is enough to let newer headers/reset state
-        # arrive while keeping a sizeable reserve for order-management calls.
-        await asyncio.sleep(BINANCE_RATE_LIMIT_SOFT_COOLDOWN_SECONDS)
+    await binance_rest_guard.gate(
+        binance_rate_state,
+        soft_weight=BINANCE_RATE_LIMIT_SOFT_WEIGHT,
+        soft_cooldown=BINANCE_RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
+        priority=priority,
+        reject_if_blocked=_binance_new_entry.get(),
+    )
 
 
 async def fetch_json(session, path, params=None):
     await _binance_rate_gate(priority=False)
     async with session.get(REST + path, params=params, timeout=15) as r:
-        _binance_observe_rate_headers(r.headers, r.status)
+        if r.status in (418, 429):
+            body = await r.text()
+            _binance_observe_rate_headers(r.headers, r.status, body)
+        else:
+            _binance_observe_rate_headers(r.headers, r.status)
         r.raise_for_status()
         return await r.json()
 
@@ -7385,8 +7367,8 @@ async def binance_signed_request(session: aiohttp.ClientSession, method: str, pa
         else:
             req = session.request(method.upper(), url, data=signed, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s))
         async with req as r:
-            _binance_observe_rate_headers(r.headers, r.status)
             body = await r.text()
+            _binance_observe_rate_headers(r.headers, r.status, body)
             try: payload = json.loads(body)
             except Exception: payload = {"code": r.status, "msg": body[:500]}
             if r.status >= 400 or (isinstance(payload, dict) and int(payload.get("code", 0) or 0) < 0):
@@ -7457,6 +7439,9 @@ async def _at_place_market_entry(session, symbol: str, qty: float, position_side
     if position_side != "BOTH": params["positionSide"] = position_side
     try:
         return await binance_signed_request(session, "POST", "/fapi/v1/order", params, timeout_s=20)
+    except binance_rest_guard.RateLimitBlocked:
+        # A local admission rejection proves this request was never sent.
+        raise
     except Exception as e:
         # Never blind-retry an uncertain order. Query the unique client id first.
         q = await _at_query_order_by_client(session, symbol, client_id)
@@ -7680,48 +7665,58 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         _at_log_event("LIVE_BLOCKED",signal_id=signal_id,symbol=symbol,detail="API_KEY_MISSING")
         return
-    if not await _at_qro_reentry_safe(session, symbol):
-        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="SAME_SYMBOL_REENTRY_BLOCKED_RESIDUAL_STATE")
-        return
-    cfg, usdt, positions = await _at_account_snapshot(session)
-    _at_cache_account_balance(usdt)
-    if not cfg.get("canTrade", False):
-        raise RuntimeError("Binance Futures API canTrade=false")
-    # Initialize today's risk base from actual wallet balance if this is the first live interaction of the day.
-    _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
-    available=float(usdt.get("availableBalance",0) or 0)
-    if available < margin * 1.05:
-        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=f"AVAILABLE_BALANCE {available:.2f}")
-        return
-    # Manual position isolation: do not enter a symbol that already has any non-zero position not owned by this bot.
-    existing=[x for x in positions if x.get("symbol")==symbol and abs(float(x.get("positionAmt",0) or 0))>1e-12]
-    if existing:
-        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="MANUAL_OR_EXISTING_POSITION")
-        telegram_notify(session,f"⚠️ AutoTrade {symbol} girişini atladı: Binance'ta bu sembolde zaten açık pozisyon var. Manuel pozisyona dokunulmadı.",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
-        return
-    hedge=bool(cfg.get("dualSidePosition")); position_side="LONG" if hedge else "BOTH"
-    # Configure only an empty symbol; manual/open symbols were blocked above.
+    # Do not queue a new entry through a rate-limit wait. This scope ends at
+    # entry acknowledgement; protection and reconciliation keep their own lane.
+    rate_token = _binance_new_entry.set(True)
     try:
-        await binance_signed_request(session,"POST","/fapi/v1/leverage",{"symbol":symbol,"leverage":lev})
-    except Exception as e:
-        raise RuntimeError(f"Leverage ayarlanamadı: {e}")
-    if str(autotrade_cfg["margin_type"]).upper() in ("ISOLATED","CROSSED"):
+        await _binance_rate_gate(priority=True)
+        if not await _at_qro_reentry_safe(session, symbol):
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="SAME_SYMBOL_REENTRY_BLOCKED_RESIDUAL_STATE")
+            return
+        cfg, usdt, positions = await _at_account_snapshot(session)
+        _at_cache_account_balance(usdt)
+        if not cfg.get("canTrade", False):
+            raise RuntimeError("Binance Futures API canTrade=false")
+        # Initialize today's risk base from actual wallet balance if this is the first live interaction of the day.
+        _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
+        available=float(usdt.get("availableBalance",0) or 0)
+        if available < margin * 1.05:
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=f"AVAILABLE_BALANCE {available:.2f}")
+            return
+        # Manual position isolation: do not enter a symbol that already has any non-zero position not owned by this bot.
+        existing=[x for x in positions if x.get("symbol")==symbol and abs(float(x.get("positionAmt",0) or 0))>1e-12]
+        if existing:
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail="MANUAL_OR_EXISTING_POSITION")
+            telegram_notify(session,f"⚠️ AutoTrade {symbol} girişini atladı: Binance'ta bu sembolde zaten açık pozisyon var. Manuel pozisyona dokunulmadı.",chat_id=TELEGRAM_ADMIN_CHAT_ID, signal_id=signal_id, symbol=symbol)
+            return
+        hedge=bool(cfg.get("dualSidePosition")); position_side="LONG" if hedge else "BOTH"
+        # Configure only an empty symbol; manual/open symbols were blocked above.
         try:
-            await binance_signed_request(session,"POST","/fapi/v1/marginType",{"symbol":symbol,"marginType":str(autotrade_cfg['margin_type']).upper()})
+            await binance_signed_request(session,"POST","/fapi/v1/leverage",{"symbol":symbol,"leverage":lev})
         except Exception as e:
-            # Binance -4046: no need to change margin type. Treat as benign.
-            if "-4046" not in str(e): log.warning("AutoTrade marginType %s: %r",symbol,e)
-    qty=_at_qty(symbol,notional,entry_ref)
-    proposed_levels=_at_levels_from_fill(symbol,entry_ref,plan)
-    proposed=max(0.0,(entry_ref-float(proposed_levels["stop"]))*qty)+(entry_ref*qty)*AUTO_TRADE_RISK_FEE_PCT/100.0
-    allowed,why=_at_risk_allowed("LIVE",proposed)
-    if not allowed:
-        _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
-    f=exchange_filters.get(symbol,{})
-    if qty<=0 or (f.get("min_notional") and qty*entry_ref < float(f["min_notional"])):
-        raise RuntimeError(f"Quantity/minNotional geçersiz: qty={qty}")
-    entry_client=_at_client("E",signal_id)
-    order=await _at_place_market_entry(session,symbol,qty,position_side,entry_client)
+            raise RuntimeError(f"Leverage ayarlanamadı: {e}")
+        if str(autotrade_cfg["margin_type"]).upper() in ("ISOLATED","CROSSED"):
+            try:
+                await binance_signed_request(session,"POST","/fapi/v1/marginType",{"symbol":symbol,"marginType":str(autotrade_cfg['margin_type']).upper()})
+            except Exception as e:
+                # Binance -4046: no need to change margin type. Treat as benign.
+                if "-4046" not in str(e): log.warning("AutoTrade marginType %s: %r",symbol,e)
+        qty=_at_qty(symbol,notional,entry_ref)
+        proposed_levels=_at_levels_from_fill(symbol,entry_ref,plan)
+        proposed=max(0.0,(entry_ref-float(proposed_levels["stop"]))*qty)+(entry_ref*qty)*AUTO_TRADE_RISK_FEE_PCT/100.0
+        allowed,why=_at_risk_allowed("LIVE",proposed)
+        if not allowed:
+            _at_log_event("ENTRY_BLOCKED",signal_id=signal_id,symbol=symbol,detail=why); return
+        f=exchange_filters.get(symbol,{})
+        if qty<=0 or (f.get("min_notional") and qty*entry_ref < float(f["min_notional"])):
+            raise RuntimeError(f"Quantity/minNotional geçersiz: qty={qty}")
+        entry_client=_at_client("E",signal_id)
+        order=await _at_place_market_entry(session,symbol,qty,position_side,entry_client)
+    except binance_rest_guard.RateLimitBlocked as exc:
+        _at_log_event("ENTRY_BLOCKED", signal_id=signal_id, symbol=symbol, detail=str(exc))
+        return
+    finally:
+        _binance_new_entry.reset(rate_token)
     exec_qty=float(order.get("executedQty") or order.get("cumQty") or qty)
     fill=float(order.get("avgPrice") or 0)
     if fill<=0:
@@ -8316,12 +8311,15 @@ async def _at_try_live_enable(session, chat_id: str, user_id: str, code: str) ->
     if not BINANCE_API_KEY or not BINANCE_API_SECRET: return "❌ Binance API Key/Secret Railway Variables içinde yok."
     allowed,why=_at_risk_allowed("LIVE")
     if not allowed: return f"❌ Risk kilidi nedeniyle LIVE açılamadı: {why}"
+    rate_token = _binance_new_entry.set(True)
     try:
         cfg,usdt,positions=await _at_account_snapshot(session)
         _at_cache_account_balance(usdt)
         if not cfg.get("canTrade",False): return "❌ Binance API canTrade=false. Futures trading izni açık değil."
         _at_daily_row(float(usdt.get("balance",0) or 0), scope="LIVE")
     except Exception as e: return f"❌ Binance bağlantı testi başarısız: {e}"
+    finally:
+        _binance_new_entry.reset(rate_token)
     autotrade_cfg["mode"]="LIVE"; _at_save_setting("mode","LIVE")
     return "🔴 AUTOTRADE LIVE AÇILDI. Yeni uygun Premiumlar gerçek Futures emrine dönüşebilir. Deploy/restart olursa tekrar OFF'a döner."
 
