@@ -1,0 +1,64 @@
+name: Isolated Binance REST hotfix verification
+on:
+  push:
+    branches: ['test/binance-rest-ban-20261126']
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PYTHON_DOTENV_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r binance_momentum_bot/requirements.txt -r research/requirements.txt
+      - name: Compile and test the exact hotfix
+        env:
+          PYTHONPATH: binance_momentum_bot:tests
+        run: |
+          python -m compileall -q binance_momentum_bot tests
+          python -m unittest -v test_binance_rest_guard test_binance_rest_guard_integration
+      - name: Differential full regression against deployed commit
+        run: |
+          git worktree add --detach /tmp/rest-base ed816edf748d644d3d34acc8d880c090957f4db3
+          set +e
+          (cd /tmp/rest-base && PYTHONPATH=binance_momentum_bot:tests python -m unittest discover -s tests -v) > /tmp/base.log 2>&1
+          BASE_RC=$?
+          PYTHONPATH=binance_momentum_bot:tests python -m unittest discover -s tests -v > /tmp/head.log 2>&1
+          HEAD_RC=$?
+          set -e
+          BASE_RC="$BASE_RC" HEAD_RC="$HEAD_RC" python - <<'PY'
+          import os, re
+          from pathlib import Path
+          def read(path):
+              text = Path(path).read_text(errors="replace")
+              summary = re.findall(r"(?m)^Ran (\d+) tests? in .+$", text)
+              if not summary or not re.search(r"(?m)^(OK|FAILED)(?: \(.*\))?$", text):
+                  raise SystemExit("Missing test summary: " + path)
+              failures = set(re.findall(r"(?m)^(?:FAIL|ERROR): .+$", text))
+              return int(summary[-1]), failures
+          bn,b=read("/tmp/base.log")
+          hn,h=read("/tmp/head.log")
+          print("BASE_TESTS",bn,"BASE_EXIT",os.environ["BASE_RC"],"BASE_FAILURES",len(b))
+          print("HEAD_TESTS",hn,"HEAD_EXIT",os.environ["HEAD_RC"],"HEAD_FAILURES",len(h))
+          for x in sorted(h-b): print("INTRODUCED", x)
+          for x in sorted(b-h): print("RESOLVED", x)
+          print("NEW_FAILURES",len(h-b))
+          if h-b or hn < bn+7:
+              raise SystemExit("Differential regression failed")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolated-rest-regression-logs
+          path: |
+            /tmp/base.log
+            /tmp/head.log
+          if-no-files-found: ignore
