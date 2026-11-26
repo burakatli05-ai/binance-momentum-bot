@@ -7443,8 +7443,13 @@ async def _at_place_market_entry(session, symbol: str, qty: float, position_side
         # A local admission rejection proves this request was never sent.
         raise
     except Exception as e:
-        # Never blind-retry an uncertain order. Query the unique client id first.
-        q = await _at_query_order_by_client(session, symbol, client_id)
+        # After possible dispatch, keep reconciliation on the management lane.
+        # Only an explicit local rejection above proves the order was not sent.
+        recovery_token = _binance_new_entry.set(False)
+        try:
+            q = await _at_query_order_by_client(session, symbol, client_id)
+        finally:
+            _binance_new_entry.reset(recovery_token)
         if q and str(q.get("status")) in ("NEW","PARTIALLY_FILLED","FILLED"):
             return q
         raise e
@@ -7693,11 +7698,15 @@ async def autotrade_handle_premium(session, signal_id: int, symbol: str, m: dict
         # Configure only an empty symbol; manual/open symbols were blocked above.
         try:
             await binance_signed_request(session,"POST","/fapi/v1/leverage",{"symbol":symbol,"leverage":lev})
+        except binance_rest_guard.RateLimitBlocked:
+            raise
         except Exception as e:
             raise RuntimeError(f"Leverage ayarlanamadı: {e}")
         if str(autotrade_cfg["margin_type"]).upper() in ("ISOLATED","CROSSED"):
             try:
                 await binance_signed_request(session,"POST","/fapi/v1/marginType",{"symbol":symbol,"marginType":str(autotrade_cfg['margin_type']).upper()})
+            except binance_rest_guard.RateLimitBlocked:
+                raise
             except Exception as e:
                 # Binance -4046: no need to change margin type. Treat as benign.
                 if "-4046" not in str(e): log.warning("AutoTrade marginType %s: %r",symbol,e)
